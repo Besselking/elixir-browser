@@ -111,6 +111,37 @@ defmodule Browser.JSGCTest do
     |> Task.await()
   end
 
+  # A map that is not an object record: the walk follows its keys and its values, but an
+  # integer key is an array index, not an id. So a reference that is only a key keeps its
+  # object alive, and an index (of a sparse array, or of any other map) that equals the id
+  # of an object that nothing holds does not keep it alive.
+  test "walks the keys of a map, but not its integer keys" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+
+      {:obj, held} = Interp.new_object([{"x", 1.0}])
+      {:obj, dead} = Interp.new_object([{"y", 2.0}])
+      {:obj, dead2} = Interp.new_object([{"z", 3.0}])
+      Process.put({:gc_test_map, 1}, %{{:obj, held} => 1.0, dead => 2.0})
+
+      {:ok, p} = Parser.parse("var a = []; a[#{dead2}] = 'x'; a.length")
+      assert Interp.run_program(p) == dead2 + 1.0
+      {:ok, {:obj, aid}} = Interp.lookup_scoped(Interp.global(), "a")
+      # (the elements are in a map, with the index as its key)
+      refute Elems.dense?(Interp.deref(aid))
+
+      GC.collect()
+      assert is_map(:erlang.get(held))
+      assert :erlang.get(dead) == :undefined
+      assert :erlang.get(dead2) == :undefined
+
+      {:ok, p} = Parser.parse("a[#{dead2}] + a.length")
+      assert Interp.run_program(p) == "x#{dead2 + 1}"
+    end)
+    |> Task.await()
+  end
+
   # The own-property fields of an object record also hold integers that are not heap ids:
   # the place of a key that is not enumerable among the enumerable names is a count. Such a
   # count must not keep the object with that id alive. The loop makes the count equal to the

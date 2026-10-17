@@ -1426,8 +1426,7 @@ defmodule Browser.JS.Compile do
 
   # `x op= v` to a slot, as `compound_assign/5` does it: one hop, the read with its test
   # of the temporal dead zone, the value, the operator, then the write. The result is the
-  # write joined with the value by `&&`, as in `compound_assign/5`. `+`, `-` and `*`
-  # compute two floats inline.
+  # new value, as in `compound_assign/5`. `+`, `-` and `*` compute two floats inline.
   for op <- ["+", "-", "*"] do
     defp compound_slot(unquote(op), d, i, name, vo) do
       form = {:slot, 0, i, name}

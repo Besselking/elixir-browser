@@ -209,7 +209,17 @@ defmodule Browser.JS.CompileTest do
     {"live frames loop",
      ~S|var fs = []; function mk(){ for (let i = 0; i < 3; i++) { let o = {i}; fs.push(() => o.i) } } mk(); var t = fs.map(f => f()).join(); mk(); console.log(t, fs.map(f => f()).join())|},
     {"live counter",
-     ~S|function counter(){ var c = 0; return { inc(){ return ++c }, get v(){ return c } } } var a = counter(); a.inc(); var b = counter(); b.inc(); b.inc(); console.log(a.v, b.v, a.inc())|}
+     ~S|function counter(){ var c = 0; return { inc(){ return ++c }, get v(){ return c } } } var a = counter(); a.inc(); var b = counter(); b.inc(); b.inc(); console.log(a.v, b.v, a.inc())|},
+    # The writes of a slot that the compiled code makes inline. `x op= v` gives the new
+    # value for every operator, and an assignment in the dead zone names its binding.
+    {"op= slot value",
+     ~S"function f(){ var x = 8, s = []; s.push(x /= 2, x %= 3, x **= 3, x <<= 2, x >>= 1, x >>>= 1, x |= 5, x &= 6, x ^= 3, x -= 1, x *= 3, x += 'a'); var y = 2; var z = (y **= 2) + (y /= 2); return s.join() + ':' + x + ':' + z } console.log(f())"},
+    {"tdz assign names",
+     ~S|function f(){ var m = []; try { q = 1; let q } catch (e) { m.push(e.message) } try { (() => { s = 2 })(); let s } catch (e) { m.push(e.message) } return m.join('/') } console.log(f())|},
+    # A declaration reads its frame after its value, which can write the same frame: at
+    # depth 0, and at depth 1 from the frame of a loop or of a block.
+    {"decl after value",
+     ~S|function f(){ var y = 1; var x = (y = 2, 3); let z = (x += 1, y += 10, x * y); const w = (() => { z = 0; return y })(); var out = [x, y, z, w]; for (const k of [5]) { var a = 1; var b = (a = k, a + 1); let g = () => k; out.push(a, b, g()) } { let c = 0; var h = () => c; var d = (c = 7, y = 1, c + y); out.push(d, h(), y) } return out.join() } console.log(f())|}
   ]
 
   # One snippet for each kind that the compiler handles, and one for each kind that falls

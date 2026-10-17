@@ -1009,6 +1009,21 @@ defmodule Browser.LayoutTest do
       assert above.(raised) - above.(plain) == 15
     end
 
+    # (a lowered big text can start at the same top as the small texts around it: the line ends
+    # at the bottom of the big one, whatever their order)
+    test "the baseline of an inline-block is the lowest bottom of the texts at the top of its last line" do
+      box = fn last ->
+        ~s(<div>x <span style="display:inline-block">line one<br>#{last}</span> y</div>)
+      end
+
+      big = ~s(<span style="font-size:32px;vertical-align:-12px">B</span>)
+      {alone, _} = rb(box.(big))
+      {among, _} = rb(box.("s #{big} t"))
+      assert wr(among, "s").y == wr(among, "B").y
+      assert wr(among, "t").y == wr(among, "B").y
+      assert wr(among, "x").y == wr(alone, "x").y
+    end
+
     test "centered text doesn't inflate a shrink-to-fit unit" do
       html =
         ~s(<span style="display:inline-block; text-align:center; background:#eee">tiny</span>)

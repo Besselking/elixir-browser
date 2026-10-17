@@ -2223,4 +2223,24 @@ defmodule Browser.JSTest do
 
     assert js(src) == "3"
   end
+
+  # The parser looks for `arguments` and `super` in every part of a function, also in the
+  # first element of a node that has no tag: the pattern of a `var` is the first element of
+  # the pair `{pattern, value}`.
+  test "arguments and super in the default value of a declared pattern are early errors" do
+    for src <- [
+          "class C { static { var [a = arguments] = []; } }",
+          "class C { static { var {a = arguments} = {}; } }",
+          "class C { x = () => { var [a = arguments] = []; } }",
+          "class C { x = () => { for (var [a = arguments] of []) ; } }",
+          "class C { x = () => { try {} catch ([e = arguments]) {} } }",
+          "function f() { var [a = super.x] = []; }",
+          "({ m() { var [a = super()] = []; } })"
+        ] do
+      assert {^src, {:error, {:syntax, _}, _}} = {src, JS.eval(src)}
+    end
+
+    # (inside a function that is not an arrow, `arguments` is its own)
+    assert js("class C { static { var f = function(){ var [a = arguments] = [] } } } 1") == 1.0
+  end
 end
