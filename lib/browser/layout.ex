@@ -382,7 +382,18 @@ defmodule Browser.Layout do
     t0 = System.monotonic_time(:microsecond)
     ops = nodes |> walk(style, []) |> Enum.reverse() |> trim_line_end_spaces()
     t1 = System.monotonic_time(:microsecond)
-    {items, height} = place(ops, width, measure, view_height, opts[:images], margin)
+    # (the young heap grows with what the place keeps, see `tune_young_heap/0`)
+    {:garbage_collection, gc} = Process.info(self(), :garbage_collection)
+    Process.put(:layout_young, gc[:min_heap_size])
+
+    {items, height} =
+      try do
+        place(ops, width, measure, view_height, opts[:images], margin)
+      after
+        Process.delete(:layout_young)
+        :erlang.process_flag(:min_heap_size, gc[:min_heap_size])
+      end
+
     Process.delete(:layout_transforms)
 
     if System.get_env("LAYOUT_TIMES"),
@@ -1110,7 +1121,7 @@ defmodule Browser.Layout do
         sub = [] |> ops.() |> Enum.reverse()
 
         spec = %{
-          key: atom_key(nid_of(attrs), sub),
+          key: walked_key(nid_of(attrs), {:float_picture, el, style}),
           width: nil,
           minw: nil,
           maxw: nil,
@@ -1539,7 +1550,7 @@ defmodule Browser.Layout do
       border_box? = c["box-sizing"] == "border-box"
 
       spec = %{
-        key: atom_key(nid_of(attrs), sub),
+        key: walked_key(nid_of(attrs), {:abs, el, c, parent_style}),
         top: c["top"],
         left: c["left"],
         right: c["right"],
@@ -1922,7 +1933,11 @@ defmodule Browser.Layout do
       end)
 
     spec = %{
-      key: atom_key(nid_of(attrs), sub),
+      key:
+        walked_key(
+          nid_of(attrs),
+          {:inline_block, {:element, tag, attrs, kids}, c, parent_style, block?, table?, gapped?}
+        ),
       width: dim(c["width"]),
       # `min-content` / `max-content`: the narrowest / widest the content can be
       sizing: if(c["width"] in [:minc, :maxc] or fitc?(c["width"]), do: c["width"]),
@@ -2895,11 +2910,7 @@ defmodule Browser.Layout do
   defp kept_walk({:element, _tag, attrs, _kids} = node, parent_style, what, fun) do
     with table when table != nil <- Process.get(:layout_walk),
          nid when nid != nil <- nid_of(attrs) do
-      ctx =
-        {containing_width(), what, Process.get(:layout_definite), Process.get(:layout_intrinsic),
-         Process.get(:layout_flex_item)}
-
-      key = {nid, ctx}
+      key = {nid, walk_ctx(what)}
       gen = Process.get(:layout_gen)
 
       case table do
@@ -2918,6 +2929,12 @@ defmodule Browser.Layout do
     else
       _ -> fun.()
     end
+  end
+
+  # what the walk of an element reads besides the element and the style it inherits
+  defp walk_ctx(what) do
+    {containing_width(), what, Process.get(:layout_definite), Process.get(:layout_intrinsic),
+     Process.get(:layout_flex_item)}
   end
 
   defp walk_miss(node, parent_style, key, gen, fun) do
@@ -2962,6 +2979,17 @@ defmodule Browser.Layout do
   # here so that the memo does not hash the content again on every lookup. The content carries
   # every value resolved against the containing width.
   defp atom_key(nid, sub), do: Tuple.insert_at(wkey(nid), 3, ops_hash(sub))
+
+  # The key of an atom made by the walk of an element (a flex item, a cell, an inline-block, an
+  # absolutely positioned box, a floated picture): its walk key and a hash of what that walk
+  # read, in place of a hash of the ops it made. `inputs` holds the element and what the caller
+  # gave the walk with it (the style it inherits, its computed values, flags); the rest is
+  # `walk_ctx/1`. The same inputs give the same ops (as `kept_walk/4` takes them), and they are
+  # much smaller than the ops: every word op holds its style, and `phash2` hashes the style
+  # again for each word. (A flex item with a long text: an element of 80 K words made ops of
+  # 14 M words, which took 80 ms to hash)
+  defp walked_key(nid, inputs),
+    do: Tuple.insert_at(wkey(nid), 3, :erlang.phash2({inputs, walk_ctx(nil)}))
 
   # A hash of ops in which a table counts by the key of its model, and a nested inline-block,
   # float or flex item by its own key: each key holds a hash of that content already. (A
@@ -4157,6 +4185,7 @@ defmodule Browser.Layout do
   # A span placed before, with the same ops and in a state that it reads the same, is placed
   # again from what it placed then (its fragment), moved to where it starts now.
   defp op({:span, key, ops, safe?}, st) do
+    tune_young_heap()
     frags = Process.get(:layout_frags)
 
     if frags != nil and safe? and span_state_ok?(st),
@@ -6876,8 +6905,31 @@ defmodule Browser.Layout do
           _ ->
             value = fun.()
             Process.put(:layout_memo, Map.put(Process.get(:layout_memo), key, {gen, sub, value}))
+            tune_young_heap()
             value
         end
+    end
+  end
+
+  # The Erlang collector copies everything alive twice: out of a full young heap, then into the
+  # old heap. What a big layout keeps while it places (the memo, the fragments, the items of a
+  # long scroller) can grow to many times the young heap the process started with, and then
+  # each collection copies all of it, many times over. So the young heap grows with what is
+  # alive (what the old heap holds and what the last collection kept in the young one): to four
+  # times that, at most @max_young words (128 MB). It is checked at each span and after each
+  # sub-layout, and the process gets back the young heap it had when the place ends
+  # (`run_layout/6`).
+  @max_young 16_000_000
+
+  defp tune_young_heap do
+    with young when young != nil <- Process.get(:layout_young) do
+      {:garbage_collection_info, gc} = Process.info(self(), :garbage_collection_info)
+      target = min(4 * (gc[:old_heap_size] + gc[:recent_size]), @max_young)
+
+      if target > young * 5 / 4 do
+        :erlang.process_flag(:min_heap_size, target)
+        Process.put(:layout_young, target)
+      end
     end
   end
 
@@ -9431,7 +9483,7 @@ defmodule Browser.Layout do
     {sub, key} =
       kept_walk(el, style, :flex_item, fn ->
         sub = build.(%{})
-        {sub, atom_key(nid_of(attrs), sub)}
+        {sub, walked_key(nid_of(attrs), {:flex_item, el, style})}
       end)
 
     %{
@@ -11323,7 +11375,7 @@ defmodule Browser.Layout do
     {sub, key} =
       kept_walk(node, style, :cell, fn ->
         sub = build.(%{})
-        {sub, atom_key(nid_of(attrs), sub)}
+        {sub, walked_key(nid_of(attrs), {:cell, node, style})}
       end)
 
     %{

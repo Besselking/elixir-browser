@@ -562,6 +562,31 @@ defmodule Browser.JS.RegExp do
 
   # ── matching ───────────────────────────────────────────────
 
+  # `:re.run/3` with a memo of the results for short subjects. A page runs the same few
+  # patterns over the same short texts again and again (a class name, an event type, a
+  # selector), and each run of the engine costs more than a lookup. The result depends on
+  # the pattern, the subject and the options only. The memo holds at most @re_memo entries,
+  # and it starts again when it is full.
+  @re_memo 512
+  defp run_re(s, re, opts) when byte_size(s) <= 64 do
+    key = {re, s, opts}
+    memo = :erlang.get(:js_re_memo)
+    memo = if memo == :undefined, do: %{}, else: memo
+
+    case memo do
+      %{^key => r} ->
+        r
+
+      _ ->
+        r = :re.run(s, re, opts)
+        memo = if map_size(memo) >= @re_memo, do: %{}, else: memo
+        :erlang.put(:js_re_memo, Map.put(memo, key, r))
+        r
+    end
+  end
+
+  defp run_re(s, re, opts), do: :re.run(s, re, opts)
+
   # The engine's match at or after the code point index `from`: nil, or `[{start, length} | groups]`
   # in bytes. `capture` is what the engine gives back (`:all`, or `:first` for the whole match
   # alone).
@@ -569,7 +594,7 @@ defmodule Browser.JS.RegExp do
     from_byte = if from == 0, do: 0, else: byte_of(subject, from)
 
     # (a lone surrogate is as many bytes as U+FFFD: the engine sees that, positions agree)
-    case :re.run(Str.well_formed(subject), re, [{:capture, capture, :index}, {:offset, from_byte}]) do
+    case run_re(Str.well_formed(subject), re, [{:capture, capture, :index}, {:offset, from_byte}]) do
       {:match, [{start, _} | _] = m} when not sticky? or start == from_byte -> m
       _ -> nil
     end
@@ -1025,7 +1050,7 @@ defmodule Browser.JS.RegExp do
 
       # (one search for all the matches; after an empty match the engine goes on in its own
       # way, so then the search goes again as the protocol does it)
-      case :re.run(s, re, [:global, {:capture, :all, :index}]) do
+      case run_re(s, re, [:global, {:capture, :all, :index}]) do
         {:match, ms} ->
           if Enum.any?(ms, fn [{_, len} | _] -> len == 0 end),
             do: scan_loop(re, s, String.contains?(fl, ["u", "v"]), 0, []),
@@ -1073,7 +1098,7 @@ defmodule Browser.JS.RegExp do
     size = byte_size(s)
 
     # (one search for all the matches: the engine checks the whole text each time it is called)
-    case :re.run(wf, re, [:global, {:capture, :all, :index}]) do
+    case run_re(wf, re, [:global, {:capture, :all, :index}]) do
       {:match, matches} ->
         if Enum.any?(matches, fn [{_, len} | _] -> len == 0 end) do
           scan_split(re, count, s, wf, size, lim, 0, 0, [], 0)
@@ -1230,7 +1255,7 @@ defmodule Browser.JS.RegExp do
           :slow
 
         true ->
-          case :re.run(s, deref(elem(rx, 1)).re, [{:capture, :all, :index}]) do
+          case run_re(s, deref(elem(rx, 1)).re, [{:capture, :all, :index}]) do
             {:match, m} -> {:ok, [m]}
             :nomatch -> {:ok, []}
           end

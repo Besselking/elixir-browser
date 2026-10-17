@@ -80,4 +80,45 @@ defmodule Browser.JSJsonTest do
            log.join() + " " + JSON.stringify(o)
            """) == ~s(1,0,c,b,a, {"1":3,"b":{"0":2},"a":"A\\n"})
   end
+
+  # A plain run of `Json.string/2` and of `Json.escape/2` takes whole UTF-8 characters of 2, 3
+  # and 4 bytes. A quote, a backslash, a control character, an escape and a lone surrogate end
+  # the run.
+  test "strings with characters of 1 to 4 bytes, escapes and lone surrogates" do
+    stringified = [
+      ~S("é"),
+      ~S("aéb"),
+      "\"\u0080߿ࠀ￿\u{10000}\u{10ffff}\"",
+      ~S("中文😀x"),
+      ~S("é\"ж"),
+      ~S("ж\\"),
+      ~S("é\nж\u001f"),
+      ~S("\ud800"),
+      ~S("é\ud800ж"),
+      ~S("\udc00中"),
+      ~S("😀\ud83d")
+    ]
+
+    assert js(~S"""
+           var xs = ["é", "aéb", "\u0080߿ࠀ￿\u{10000}\u{10ffff}", "中文😀x", "é\"ж",
+                     "ж\\", "é\nж\u001f", "\ud800", "é\ud800ж", "\udc00中", "😀\ud83d"];
+           var out = xs.map(function (s) { return JSON.stringify(s) });
+           out.push(xs.every(function (s) { return JSON.parse(JSON.stringify(s)) === s }));
+           var o = JSON.parse('{"ключ":"зн\\u00e9ч","😀":["中\\n","é\\"ж","\\ud83d\\ude00ж"]}');
+           out.push(Object.keys(o).join(), o["ключ"], o["😀"].join("|"));
+           out.join(" ")
+           """) == Enum.join(stringified ++ ["true", "ключ,😀", "знéч", "中\n|é\"ж|😀ж"], " ")
+  end
+
+  # The string of a JSON text that is all one run of characters points into the text, so a
+  # long one is copied, as a long ASCII string is.
+  test "a long string of non-ASCII characters from JSON.parse does not keep the JSON text" do
+    Interp.init(1_000_000)
+    Builtins.install()
+    long = String.duplicate("жé中😀", 10)
+    text = ~s({"k":"#{long}","pad":"#{String.duplicate("z", 100_000)}"})
+    v = Interp.get(Json.parse(text, :undefined), "k")
+    assert v == long
+    assert :binary.referenced_byte_size(v) == byte_size(long)
+  end
 end

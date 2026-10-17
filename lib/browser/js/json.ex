@@ -229,13 +229,9 @@ defmodule Browser.JS.Json do
     end
   end
 
-  # A run of plain bytes goes into the result as one piece. The run gives the same string as the
-  # clauses for one character.
-  defp string(<<c, _::binary>> = s, acc) when is_plain(c) do
-    n = plain_len(s, 0)
-    <<run::binary-size(^n), r::binary>> = s
-    string(r, [run | acc])
-  end
+  # A run of plain bytes and whole UTF-8 characters goes into the result as one piece. The run
+  # gives the same string as the clauses for one character.
+  defp string(<<c, _::binary>> = s, acc) when is_plain(c), do: string_run(s, acc)
 
   # A long run alone points into the whole JSON text. Copy it, so that the string does not keep
   # the text in memory. (A short run is a copy already.)
@@ -260,12 +256,24 @@ defmodule Browser.JS.Json do
   end
 
   defp string(<<c, _::binary>> = s, _) when c < 0x20, do: syntax_error(s)
-  defp string(<<c::utf8, r::binary>>, acc), do: string(r, [<<c::utf8>> | acc])
+  defp string(<<_::utf8, _::binary>> = s, acc), do: string_run(s, acc)
   defp string(<<_, r::binary>>, acc), do: string(r, ["�" | acc])
   defp string("", _), do: syntax_error("")
 
-  defp plain_len(<<c, r::binary>>, n) when is_plain(c), do: plain_len(r, n + 1)
-  defp plain_len(_, n), do: n
+  defp string_run(s, acc) do
+    n = text_len(s, 0)
+    <<run::binary-size(^n), r::binary>> = s
+    string(r, [run | acc])
+  end
+
+  # The length of the run of plain bytes and whole UTF-8 characters at the start of a binary:
+  # the bytes that a JSON string and its JSON text hold the same way. (`<<c::utf8>>` takes no
+  # surrogate, so a lone surrogate ends the run.)
+  defp text_len(<<c, r::binary>>, n) when is_plain(c), do: text_len(r, n + 1)
+  defp text_len(<<c::utf8, r::binary>>, n) when c >= 0x80 and c < 0x800, do: text_len(r, n + 2)
+  defp text_len(<<c::utf8, r::binary>>, n) when c >= 0x800 and c < 0x10000, do: text_len(r, n + 3)
+  defp text_len(<<c::utf8, r::binary>>, n) when c >= 0x10000, do: text_len(r, n + 4)
+  defp text_len(_, n), do: n
 
   defp unicode_escape(r, acc) do
     {hi, r} = hex4(r)
@@ -586,12 +594,9 @@ defmodule Browser.JS.Json do
 
   defp escape("", acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 
-  # a run of plain bytes needs no escape and goes into the result as one piece
-  defp escape(<<c, _::binary>> = s, acc) when is_plain(c) do
-    n = plain_len(s, 0)
-    <<run::binary-size(^n), r::binary>> = s
-    escape(r, [run | acc])
-  end
+  # a run of plain bytes and whole UTF-8 characters needs no escape and goes into the result as
+  # one piece
+  defp escape(<<c, _::binary>> = s, acc) when is_plain(c), do: escape_run(s, acc)
 
   defp escape("\"" <> r, acc), do: escape(r, ["\\\"" | acc])
   defp escape("\\" <> r, acc), do: escape(r, ["\\\\" | acc])
@@ -607,7 +612,7 @@ defmodule Browser.JS.Json do
   end
 
   defp escape(<<c, r::binary>>, acc) when c < 0x80, do: escape(r, [<<c>> | acc])
-  defp escape(<<c::utf8, r::binary>>, acc), do: escape(r, [<<c::utf8>> | acc])
+  defp escape(<<_::utf8, _::binary>> = s, acc), do: escape_run(s, acc)
 
   # a lone surrogate (three bytes, `ED A0..BF xx`) is written as an escape
   defp escape(<<0xED, b2, b3, r::binary>>, acc) when b2 >= 0xA0 do
@@ -616,4 +621,10 @@ defmodule Browser.JS.Json do
   end
 
   defp escape(<<_, r::binary>>, acc), do: escape(r, ["�" | acc])
+
+  defp escape_run(s, acc) do
+    n = text_len(s, 0)
+    <<run::binary-size(^n), r::binary>> = s
+    escape(r, [run | acc])
+  end
 end

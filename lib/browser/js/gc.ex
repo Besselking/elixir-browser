@@ -101,6 +101,9 @@ defmodule Browser.JS.GC do
           # (the count of the code cache holds two integers, which are not heap ids)
           {:jsc_budget, _}, acc -> acc
           {:js_memo, _}, acc -> acc
+          # (the memo of the regular expressions holds patterns, texts and byte positions,
+          # see `Browser.JS.RegExp`)
+          {:js_re_memo, _}, acc -> acc
           {:js_freed, _}, acc -> acc
           # (the call chain holds names, positions and depths, never an id; a depth or a
           # line that equals the id of a dead object must not keep it alive)
@@ -233,6 +236,7 @@ defmodule Browser.JS.GC do
           {{:jsc, _}, _}, roots -> roots
           {:jsc_budget, _}, roots -> roots
           {:js_memo, _}, roots -> roots
+          {:js_re_memo, _}, roots -> roots
           {:js_freed, _}, roots -> roots
           # (the call chain holds names, positions and depths, never an id)
           {:js_stack, _}, roots -> roots
