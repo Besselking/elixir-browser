@@ -194,6 +194,93 @@ defmodule Browser.JS.DOMApisTest do
     assert logs == ["1 2 2 2 1 1 1 1 1 0 1 1"]
   end
 
+  # The script finds the position of each element by its own walk of `childNodes` and compares
+  # what `matches`, `querySelectorAll` and `closest` give with the an+b formula. The siblings
+  # include text, comments and other tags; the parents are an element, a template's content, a
+  # shadow root, a fragment, a detached element, and no parent at all.
+  test ":nth-child and its kin agree with a count of the siblings in all kinds of parents" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const forms = ["1", "2", "3", "odd", "even", "2n+1", "-n+3", "-2n+5", "n", "3n-1", "0n+2", " 2n + 1 "];
+        const kinds = [["nth-child", false, false], ["nth-last-child", true, false],
+                       ["nth-of-type", false, true], ["nth-last-of-type", true, true]];
+        function anb(f) {
+          f = f.replace(/\s+/g, "");
+          if (f === "odd") return [2, 1];
+          if (f === "even") return [2, 0];
+          const m = /^([+-]?\d*)n([+-]\d+)?$/.exec(f);
+          if (!m) return [0, parseInt(f, 10)];
+          const a = m[1] === "" || m[1] === "+" ? 1 : m[1] === "-" ? -1 : parseInt(m[1], 10);
+          return [a, m[2] ? parseInt(m[2], 10) : 0];
+        }
+        function hit(p, [a, b]) { return a === 0 ? p === b : (p - b) % a === 0 && (p - b) / a >= 0; }
+        function pos(el, fromEnd, sameType, of) {
+          const p = el.parentNode;
+          if (!p) return 1;
+          let sibs = Array.from(p.childNodes).filter((n) =>
+            n.nodeType === 1 && (!sameType || n.localName === el.localName) && (!of || n.matches(of)));
+          if (fromEnd) sibs.reverse();
+          return sibs.indexOf(el) + 1;
+        }
+        const items = "t<!--c--><li class=x><b>1</b></li><p></p> <li><b>2</b></li><li class=x><b>3</b></li>" +
+          "<!--c--><span></span><li class=x><b>4</b></li>t<li><b>5</b></li><p class=x></p><li><b>6</b></li>";
+        const ul = document.getElementById("l");
+        ul.innerHTML = items;
+        const tpl = document.createElement("template");
+        tpl.innerHTML = items;
+        const host = document.createElement("div");
+        document.body.appendChild(host);
+        const shadow = host.attachShadow({ mode: "open" });
+        for (const n of Array.from(ul.cloneNode(true).childNodes)) shadow.appendChild(n);
+        const frag = document.createDocumentFragment();
+        for (const n of Array.from(ul.cloneNode(true).childNodes)) frag.appendChild(n);
+        const loose = document.createElement("ul");
+        loose.innerHTML = items;
+        const lone = document.createElement("li");
+        let checked = 0;
+        const wrong = [];
+        const check = (what, got, want) => { checked++; if (got !== want) wrong.push(what + " " + got); };
+        const roots = [["page", ul], ["template", tpl.content], ["shadow", shadow], ["fragment", frag], ["loose", loose]];
+        for (const [name, root] of roots) {
+          const all = Array.from(root.querySelectorAll("*")).concat(root === loose ? [loose] : []);
+          for (const [kind, fromEnd, sameType] of kinds) {
+            for (const f of forms) {
+              const sel = ":" + kind + "(" + f + ")";
+              const want = all.filter((el) => hit(pos(el, fromEnd, sameType), anb(f)));
+              for (const el of all) check(name + " " + el.localName + sel, el.matches(sel), want.includes(el));
+              const found = Array.from(root.querySelectorAll(sel));
+              const inside = want.filter((el) => el !== loose);
+              check(name + " all" + sel, found.length === inside.length && found.every((el, i) => el === inside[i]), true);
+              for (const b of root.querySelectorAll("b")) {
+                const li = b.parentNode;
+                check(name + " closest" + sel, b.closest("li" + sel), want.includes(li) ? li : null);
+              }
+            }
+          }
+          for (const [kind, fromEnd] of [["nth-child", false], ["nth-last-child", true]]) {
+            for (const f of ["1", "2", "odd", "-n+2"]) {
+              const sel = ":" + kind + "(" + f + " of .x)";
+              for (const el of all) {
+                const want = el.matches(".x") && hit(pos(el, fromEnd, false, ".x"), anb(f));
+                check(name + " " + el.localName + sel, el.matches(sel), want);
+              }
+            }
+          }
+        }
+        for (const [kind] of kinds) {
+          check("lone " + kind, lone.matches(":" + kind + "(1)"), true);
+          check("lone " + kind + " 2", lone.matches(":" + kind + "(2)"), false);
+        }
+        console.log(checked, wrong.length, wrong.slice(0, 5).join("; "));
+        """,
+        ~S|<ul id=l></ul>|
+      )
+
+    assert errors == []
+    assert logs == ["5944 0 "]
+  end
+
   test "attributes that start with @ stay visible to scripts" do
     {logs, errors} =
       run(

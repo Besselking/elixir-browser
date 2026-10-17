@@ -1074,6 +1074,60 @@ defmodule Browser.StyleTest do
       assert colors == [@green, {255, 0, 0}, @green]
     end
 
+    defp p_colors(css, html, tag \\ "p") do
+      page = Page.build("<style>#{css}</style>" <> html, "about:test")
+
+      page.nodes
+      |> Stream.flat_map(&flatten/1)
+      |> Enum.flat_map(fn
+        {:element, ^tag, attrs, _} ->
+          [attrs |> List.keyfind("@computed", 0) |> elem(1) |> Map.get("color")]
+
+        _ ->
+          []
+      end)
+    end
+
+    @red {255, 0, 0}
+    @blue {0, 0, 255}
+
+    test "the same names with other values under one parent give other values" do
+      css = ".x { --c: green; color: var(--c) } .y { --c: red; color: var(--c) }"
+      html = "<div><p class=x>a</p><p class=y>b</p><p class=x>c</p><p class=y>d</p></div>"
+      assert p_colors(css, html) == [@green, @red, @green, @red]
+    end
+
+    test "a chain of var() fallbacks takes the first value that the parent's set has" do
+      css =
+        ".a { --c: green } .b { --e: blue } p { --d: var(--c, var(--e, red)); color: var(--d) }"
+
+      html = "<div class=a><p>1</p></div><div class=b><p>2</p></div><div><p>3</p></div>"
+      html = html <> "<div class='a b'><p>4</p></div><div class=b><p>5</p></div>"
+      assert p_colors(css, html) == [@green, @blue, @red, @green, @blue]
+    end
+
+    test "a child that declares nothing has the set of its parent" do
+      # (each `p` declares the same `--z` under another parent; each `span` declares nothing)
+      css = ".a { --c: green } .b { --c: blue } p { --z: 1 } span { color: var(--c, red) }"
+      html = "<div class=a><p><span>1</span></p></div><div class=b><p><span>2</span></p></div>"
+      html = html <> "<div><p><span>3</span></p></div><div class=a><p><span>4</span></p></div>"
+      assert p_colors(css, html, "span") == [@green, @blue, @red, @green]
+    end
+
+    test "inherit, and a registered property that does not inherit, follow the parent" do
+      css = """
+      @property --r { syntax: "*"; inherits: false; initial-value: red }
+      .a { --c: green; --r: green } .b { --c: blue; --r: blue }
+      p { --d: inherit; --c: inherit; color: var(--c) }
+      span { color: var(--r) }
+      """
+
+      html = "<div class=a><p>1<span>s</span></p></div><div class=b><p>2<span>t</span></p></div>"
+      assert p_colors(css, html) == [@green, @blue]
+      # (`--r` does not inherit: the `span` has the initial value, not the one of `.a` or `.b`)
+      assert p_colors(css, html, "span") == [@red, @red]
+    end
+
     test "var is case-insensitive" do
       assert p_color("p { --a: green; color: VAR(--a) }") == @green
     end
@@ -1229,6 +1283,51 @@ defmodule Browser.StyleTest do
     assert warm == Style.prune(changed, idx)
     again = parse.(~s(<p class="y">b</p>))
     assert elem(Style.prune(again, idx, memo), 0) == Style.prune(again, idx)
+  end
+
+  # The value of `--c` on the root changes in each run, and the elements below declare the same
+  # in each run. A run that takes the memo of the run before gives what a run without a memo
+  # gives.
+  test "a custom property of the root that changes between runs reaches the elements below" do
+    css = "p { --d: var(--c); color: var(--d) } i { --e: var(--d) x; width: var(--w, 1px) }"
+    idx = Style.index([{:ua, Style.ua_css()}, {:author, css}])
+
+    parse = fn c ->
+      ~s(<html style="--c: #{c}"><body><div><p>a<i>b</i></p></div><p>c</p></body></html>)
+      |> HTML.parse()
+      |> Browser.Nids.index()
+    end
+
+    Enum.reduce(["green", "red", "green", "blue", "red"], nil, fn c, memo ->
+      nodes = parse.(c)
+      {pruned, memo} = Style.prune(nodes, idx, memo)
+      assert pruned == Style.prune(nodes, idx)
+      memo
+    end)
+  end
+
+  # A set of custom properties that one run makes, the next run does not name (so the clean up
+  # of the memo's tables drops it), and a later run makes again, from the same parent set and
+  # declarations. Each run with the memo gives what a run without it gives.
+  test "a custom set that comes back after the memo dropped it is made again" do
+    idx = Style.index([{:ua, Style.ua_css()}, {:author, "span { width: var(--k) }"}])
+
+    parse = fn round, k, mark ->
+      (~s(<i class="k#{mark}"></i><p style="--k: #{k}px"><span>x</span></p><main>) <>
+         Enum.map_join(1..300, &~s(<div style="--r: #{round}; width: #{&1}px">x</div>)) <>
+         "</main>")
+      |> HTML.parse()
+      |> Browser.Nids.index()
+    end
+
+    rounds = [{0, 1, 0}, {1, 2, 1}, {2, 1, 2}, {3, 1, 2}, {4, 2, 3}, {5, 1, 4}, {5, 1, 4}]
+
+    Enum.reduce(rounds, nil, fn {round, k, mark}, memo ->
+      nodes = parse.(round, k, mark)
+      {pruned, memo} = Style.prune(nodes, idx, memo)
+      assert pruned == Style.prune(nodes, idx)
+      memo
+    end)
   end
 
   describe "style sharing" do

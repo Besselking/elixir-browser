@@ -2580,9 +2580,11 @@ defmodule Browser.JS.DOM do
         set_attr(nid, "id", to_str(v))
         :ok
 
+      # (a negative size keeps the size the canvas has)
       k when k in ["width", "height"] and n.tag == "canvas" ->
         num = to_num_or_zero(v)
-        set_attr(nid, k, Integer.to_string(if(num >= 0, do: trunc(num), else: canvas_size(n, k))))
+        num = if num >= 0, do: num, else: canvas_size(n, k)
+        set_attr(nid, k, Integer.to_string(trunc(num)))
         :ok
 
       "className" ->

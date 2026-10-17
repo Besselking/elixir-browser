@@ -575,6 +575,58 @@ defmodule Browser.JS.DOMTest do
              ]
     end
 
+    # The size of the bitmap is read from the PNG that `toDataURL` makes. It follows the
+    # attributes as `canvas.width` and `canvas.height` read them: a script's set (a negative
+    # value keeps the size), a set of the attribute, a value that is not a valid number, and a
+    # canvas of a frame's document. An own property that the page puts on the element does not
+    # change it.
+    test "the bitmap of a canvas has the size that its width and height give" do
+      lines =
+        run_page("""
+        function size(c) {
+          var b = atob(c.toDataURL("image/png").split(",")[1].slice(0, 32));
+          var u = function (o) { return b.charCodeAt(o) * 16777216 + b.charCodeAt(o + 1) * 65536 + b.charCodeAt(o + 2) * 256 + b.charCodeAt(o + 3); };
+          return u(16) + "x" + u(20) + " " + c.width + "x" + c.height;
+        }
+        var c = document.createElement("canvas");
+        var g = c.getContext("2d");
+        var out = [size(c)];
+        c.setAttribute("width", "  7px"); c.setAttribute("height", "3.9");
+        out.push(size(c));
+        c.width = 12.8; c.height = 5;
+        g.fillRect(0, 0, 1, 1);
+        out.push(size(c) + " " + c.getAttribute("width"));
+        c.width = -3;
+        out.push(size(c));
+        c.setAttribute("width", "-4"); c.setAttribute("height", "abc");
+        out.push(size(c));
+        c.removeAttribute("width"); c.height = 2;
+        g.translate(3, 4);
+        out.push(size(c) + " " + g.getTransform().e);
+        c.height = 3;
+        out.push(size(c) + " " + g.getTransform().e);
+        console.log(out.join(" | "));
+        var p = document.createElement("canvas");
+        p.width = 9; p.height = 8;
+        Object.defineProperty(p, "width", { value: 50 });
+        console.log(size(p));
+        var f = document.createElement("iframe");
+        document.body.appendChild(f);
+        var fc = f.contentDocument.createElement("canvas");
+        fc.width = 33; fc.height = 4;
+        f.contentDocument.body.appendChild(fc);
+        fc.getContext("2d").fillRect(0, 0, 2, 2);
+        console.log(size(fc));
+        """)
+
+      assert lines == [
+               "300x150 300x150 | 7x3 7x3 | 12x5 12x5 12 | 12x5 12x5 | 300x150 300x150 | " <>
+                 "300x2 300x2 3 | 300x3 300x3 0",
+               "9x8 9x8",
+               "33x4 33x4"
+             ]
+    end
+
     test "the drawing context keeps its state, and Path2D, gradients and measureText work" do
       lines =
         run_page("""
