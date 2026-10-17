@@ -3284,16 +3284,10 @@ defmodule Browser.JS.DOM do
   defp match_cond(n, {:pseudo, "last-of-type", _}), do: List.last(same_type_kids(n)) == n.id
   defp match_cond(n, {:pseudo, "only-of-type", _}), do: same_type_kids(n) == [n.id]
 
-  defp match_cond(n, {:pseudo, "nth-child", arg}), do: nth_match(n, arg, false, &kid_elements/1)
-
-  defp match_cond(n, {:pseudo, "nth-last-child", arg}),
-    do: nth_match(n, arg, true, &kid_elements/1)
-
-  defp match_cond(n, {:pseudo, "nth-of-type", arg}),
-    do: nth_match(n, arg, false, &same_type_kids/1)
-
-  defp match_cond(n, {:pseudo, "nth-last-of-type", arg}),
-    do: nth_match(n, arg, true, &same_type_kids/1)
+  defp match_cond(n, {:pseudo, "nth-child", arg}), do: nth_match(n, arg, false, false)
+  defp match_cond(n, {:pseudo, "nth-last-child", arg}), do: nth_match(n, arg, true, false)
+  defp match_cond(n, {:pseudo, "nth-of-type", arg}), do: nth_match(n, arg, false, true)
+  defp match_cond(n, {:pseudo, "nth-last-of-type", arg}), do: nth_match(n, arg, true, true)
 
   defp match_cond(n, {:pseudo, "has", arg}) when is_binary(arg) do
     arg
@@ -3380,7 +3374,8 @@ defmodule Browser.JS.DOM do
   end
 
   # `:nth-child(an+b)` and its kin: is the element at a position the formula gives?
-  defp nth_match(n, arg, from_end?, siblings_fun) do
+  # `same_type?` counts only the siblings with the tag of the element (`:nth-of-type`).
+  defp nth_match(n, arg, from_end?, same_type?) do
     {anb, of_sel} =
       memo({:nth, arg}, fn ->
         case String.split(arg || "", ~r/\s+of\s+/, parts: 2) do
@@ -3389,11 +3384,17 @@ defmodule Browser.JS.DOM do
         end
       end)
 
-    kids = siblings_fun.(n)
-    kids = if of_sel, do: Enum.filter(kids, &matches?(&1, of_sel)), else: kids
-    kids = if from_end?, do: Enum.reverse(kids), else: kids
+    index =
+      if of_sel do
+        kids = if same_type?, do: same_type_kids(n), else: kid_elements(n)
+        kids = Enum.filter(kids, &matches?(&1, of_sel))
+        kids = if from_end?, do: Enum.reverse(kids), else: kids
+        Enum.find_index(kids, &(&1 == n.id))
+      else
+        sibling_index(n, from_end?, if(same_type?, do: n.tag, else: :any))
+      end
 
-    case Enum.find_index(kids, &(&1 == n.id)) do
+    case index do
       nil ->
         false
 
@@ -3409,6 +3410,33 @@ defmodule Browser.JS.DOM do
           :error ->
             false
         end
+    end
+  end
+
+  # The index of the element `n` among the element children of its parent that have the tag
+  # `tag` (`:any`: all of them), from the end when `from_end?`, or nil: as the index of `n` in
+  # `kid_elements/1` or `same_type_kids/1`. The walk stops at `n`. A query asks
+  # `:nth-child(i)` of each candidate before the match, so a list of all the children for
+  # each candidate made a query on a long list slow (Speedometer's jQuery suite).
+  defp sibling_index(%{parent: nil}, _from_end?, _tag), do: 0
+  defp sibling_index(%{kind: kind}, _from_end?, _tag) when kind != :element, do: nil
+
+  defp sibling_index(n, from_end?, tag) do
+    kids = node(n.parent).kids
+    kids = if from_end?, do: Enum.reverse(kids), else: kids
+    count_before(kids, n.id, tag, 0)
+  end
+
+  defp count_before([], _nid, _tag, _i), do: nil
+  defp count_before([nid | _], nid, _tag, i), do: i
+
+  defp count_before([k | rest], nid, tag, i) do
+    case node(k) do
+      %{kind: :element, tag: t} when tag == :any or t == tag ->
+        count_before(rest, nid, tag, i + 1)
+
+      _ ->
+        count_before(rest, nid, tag, i)
     end
   end
 
