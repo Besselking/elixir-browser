@@ -6086,6 +6086,11 @@ defmodule Browser.JS.Interp do
     end)
   end
 
+  # The `var` names of code that runs once: a script, a module body, eval code. They are not
+  # remembered as `hoisted_names/1` does: its key is the whole body, so the syntax tree of
+  # each script would stay alive as long as the process, and each collection would copy it.
+  defp once_names(stmts), do: stmts |> var_names([]) |> Enum.uniq()
+
   # the `var` names of a body, remembered: walking the syntax tree on every call is costly
   defp hoisted_names(stmts) do
     key = {:js_hoist, stmts}
@@ -6200,9 +6205,10 @@ defmodule Browser.JS.Interp do
     # that could hide such a leak.
     caller_last = :erlang.put(:js_last, :undefined)
     scope = global()
+    names = once_names(stmts)
 
     if script? do
-      declare_globals(stmts)
+      declare_globals(stmts, names)
       g = deref(scope)
 
       vars =
@@ -6213,7 +6219,7 @@ defmodule Browser.JS.Interp do
       store(scope, %{g | vars: vars})
     end
 
-    hoist_vars(stmts, scope)
+    apply_hoist(scope, names, [])
     hoist_functions(stmts, scope)
     top_completion(exec_list(stmts, scope))
     # (the process dictionary reports a stored :undefined as missing, hence the default; the
@@ -6227,9 +6233,9 @@ defmodule Browser.JS.Interp do
   # GlobalDeclarationInstantiation: a script's `let`/`const`/class names may not collide with
   # an earlier script's declarations, nor `var`/function names with its lexical ones. What it
   # declares with `var` or `function` is a non-configurable property of the global object.
-  defp declare_globals(stmts) do
+  defp declare_globals(stmts, names) do
     lex = Enum.flat_map(stmts, &lexical_names/1)
-    vars = Enum.uniq(hoisted_names(stmts) ++ Enum.map(fundecls(stmts), &elem(&1, 0)))
+    vars = Enum.uniq(names ++ Enum.map(fundecls(stmts), &elem(&1, 0)))
     fixed = Process.get(:js_global_fixed) || MapSet.new()
     lexset = Process.get(:js_global_lex) || MapSet.new()
 
@@ -6242,7 +6248,7 @@ defmodule Browser.JS.Interp do
         MapSet.member?(lexset, n),
         do: throw_error("SyntaxError", "Identifier '#{n}' has already been declared")
 
-    check_global_declarable(hoisted_names(stmts), fundecls(stmts))
+    check_global_declarable(names, fundecls(stmts))
 
     # HasRestrictedGlobalProperty: a lexical name may not hide a non-configurable property
     g = Map.get(deref(global()).vars, :this)
@@ -6294,7 +6300,7 @@ defmodule Browser.JS.Interp do
   # declares what a module body brings into its scope: `var` names, `let`/`const`/class names
   # (uninitialized until their declaration runs) and function declarations
   def module_init(stmts, scope) do
-    hoist_vars(stmts, scope)
+    apply_hoist(scope, once_names(stmts), [])
 
     for stmt <- stmts, name <- lexical_names(unexport(stmt)), do: declare(scope, name, :tdz)
     declare(scope, :default_export, :tdz)
@@ -8874,11 +8880,12 @@ defmodule Browser.JS.Interp do
 
     s = deref(var_scope)
 
+    var_names = once_names(stmts)
+
     if not strict? and Map.has_key?(s.vars, :in_params) and Map.has_key?(s.vars, :args) and
-         "arguments" in hoisted_names(stmts),
+         "arguments" in var_names,
        do: throw_error("SyntaxError", "Identifier 'arguments' has already been declared")
 
-    var_names = hoisted_names(stmts)
     fun_decls = fundecls(stmts)
 
     # in a parameter expression a `var` may not take the name of a parameter
