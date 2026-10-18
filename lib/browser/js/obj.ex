@@ -135,11 +135,14 @@ defmodule Browser.JS.Obj do
     GetSetRecord (`%{obj, size, has, keys}`) holds the `keys` method of a set-like object.
     It is not a heap record.
 
-  The garbage collector (`Browser.JS.GC`) names no field. It walks every map generically,
-  but for a heap record (`heap_record?/1`) it skips the fields that `no_refs?/1` names,
+  The garbage collector (`Browser.JS.GC`) names no field. It matches the common forms of a
+  heap record (`heap_record?/1`) whole with the pattern `fast_whole/3` and the guard
+  `fast_whole?/2`. In a record of another form it skips the fields that `no_refs?/1` names,
   because the walk reads each integer as a heap id and these fields hold only keys,
   attributes and shapes (the id of a symbol, the `sid` of a shape and a position are
-  integers). It walks `vals`, which holds the values. The shadow run of `Browser.JS.Fast`
+  integers). It walks the values of the fields that `values_field?/1` names (`vals` and
+  `props`) as JS values: a JS value is never a bare heap id, so an integer there is a
+  number, not an id. The shadow run of `Browser.JS.Fast`
   compares two records by `normal/1`, which gives one form for the two modes. The other
   modules under `lib/browser` (layout, style, HTML, cookies, the console of the session)
   have their own `attrs` and `props`, but they never read a heap record, so the gate does
@@ -395,6 +398,34 @@ defmodule Browser.JS.Obj do
   could keep a dead object alive.
   """
   defguard no_refs?(field) when field in [:keys, :skeys, :syms, :attrs, :shape]
+
+  @doc """
+  Whether the field `field` of a heap record holds the values of the own properties:
+  `vals` (a tuple with the value at the position of each key of the shape) or `props` (a
+  map from the key to the value). It is a guard. A value is a JS value or an accessor
+  `{:accessor, getter, setter}`, never a bare heap id: so the garbage collector does not
+  read an integer in it as an id.
+  """
+  defguard values_field?(field) when field in [:vals, :props]
+
+  @doc """
+  The pattern of a whole fast record: the fields `class`, `proto`, `shape` and `vals`, and
+  the pairs of `more` (a keyword list of patterns, for example `fun: f`). `proto` and
+  `vals` bind the prototype and the tuple of the values (see `values_field?/1`). With the
+  guard `fast_whole?/2` the record has no other field. For the garbage collector, which
+  walks the common forms of a record whole, without a list of the fields.
+  """
+  defmacro fast_whole(proto, vals, more \\ []) do
+    quote do
+      %{unquote_splicing(more), class: _, proto: unquote(proto), shape: _, vals: unquote(vals)}
+    end
+  end
+
+  @doc """
+  Whether the fast record `o` has exactly `n` fields besides the four of `fast_whole/3`.
+  It is a guard.
+  """
+  defguard fast_whole?(o, n) when map_size(o) == n + 4
 
   @doc "Whether `o` is a record in fast mode."
   defguard fast?(o) when is_map_key(o, :shape)

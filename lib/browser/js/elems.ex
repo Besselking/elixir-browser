@@ -116,10 +116,11 @@ defmodule Browser.JS.Elems do
 
   ## The garbage collector
 
-  The collector (`Browser.JS.GC`) walks the tuple `vec` as any tuple: each element is a JS
-  value, and a JS value is never a frame or a shape, so the walk sees each element once.
-  A dense record has no `len`, so its length is not an integer that the walk reads as a
-  heap id.
+  The collector (`Browser.JS.GC`) walks the elements (the tuple `vec` of a dense record,
+  the map `items` of a sparse record, see `elements_field?/1`) as JS values: a JS value is
+  never a bare heap id, a frame or a shape, so the walk does not read an integer element
+  as an id. It matches a dense record whole with the pattern `dense/1`. It does not walk
+  the `len` of a sparse record (`no_refs?/1`): a length is not a heap id.
 
   The test of the walk of the tuple in the dangling scan of check mode is the test "walks
   the elements of a dense array, also in the dangling scan" in
@@ -147,6 +148,28 @@ defmodule Browser.JS.Elems do
 
   @doc "Whether the array record `o` is dense."
   defguard dense?(o) when is_map_key(o, :vec)
+
+  @doc """
+  The pattern of a dense record: `vec` binds the tuple of the elements. For the garbage
+  collector, with `Browser.JS.Obj.fast_whole/3`.
+  """
+  defmacro dense(vec) do
+    quote do: %{vec: unquote(vec)}
+  end
+
+  @doc """
+  Whether the field `field` of a record holds the elements: `vec` (a tuple) or `items` (a
+  map from the index to the element). It is a guard. An element is a JS value or an
+  accessor, never a bare heap id: so the garbage collector does not read an integer in it
+  as an id.
+  """
+  defguard elements_field?(field) when field in [:vec, :items]
+
+  @doc """
+  Whether the field `field` of a record holds no heap id: `len`, the length of a sparse
+  record, which the garbage collector must not read as an id. It is a guard.
+  """
+  defguard no_refs?(field) when field == :len
 
   @doc """
   Whether the array record `o` is dense and has an element at the index `i` (an integer

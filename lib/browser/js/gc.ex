@@ -6,12 +6,19 @@ defmodule Browser.JS.GC do
   the stack, so everything alive is reachable from the process dictionary: the global scope,
   prototypes, timers, microtasks, modules, the DOM's bookkeeping and so on.
 
-  The walk is deliberately conservative instead of knowing every field: it follows every
+  The walk is conservative where it does not know the form of a term: it follows every
   `{:obj, id}` and every integer that is a heap id, in any tuple, list, map and in the
-  environment of Elixir funs (the built-ins capture ids). A stray integer can keep a dead object
-  alive, but nothing reachable is ever freed. Function bodies are syntax trees and not walked;
-  only the scope and `home` of a closure are. The compiled code of step 5 (the `{:jsc, _}`
-  keys and the funs of `Browser.JS.Compile`) is not walked either: it holds no heap id.
+  environment of Elixir funs (the built-ins capture ids, and a frame slot can hold a bare
+  id). A stray integer there can keep a dead object alive, but nothing reachable is ever
+  freed. A JS value is never a bare heap id (an object is `{:obj, id}`). So in the values of
+  the own properties and in the elements of an array, an integer is a number, and the walk
+  does not read it as an id. The same is true for the length of a sparse array, and for
+  the entries and the counters (`seq`, `order`) of a Map or a Set of the common form. The
+  walk matches the common forms of a heap record whole, with the patterns of
+  `Browser.JS.Obj` and `Browser.JS.Elems` (see `push_record/3`). Function bodies are syntax
+  trees and not walked; only the scope and `home` of a closure are. The compiled code of
+  step 5 (the `{:jsc, _}` keys and the funs of `Browser.JS.Compile`) is not walked either:
+  it holds no heap id.
   The continuation of a compiled plan of an async body or a generator (step 5c) is a fun
   of `Browser.JS.Async`, so the walk visits it and finds the frame that it keeps. The walk
   stops at the compiled closures in it. The process key `:js_cps_vals` holds the values of
@@ -40,6 +47,7 @@ defmodule Browser.JS.GC do
 
   import Bitwise
   require Browser.JS.Obj, as: Obj
+  require Browser.JS.Elems, as: Elems
   require Browser.JS.Interp, as: Interp
   require Browser.JS.DOM, as: DOM
 
@@ -91,73 +99,7 @@ defmodule Browser.JS.GC do
   @doc "Frees every heap entry not reachable from the process dictionary; returns how many."
   def collect do
     # (the heap's objects are the process dictionary entries under integer keys)
-    {ids, roots, node_keys} =
-      :lists.foldl(
-        fn
-          # (a leaf frame of a normal build, see `Browser.JS.Interp`: no script runs during
-          # a collect, so no call holds it. The key is not a heap id, and a bitmap up to it
-          # would be too large. The key goes, so that the walk cannot read a number of that
-          # size as the id of the old frame.)
-          {k, _}, acc when is_integer(k) and k >= Interp.leaf_base() -> erase_key(k, acc)
-          {k, _}, {ids, roots, nk} when is_integer(k) and k >= 0 -> {[k | ids], roots, nk}
-          # (a negative key is the cell of an inline cache, see `Browser.JS.Shape`: it is not
-          # a heap entry, so the sweep must not erase it, and it is not a root, so the id of
-          # a prototype in it does not keep the prototype alive)
-          {k, _}, acc when is_integer(k) -> acc
-          {{:js_hoist, _}, _}, acc -> acc
-          # (the cache of compiled code holds no heap id, see `Browser.JS.Compile`; its
-          # syntax nodes hold slot numbers, which must not keep an object alive)
-          {{:jsc, _}, _}, acc -> acc
-          # (the uids of the entries of each realm, see `Browser.JS.Compile`)
-          {{:jsc_root, _}, _}, acc -> acc
-          # (the count of the code cache holds two integers, which are not heap ids)
-          {:jsc_budget, _}, acc -> acc
-          {:js_memo, _}, acc -> acc
-          # (the memo of the regular expressions holds patterns, texts and byte positions,
-          # see `Browser.JS.RegExp`)
-          {:js_re_memo, _}, acc -> acc
-          {:js_freed, _}, acc -> acc
-          # (the call chain holds names, positions and depths, never an id; a depth or a
-          # line that equals the id of a dead object must not keep it alive)
-          {:js_stack, _}, acc -> acc
-          {:js_check_stack, _}, acc -> acc
-          # (the transition table of the shapes and its counters hold keys, shapes and
-          # integers, never a heap id, see `Browser.JS.Shape`; a count that equals the id
-          # of a dead object must not keep it alive)
-          {{:jst, _}, _}, acc -> acc
-          {:js_shape_next, _}, acc -> acc
-          {:js_ic_next, _}, acc -> acc
-          {:js_shape_n, _}, acc -> acc
-          {:js_shape_since, _}, acc -> acc
-          # (the positions of the keys of the array iterators hold two prototypes and two
-          # built-in functions, which are roots anyway, and shape ids and positions, which
-          # are not heap ids, see `Browser.JS.Interp`)
-          {:js_arr_iter_pos, _}, acc -> acc
-          # (the parser's source table and the lexer's table hold the source, token
-          # offsets and tokens: an offset that equals the id of a dead object must not keep
-          # it alive)
-          {:js_srctab, _}, acc -> acc
-          {:lex_table, _}, acc -> acc
-          # (a position and the number of the parser's file are integers, see
-          # `Browser.JS.Pos`, never a heap id)
-          {:js_pos, _}, acc -> acc
-          {:js_throw_pos, _}, acc -> acc
-          {:js_file_id, _}, acc -> acc
-          # (the boxes of the layout and the counts of the forced layouts hold numbers
-          # only, see `Browser.JS.DOM`)
-          {:dom_page_rects, _}, acc -> acc
-          {:dom_forced_rects, _}, acc -> acc
-          {:dom_forced, _}, acc -> acc
-          {:dom_forced_spent, _}, acc -> acc
-          # (the document's state is read below, see `Browser.JS.DOM.gc_begin/2`)
-          {:dom, v}, acc when is_map(v) -> acc
-          # (the process keys of a node are walked when the node is live)
-          {k, v}, {ids, roots, nk} when DOM.gc_node_key?(k) -> {ids, roots, [{k, v} | nk]}
-          {_, v}, {ids, roots, nk} -> {ids, [v | roots], nk}
-        end,
-        {[], [], []},
-        Process.get()
-      )
+    {ids, roots, node_keys} = classify(Process.get(), {[], [], []})
 
     # The document's state without the fields that hold no JS value (the node table is
     # large and holds none), the terms that the live root trees of nodes hold, and the bound
@@ -174,10 +116,13 @@ defmodule Browser.JS.GC do
 
     # The marks are a bitmap with one bit for each heap id up to the largest key. A bit costs
     # less than an entry of a table, and it makes no garbage for the process's collector.
-    # A second bitmap has the plain integers below `limit` that the walk has looked at as
-    # node ids.
+    # The bitmap also has a bit for each id below `:js_next`, so that `push_ref/3` can test
+    # the bit of a reference before it reads the entry. A second bitmap has the plain
+    # integers below `limit` that the walk has looked at as node ids.
+    top = max(:lists.max([0 | ids]), :erlang.get(:js_next))
+
     marks =
-      {:atomics.new(div(:lists.max([0 | ids]), 64) + 1, signed: false),
+      {:atomics.new(div(top, 64) + 1, signed: false),
        :atomics.new(div(limit, 64) + 1, signed: false), limit, nodes}
 
     # (the nodes that the walk did not find live leave the node table, see
@@ -189,19 +134,7 @@ defmodule Browser.JS.GC do
       Process.delete(:js_gc_dom)
     end
 
-    {freed, live} =
-      :lists.foldl(
-        fn id, {n, live} ->
-          if marked?(marks, id) do
-            {n, live + 1}
-          else
-            :erlang.erase(id)
-            {n + 1, live}
-          end
-        end,
-        {0, 0},
-        ids
-      )
+    {freed, live} = sweep(ids, elem(marks, 0), 0, 0)
 
     Process.put(:js_freed, :erlang.get(:js_next) - live)
     # (a threshold of 0 is the test setting `JS_GC=every`: it stays)
@@ -209,15 +142,101 @@ defmodule Browser.JS.GC do
     freed
   end
 
-  # (the erase of a leaf frame in `collect/0`)
+  # The entries of the process dictionary, in three lists: the heap ids, the roots and the
+  # process keys of the nodes. It is a plain recursion, with no fun call for each entry. A
+  # heap id is the most common entry, so its clause comes first.
+  defp classify([], acc), do: acc
+
+  defp classify([{k, _} | rest], {ids, roots, nk})
+       when is_integer(k) and k >= 0 and k < Interp.leaf_base(),
+       do: classify(rest, {[k | ids], roots, nk})
+
+  defp classify([{k, v} | rest], acc), do: classify(rest, classify_key(k, v, acc))
+
+  # (a leaf frame of a normal build, see `Browser.JS.Interp`: no script runs during a
+  # collect, so no call holds it. The key is not a heap id, and a bitmap up to it would be
+  # too large. The key goes, so that the walk cannot read a number of that size as the id
+  # of the old frame.)
+  defp classify_key(k, _, acc) when is_integer(k) and k >= Interp.leaf_base(),
+    do: erase_key(k, acc)
+
+  # (a negative key is the cell of an inline cache, see `Browser.JS.Shape`: it is not a
+  # heap entry, so the sweep must not erase it, and it is not a root, so the id of a
+  # prototype in it does not keep the prototype alive)
+  defp classify_key(k, _, acc) when is_integer(k), do: acc
+  defp classify_key({:js_hoist, _}, _, acc), do: acc
+  # (the cache of compiled code holds no heap id, see `Browser.JS.Compile`; its syntax
+  # nodes hold slot numbers, which must not keep an object alive)
+  defp classify_key({:jsc, _}, _, acc), do: acc
+  # (the uids of the entries of each realm, see `Browser.JS.Compile`)
+  defp classify_key({:jsc_root, _}, _, acc), do: acc
+  # (the count of the code cache holds two integers, which are not heap ids)
+  defp classify_key(:jsc_budget, _, acc), do: acc
+  defp classify_key(:js_memo, _, acc), do: acc
+  # (the memo of the regular expressions holds patterns, texts and byte positions, see
+  # `Browser.JS.RegExp`)
+  defp classify_key(:js_re_memo, _, acc), do: acc
+  defp classify_key(:js_freed, _, acc), do: acc
+  # (the call chain holds names, positions and depths, never an id; a depth or a line that
+  # equals the id of a dead object must not keep it alive)
+  defp classify_key(:js_stack, _, acc), do: acc
+  defp classify_key(:js_check_stack, _, acc), do: acc
+  # (the transition table of the shapes and its counters hold keys, shapes and integers,
+  # never a heap id, see `Browser.JS.Shape`; a count that equals the id of a dead object
+  # must not keep it alive)
+  defp classify_key({:jst, _}, _, acc), do: acc
+  defp classify_key(:js_shape_next, _, acc), do: acc
+  defp classify_key(:js_ic_next, _, acc), do: acc
+  defp classify_key(:js_shape_n, _, acc), do: acc
+  defp classify_key(:js_shape_since, _, acc), do: acc
+  # (the positions of the keys of the array iterators hold two prototypes and two built-in
+  # functions, which are roots anyway, and shape ids and positions, which are not heap
+  # ids, see `Browser.JS.Interp`)
+  defp classify_key(:js_arr_iter_pos, _, acc), do: acc
+  # (the parser's source table and the lexer's table hold the source, token offsets and
+  # tokens: an offset that equals the id of a dead object must not keep it alive)
+  defp classify_key(:js_srctab, _, acc), do: acc
+  defp classify_key(:lex_table, _, acc), do: acc
+  # (a position and the number of the parser's file are integers, see `Browser.JS.Pos`,
+  # never a heap id)
+  defp classify_key(:js_pos, _, acc), do: acc
+  defp classify_key(:js_throw_pos, _, acc), do: acc
+  defp classify_key(:js_file_id, _, acc), do: acc
+  # (the boxes of the layout and the counts of the forced layouts hold numbers only, see
+  # `Browser.JS.DOM`)
+  defp classify_key(:dom_page_rects, _, acc), do: acc
+  defp classify_key(:dom_forced_rects, _, acc), do: acc
+  defp classify_key(:dom_forced, _, acc), do: acc
+  defp classify_key(:dom_forced_spent, _, acc), do: acc
+  # (the document's state is read in `collect/0`, see `Browser.JS.DOM.gc_begin/2`)
+  defp classify_key(:dom, v, acc) when is_map(v), do: acc
+  # (the process keys of a node are walked when the node is live)
+  defp classify_key(k, v, {ids, roots, nk}) when DOM.gc_node_key?(k),
+    do: {ids, roots, [{k, v} | nk]}
+
+  defp classify_key(_, v, {ids, roots, nk}), do: {ids, [v | roots], nk}
+
+  # The sweep: each heap id whose bit is not set goes. It is a plain recursion, with no fun
+  # call for each entry.
+  defp sweep([], _bits, freed, live), do: {freed, live}
+
+  defp sweep([id | ids], bits, freed, live) do
+    if marked?(bits, id) do
+      sweep(ids, bits, freed, live + 1)
+    else
+      :erlang.erase(id)
+      sweep(ids, bits, freed + 1, live)
+    end
+  end
+
+  # (the erase of a leaf frame in `classify_key/3`)
   defp erase_key(k, acc) do
     :erlang.erase(k)
     acc
   end
 
   @compile {:inline, marked?: 2}
-  defp marked?(marks, id),
-    do: (:atomics.get(elem(marks, 0), (id >>> 6) + 1) &&& 1 <<< (id &&& 63)) != 0
+  defp marked?(bits, id), do: (:atomics.get(bits, (id >>> 6) + 1) &&& 1 <<< (id &&& 63)) != 0
 
   # Sets the bit of `id` in the bitmap `bits`; false when it was set before. For the heap
   # bitmap, only a key of the process dictionary gets here, so the bitmap has a bit for it.
@@ -433,7 +452,7 @@ defmodule Browser.JS.GC do
   end
 
   # A shape holds keys, positions and attributes, never a heap id (`Browser.JS.Shape`).
-  # The record clause below skips the `shape` field, so the walk gets here only for a shape
+  # The record clauses below skip the `shape` field, so the walk gets here only for a shape
   # in another place.
   defp mark([{:js_shape, _, _, _, _, _, _} | rest], marks), do: mark(rest, marks)
 
@@ -442,6 +461,12 @@ defmodule Browser.JS.GC do
 
   defp mark([[] | rest], marks), do: mark(rest, marks)
   defp mark([[_ | _] = l | rest], marks), do: mark(push_list(l, rest, marks), marks)
+
+  # The record of a heap object (`push_record/3`): the most common term on the stack, so
+  # its clause comes before the other maps (a closure and the facts of the resolver have
+  # no class).
+  defp mark([t | rest], marks) when Obj.heap_record?(t),
+    do: mark(push_record(t, rest, marks), marks)
 
   # the resolver's facts hold names, numbers, atoms and syntax, never a heap id:
   # a frame carries one in its header, so the walk must not read it as ids
@@ -452,13 +477,6 @@ defmodule Browser.JS.GC do
     stack = push(Map.get(closure, :scope), rest, marks)
     mark(push(Map.get(closure, :home), stack, marks), marks)
   end
-
-  # The record of a heap object: the walk skips the fields that hold no id
-  # (`Browser.JS.Obj.no_refs?/1`). They hold counts, which the walk would read as ids, keys
-  # that `props` or the shape also holds, and the shape. The values of a fast record are
-  # in the tuple `vals`, which the walk visits as any tuple.
-  defp mark([t | rest], marks) when Obj.heap_record?(t),
-    do: mark(push_fields(:maps.to_list(t), rest, marks), marks)
 
   # (integer keys are array indices: skip them, not references)
   defp mark([t | rest], marks) when is_map(t),
@@ -474,11 +492,108 @@ defmodule Browser.JS.GC do
   defp push_frame_slots(t, i, n, stack, marks),
     do: push_frame_slots(t, i + 1, n, push(elem(t, i - 1), stack, marks), marks)
 
-  # The fields of a heap record, as `:maps.to_list/1` gives them: one call of a built-in
-  # function, which is faster than a fold with a fun.
+  # The record of a heap object. The common forms are matched whole: the patterns of
+  # `Browser.JS.Obj.fast_whole/3` and `Browser.JS.Elems.dense/1`, with the guard on the
+  # size that says that the record has no other field. So the walk makes no list of the
+  # fields for them. The values of the own properties and the elements are JS values, and a
+  # JS value is never a bare heap id (an object is `{:obj, id}`): an integer there is a
+  # number, which the walk does not look up (`push_val/3`). A record of another form goes
+  # through `push_fields/3`, with the same rules for the fields that it knows.
+  defp push_record(Obj.fast_whole(p, v) = t, stack, marks) when Obj.fast_whole?(t, 0),
+    do: push_vals(v, tuple_size(v), push(p, stack, marks), marks)
+
+  defp push_record(Obj.fast_whole(p, v, fun: f) = t, stack, marks) when Obj.fast_whole?(t, 1),
+    do: push_vals(v, tuple_size(v), push_fun(f, push(p, stack, marks), marks), marks)
+
+  # A Map, a Set, a WeakMap or a WeakSet (`Browser.JS.Collections`): the entries are under
+  # `data`, each `{seq, key, value}` with the key and the value JS values. The key of the
+  # map is the SameValueZero form of the key, which the entry holds too. `seq` and the
+  # positions in `order` are counters, not ids, and `order` holds the keys of `data` again.
+  defp push_record(
+         %{class: c} = Obj.fast_whole(p, v, data: d, seq: _, order: _) = t,
+         stack,
+         marks
+       )
+       when Obj.fast_whole?(t, 3) and c in [:map, :set, :weakmap, :weakset] and is_map(d),
+       do: push_vals(v, tuple_size(v), push_entries(d, push(p, stack, marks), marks), marks)
+
+  defp push_record(Obj.fast_whole(p, v) = Elems.dense(vec) = t, stack, marks)
+       when Obj.fast_whole?(t, 1) do
+    stack = push_vals(v, tuple_size(v), push(p, stack, marks), marks)
+    push_vals(vec, tuple_size(vec), stack, marks)
+  end
+
+  # (the data of a wrapper of the DOM: a node id, or a tuple that holds one)
+  defp push_record(Obj.fast_whole(p, v, host: {DOM, data}) = t, stack, marks)
+       when Obj.fast_whole?(t, 1),
+       do: push_vals(v, tuple_size(v), push_nids(data, push(p, stack, marks), marks), marks)
+
+  defp push_record(t, stack, marks), do: push_fields(:maps.to_list(t), stack, marks)
+
+  # (the entries of a Map or a Set, see above; an entry of another form is walked whole)
+  defp push_entries(d, stack, marks) do
+    :maps.fold(
+      fn
+        _nk, {_seq, k, v}, acc -> push_val(k, push_val(v, acc, marks), marks)
+        nk, other, acc -> push(other, push(nk, acc, marks), marks)
+      end,
+      stack,
+      d
+    )
+  end
+
+  # The function of a function record: a closure keeps its scope and its home object, a
+  # native its Elixir fun (whose environment can hold ids). The walk does this at once,
+  # without the tuple on the stack. Any other form is walked whole.
+  defp push_fun({:closure, %{scope: sc} = c}, stack, marks),
+    do: push(Map.get(c, :home), push(sc, stack, marks), marks)
+
+  defp push_fun({:native, _name, f}, stack, marks) when is_function(f),
+    do: mark_fun(f, stack, marks)
+
+  defp push_fun(f, stack, marks), do: push(f, stack, marks)
+
+  # (the elements of a tuple of JS values, from the position `n` down to 1)
+  defp push_vals(_t, 0, stack, _marks), do: stack
+
+  defp push_vals(t, n, stack, marks),
+    do: push_vals(t, n - 1, push_val(:erlang.element(n, t), stack, marks), marks)
+
+  # (the values of a map of JS values: the keys are strings, symbols or indices)
+  defp push_items(m, stack, marks),
+    do: :maps.fold(fn _k, v, acc -> push_val(v, acc, marks) end, stack, m)
+
+  # A JS value: an object is `{:obj, id}`, an accessor `{:accessor, getter, setter}`. A
+  # number (also an integer), a string, a boolean, null and undefined lead to no heap
+  # entry. A tuple (an accessor, a symbol) goes on the stack, where the walk reads it as
+  # any tuple.
+  @compile {:inline, push_val: 3}
+  defp push_val({:obj, id}, stack, marks) when is_integer(id) and id >= 0,
+    do: push_ref(id, stack, marks)
+
+  defp push_val(t, stack, _marks)
+       when is_tuple(t) or is_map(t) or is_list(t) or is_function(t),
+       do: [t | stack]
+
+  defp push_val(_, stack, _marks), do: stack
+
+  # The fields of a heap record of another form, as `:maps.to_list/1` gives them: one call
+  # of a built-in function, which is faster than a fold with a fun. The walk skips the
+  # fields that hold no id (`Browser.JS.Obj.no_refs?/1`, `Browser.JS.Elems.no_refs?/1`):
+  # they hold counts, which the walk would read as ids, keys that `props` or the shape also
+  # holds, the shape, and the length of a sparse array. The values of the own properties and
+  # the elements (a tuple or a map) are JS values (see `push_record/3`).
   defp push_fields([], stack, _marks), do: stack
 
-  defp push_fields([{k, _} | fs], stack, marks) when Obj.no_refs?(k),
+  defp push_fields([{k, v} | fs], stack, marks)
+       when (Obj.values_field?(k) or Elems.elements_field?(k)) and is_tuple(v),
+       do: push_fields(fs, push_vals(v, tuple_size(v), stack, marks), marks)
+
+  defp push_fields([{k, m} | fs], stack, marks)
+       when (Obj.values_field?(k) or Elems.elements_field?(k)) and is_map(m),
+       do: push_fields(fs, push_items(m, stack, marks), marks)
+
+  defp push_fields([{k, _} | fs], stack, marks) when Obj.no_refs?(k) or Elems.no_refs?(k),
     do: push_fields(fs, stack, marks)
 
   # (the data of a wrapper of the DOM: a node id, or a tuple that holds one)
@@ -514,7 +629,8 @@ defmodule Browser.JS.GC do
 
   # A reference `{:obj, id}` is the term that the walk meets most: its id is marked at
   # once, so the tuple does not go on the stack. Its id is a heap id only, not a node id.
-  defp push({:obj, id}, stack, marks) when is_integer(id), do: push_id(id, stack, marks)
+  defp push({:obj, id}, stack, marks) when is_integer(id) and id >= 0,
+    do: push_ref(id, stack, marks)
 
   defp push([], stack, _marks), do: stack
 
@@ -543,6 +659,34 @@ defmodule Browser.JS.GC do
   end
 
   defp push_id(_t, stack, _marks), do: stack
+
+  # The id of a reference `{:obj, id}`. Most references (a prototype, a scope) are met many
+  # times, so the walk tests the bit first and reads the entry only the first time. The
+  # bitmap has a bit for each id below `:js_next` (see `collect/0`), and a reference holds
+  # only such an id.
+  defp push_ref(id, stack, marks) do
+    bits = elem(marks, 0)
+    i = (id >>> 6) + 1
+    bit = 1 <<< (id &&& 63)
+    word = :atomics.get(bits, i)
+
+    if (word &&& bit) == 0 do
+      case :erlang.get(id) do
+        :undefined ->
+          stack
+
+        # (a tombstone of check mode, see `push_id/3`)
+        {:js_freed, _} ->
+          stack
+
+        obj ->
+          :atomics.put(bits, i, word ||| bit)
+          [obj | stack]
+      end
+    else
+      stack
+    end
+  end
 
   # Elixir data that can hold node ids: the data of a wrapper of the DOM and the environment
   # of an Elixir fun (a native can hold a node id). In it, a plain integer can also be the id

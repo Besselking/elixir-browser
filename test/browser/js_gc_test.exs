@@ -3,6 +3,7 @@ defmodule Browser.JSGCTest do
 
   alias Browser.JS.{Builtins, GC, Interp, Parser}
   require Browser.JS.Elems, as: Elems
+  require Browser.JS.Obj, as: Obj
 
   # True in the check build (`JS_RESOLVE_CHECK=1`).
   @check Application.compile_env(:browser, :js_resolve_check, false)
@@ -321,6 +322,93 @@ defmodule Browser.JSGCTest do
 
       GC.collect()
       for {:obj, id} <- objs, do: assert(is_map(:erlang.get(id)), "freed: #{id}")
+    end)
+    |> Task.await(30_000)
+  end
+
+  # A JS value is never a bare heap id, so the walk reads an integer in a JS value as a
+  # number: an integer that equals the id of an object that nothing holds does not keep
+  # that object alive. Each case puts such an integer in one place: an element of a dense
+  # array, the value of an own property, the key and the value of a Map entry, the `seq` of
+  # a Map and the `len` of a sparse array. The dense array, the object and the Map are of
+  # the common forms, which the walk matches whole; the sparse array is not.
+  test "an integer in a JS value, a Map counter or a length keeps no object alive" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      dead = for _ <- 1..6, do: elem(Interp.new_object([{"d", 1.0}]), 1)
+      [d_elem, d_prop, d_key, d_val, d_seq, d_len] = dead
+
+      run = fn src ->
+        {:ok, p} = Parser.parse(src)
+        Interp.run_program(p)
+      end
+
+      arr = Interp.new_array([d_elem])
+      obj = Interp.new_object([{"x", d_prop}])
+      Process.put({:gc_test_keep, 1}, [arr, obj])
+
+      # (with the last entry, the Map has `d_seq` entries, so its next `seq` is `d_seq`)
+      run.("var m = new Map(); for (var i = 0; i < #{d_seq - 1}; i++) m.set('k' + i, i)")
+      {:ok, {:obj, mid} = m} = Interp.lookup_scoped(Interp.global(), "m")
+      Interp.call(Interp.get(m, "set"), m, [d_key, d_val])
+      run.("var a = []; a[#{d_len - 1}] = 'x'")
+      {:ok, {:obj, sid}} = Interp.lookup_scoped(Interp.global(), "a")
+
+      {:obj, aid} = arr
+      assert Elems.dense?(Interp.deref(aid))
+      assert map_size(Interp.deref(mid)) == 7 and Interp.deref(mid).seq == d_seq
+      refute Elems.dense?(Interp.deref(sid))
+      assert Interp.deref(sid).len == d_len
+
+      GC.collect()
+      for id <- dead, do: assert(:erlang.get(id) == :undefined, "kept: #{id}")
+      assert Interp.get(arr, 0.0) == d_elem
+      assert Interp.get(obj, "x") == d_prop
+      assert Interp.call(Interp.get(m, "get"), m, [d_key]) == d_val
+      assert run.("m.size + ':' + a.length") == "#{d_seq}:#{d_len}"
+    end)
+    |> Task.await(30_000)
+  end
+
+  # The forms of a record that the walk does not match whole keep the walk of each field,
+  # and the entries of a Map or a Set hold their keys and values as JS values. So an object
+  # that only one of these holds stays alive: the key and the value of a Map entry, a Set
+  # entry, the getter of an accessor in `vals`, the target and the `this` of a bound
+  # function and the target of a proxy.
+  test "keeps an object that only a Map, a Set, an accessor, a bound function or a proxy holds" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+
+      run = fn src ->
+        {:ok, p} = Parser.parse(src)
+        Interp.run_program(p)
+      end
+
+      run.("""
+      var held = [{ k: 'key' }, { k: 'value' }, { k: 'set' }, function () { return 'get' },
+        function () { return this.k }, { k: 'this' }, { k: 'target' }];
+      var m = new Map([[held[0], 1], ['v', held[1]]]);
+      var s = new Set([held[2]]);
+      var acc = {};
+      Object.defineProperty(acc, 'x', { get: held[3] });
+      var b = held[4].bind(held[5]);
+      var p = new Proxy(held[6], {});
+      """)
+
+      {:ok, {:obj, hid}} = Interp.lookup_scoped(Interp.global(), "held")
+      ids = for i <- 0..6, do: elem(Interp.get({:obj, hid}, i * 1.0), 1)
+      {:ok, {:obj, accid}} = Interp.lookup_scoped(Interp.global(), "acc")
+      assert Obj.fast?(Interp.deref(accid))
+      run.("held = null")
+
+      GC.collect()
+      assert :erlang.get(hid) == :undefined
+      for id <- ids, do: assert(is_map(:erlang.get(id)), "freed: #{id}")
+
+      assert run.("[[...m.keys()][0].k, m.get('v').k, [...s][0].k, acc.x, b(), p.k].join()") ==
+               "key,value,set,get,this,target"
     end)
     |> Task.await(30_000)
   end
