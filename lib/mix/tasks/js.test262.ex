@@ -357,7 +357,23 @@ defmodule Mix.Tasks.Js.Test262 do
     Mix.shell().info("Timings written to #{file}")
   end
 
-  defp first_line(text), do: text |> to_string() |> String.split("\n") |> hd()
+  @doc false
+  # The first line of a failure reason, as valid UTF-8. A reason can hold raw bytes (for
+  # example of a string that the test made), and the shell cannot print a byte that is not
+  # UTF-8: it stops the task with an io error. So each such byte becomes the text `\xNN`.
+  def first_line(text) do
+    line = text |> to_string() |> String.split("\n") |> hd()
+
+    if String.valid?(line),
+      do: line,
+      else: line |> String.chunk(:valid) |> Enum.map_join(&escape_invalid/1)
+  end
+
+  defp escape_invalid(chunk) do
+    if String.valid?(chunk),
+      do: chunk,
+      else: for(<<b <- chunk>>, into: "", do: "\\x" <> Base.encode16(<<b>>))
+  end
 
   # ── the baseline ───────────────────────────────────────────
 
