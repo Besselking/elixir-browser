@@ -104,6 +104,19 @@ defmodule Browser.HttpCacheTest do
       assert newest in left
     end
 
+    test "an entry from a file keeps the Cache-Control of its response for a 304" do
+      url = "http://disk.test/no-cache"
+      lm = ~c"Mon, 01 Jan 2024 00:00:00 GMT"
+      HttpCache.store(url, [{~c"cache-control", ~c"no-cache"}, {~c"last-modified", lm}], "b")
+      HttpCache.sync()
+      memory_forget()
+
+      assert {:stale, entry} = HttpCache.lookup(url)
+      HttpCache.refresh(entry, [], url)
+      assert {:stale, _} = HttpCache.lookup(url)
+      HttpCache.sync()
+    end
+
     test "clear removes the files", %{dir: dir} do
       HttpCache.store("http://disk.test/z", [{~c"cache-control", ~c"max-age=60"}], "x")
       HttpCache.sync()
@@ -241,6 +254,34 @@ defmodule Browser.HttpCacheTest do
       send(h2, {:reply, "own"})
       assert {:ok, "own", _} = Task.await(second)
       send(first, :stop)
+    end
+
+    test "a first load of the old table does not remove the key of the new table" do
+      url = held_server() <> "/restart2.css"
+      old_first = Task.async(fn -> Browser.Fetch.load(url) end)
+      assert_receive {:held, h1}
+
+      old = Process.whereis(HttpCache)
+      ref = Process.monitor(old)
+      Process.exit(old, :kill)
+      assert_receive {:DOWN, ^ref, _, _, _}
+
+      wait_until(fn ->
+        Process.whereis(HttpCache) not in [nil, old] and
+          :ets.whereis(Browser.Fetch.inflight_table()) != :undefined
+      end)
+
+      new_first = Task.async(fn -> Browser.Fetch.load(url) end)
+      assert_receive {:held, h2}
+      send(h1, {:reply, "old"})
+      assert {:ok, "old", _} = Task.await(old_first)
+
+      # the key of the new first load is still there: this load waits for it
+      waiter = Task.async(fn -> Browser.Fetch.load(url) end)
+      refute_receive {:held, _}, 100
+      send(h2, {:reply, "new"})
+      assert {:ok, "new", _} = Task.await(new_first)
+      assert {:ok, "new", _} = Task.await(waiter)
     end
 
     defp wait_until(check, n \\ 100) do

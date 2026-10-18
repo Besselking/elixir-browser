@@ -498,6 +498,30 @@ defmodule Browser.FetchTest do
       assert {:ok, "again", _} = Task.await(third)
     end
 
+    # (a navigation from another site sends its Lax cookies, a subresource from there does
+    # not, and a load from the same site sends all: three requests that are not the same)
+    test "loads that send other cookies make their own requests" do
+      base = held_server()
+      url = base <> "/c.css"
+      other = "http://other.test/"
+      first = Task.async(fn -> Fetch.load(url, initiator: other) end)
+      assert_receive {:held, h1, "/c.css"}
+
+      others = [
+        Task.async(fn -> Fetch.load(url, initiator: other, navigation: true) end),
+        Task.async(fn -> Fetch.load(url, initiator: base <> "/") end)
+      ]
+
+      handlers =
+        for _ <- 1..2 do
+          assert_receive {:held, h, "/c.css"}
+          h
+        end
+
+      for h <- [h1 | handlers], do: send(h, {:reply, ok("c")})
+      for t <- [first | others], do: assert({:ok, "c", _} = Task.await(t))
+    end
+
     # the rows of the table of loads in progress that are about `url`
     defp inflight_rows(url),
       do: for(row <- :ets.tab2list(Fetch.inflight_table()), inspect(row) =~ url, do: row)
