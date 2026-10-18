@@ -29,28 +29,389 @@ defmodule Browser.JS.DOM do
   # The fields of the state (and of the saved fields of a realm) that hold no JS value: the
   # node table, the indexes of the ids and of the attribute values, the boxes, node ids, counts
   # and sizes. The JS collector reads each integer as a heap id, so these fields can keep dead
-  # objects alive, and the node table makes each collection long.
+  # objects alive, and the node table makes each collection long. (The node ids in them are
+  # read by `gc_node_roots/1` and cleaned by `gc_sweep/0`.)
   @gc_fields ~w(nodes ids aidx iframes rects rev next next_nid usp doc main frames meta fdirty
                 ce_done current_script write_after focus_ed focus_ctl scroll content width height
                 hist_idx history_before)a
 
+  @doc false
+  # Check mode: the fields that `gc_begin/2` leaves out, which must hold no JS value.
+  def gc_left_out(s),
+    do: [Map.take(s, @gc_fields) | for({_, r} <- s.realms, do: Map.take(r.fields, @gc_fields))]
+
+  # ── the JS collector and the node table ────────────────────
+  #
+  # The JS collector (`Browser.JS.GC.collect/0`) also frees the nodes that nothing can reach
+  # any more, and their wrappers and listeners. A node is live when its tree is live. The tree
+  # of a node is what the node links reach: up through `parent` (and `shost` from a shadow
+  # root to its host), down through `kids`, `shadow` and `content`. A tree is live when it
+  # has a root node (a document of a realm, a frame, the focus: `gc_node_roots/1`), or when
+  # the walk of the JS heap finds the id of one of its nodes. A wrapper holds the id of its
+  # node (`host: {Browser.JS.DOM, nid}`), the `classList`, `style` and `dataset` objects
+  # hold it in a tuple, and the environment of a native can hold node ids as plain integers.
+  # So the walk reads each plain integer in such Elixir data that is the id of a node as a
+  # reference to it (`Browser.JS.GC.push_nids/3`). A stray integer there (a table of
+  # characters of a native) can keep a dead tree alive, but a node that a script can reach is
+  # never freed. A JS value (a number) is not a reference to a node. The wrapper, the
+  # `classList`, `style` and
+  # `dataset` objects, the listeners and the canvas context of a node are not roots: the walk
+  # goes into them when it finds the node live (`gc_reach/1`), and what they hold can make
+  # more trees live (as with ephemerons). Then `gc_sweep/0` takes the dead nodes out of the
+  # node table and out of each map that names them. The node ids are never used again, and
+  # `node/1` reads a missing id as an empty detached node.
+
   @doc """
-  The part of the state `s` that the JS collector walks (`Browser.JS.GC.collect/0`): the
-  state without the fields that hold no JS value. A node map holds only primitives and
-  node ids. The other fields (the wrappers, the listeners, the custom elements, the history
-  states and the saved keys of the realms) can hold JS values.
+  True for a process key of a node (the node id is the second element): its canvas, the
+  context of its canvas, the functions of its handler attributes, the load of its frame,
+  the `document.open` of a document.
   """
-  def gc_root(s) do
+  defguard gc_node_key?(k)
+           when is_tuple(k) and tuple_size(k) >= 2 and is_integer(elem(k, 1)) and
+                  elem(k, 0) in [:canvas, :canvas_ctx, :inline_handler, :dom_frame_tok, :dom_open]
+
+  @doc """
+  The start of a collection. `s` is the state, and `keys` are the process keys of the nodes
+  (`gc_node_key?/1`) with their values. Gives the part of the state that the collector walks
+  as a root, the terms that the live root trees hold for the walk (their wrappers and
+  listeners), and the bound of the node ids. The root part is the state without the fields
+  that hold no JS value (a node map holds only primitives and node ids), and without the
+  wrappers and the listeners of the nodes. The other fields (the wrappers and the listeners
+  of the windows, the custom elements, the history states and the saved keys of the realms)
+  can hold JS values. What `gc_reach/1` and `gc_sweep/0` need is under the process key
+  `:js_gc_dom` until `gc_sweep/0`.
+  """
+  def gc_begin(s, keys) do
+    {wroot, extra} =
+      :maps.fold(
+        fn
+          # (the wrapper of a node: `gc_down/3` reads it from the wrappers)
+          k, _w, acc when is_integer(k) ->
+            acc
+
+          {:aux, data} = k, w, {root, extra} ->
+            case aux_nid(data) do
+              nil -> {Map.put(root, k, w), extra}
+              nid -> {root, Map.update(extra, nid, [w], &[w | &1])}
+            end
+
+          k, w, {root, extra} ->
+            {Map.put(root, k, w), extra}
+        end,
+        {%{}, %{}},
+        s.wrappers
+      )
+
+    {lroot, extra} =
+      :maps.fold(
+        fn
+          k, l, {root, extra} when is_integer(k) -> {root, Map.update(extra, k, [l], &[l | &1])}
+          k, l, {root, extra} -> {Map.put(root, k, l), extra}
+        end,
+        {%{}, extra},
+        s.listeners
+      )
+
+    {open, extra} =
+      :lists.foldl(
+        fn
+          {{:dom_open, doc}, _}, {open, extra} ->
+            {[doc | open], extra}
+
+          {k, v}, {open, extra} when elem(k, 0) in [:canvas_ctx, :inline_handler] ->
+            {open, Map.update(extra, elem(k, 1), [v], &[v | &1])}
+
+          _, acc ->
+            acc
+        end,
+        {[], extra},
+        keys
+      )
+
+    limit = s.next + 1
+    words = div(limit, 64) + 1
+    # (the word after the bitmap counts the live nodes)
+    bits = {:atomics.new(words + 1, signed: false), words * 64}
+    ctx = %{nodes: s.nodes, wrappers: s.wrappers, extra: extra, bits: bits, pkeys: keys}
+    Process.put(:js_gc_dom, ctx)
+    terms = :lists.foldl(&gc_tree(ctx, &1, &2), [], open ++ gc_node_roots(s))
+
     realms =
       for {d, r} <- s.realms, into: %{}, do: {d, %{r | fields: Map.drop(r.fields, @gc_fields)}}
 
-    %{Map.drop(s, @gc_fields) | realms: realms}
+    root = %{Map.drop(s, @gc_fields) | realms: realms, wrappers: wroot, listeners: lroot}
+    {root, terms, limit}
   end
 
-  @doc false
-  # Check mode: the fields that `gc_root/1` leaves out, which must hold no JS value.
-  def gc_left_out(s),
-    do: [Map.take(s, @gc_fields) | for({_, r} <- s.realms, do: Map.take(r.fields, @gc_fields))]
+  # the node of the host data of a `classList`, `style` or `dataset` object, or nil (a window,
+  # a location, a history or a storage belongs to a realm)
+  defp aux_nid({k, nid}) when k in [:classlist, :style, :dataset] and is_integer(nid), do: nid
+  defp aux_nid({:style, nid, :computed}) when is_integer(nid), do: nid
+  defp aux_nid(_), do: nil
+
+  # The nodes that are live whatever the walk finds: the documents of the realms and their
+  # frames, the scripts that run, the focus. (A field of a realm that is not saved is not
+  # there, so the fields are read with `Map.get/2`.)
+  defp gc_node_roots(s) do
+    realm = fn f -> [f[:doc], f[:current_script], f[:write_after]] end
+    metas = for {d, m} <- s.meta, x <- [d, m[:iframe], m[:parent]], do: x
+
+    [s.main, s.focus_ed, s.focus_ctl | realm.(s)] ++
+      Map.keys(s.realms) ++
+      Map.keys(s.frames) ++
+      Map.values(s.frames) ++
+      metas ++
+      MapSet.to_list(s.fdirty) ++ Enum.flat_map(Map.values(s.realms), &realm.(&1.fields))
+  end
+
+  @doc """
+  The walk of the JS heap found the plain integer `nid`, which is the id of a node. When the
+  node is not live yet, its tree becomes live: gives the terms that the nodes of the tree
+  keep alive (their wrappers, listeners and canvas contexts), for the walk.
+  """
+  def gc_reach(nid), do: gc_tree(Process.get(:js_gc_dom), nid, [])
+
+  defp gc_tree(%{nodes: nodes, bits: bits} = ctx, nid, acc) when is_integer(nid) do
+    if not gc_live?(bits, nid) and is_map_key(nodes, nid) do
+      acc = gc_down(ctx, [root_in(nodes, nid)], acc)
+      # (a node that the kids of its parent do not list is not in the tree of its root)
+      if gc_live?(bits, nid), do: acc, else: gc_down(ctx, [nid], acc)
+    else
+      acc
+    end
+  end
+
+  defp gc_tree(_ctx, _nid, acc), do: acc
+
+  # Marks the nodes of the lists in `work` and the nodes below them live, and adds what they
+  # hold to `acc`. A node that is live already is the top of a live subtree: the walk stops
+  # there.
+  defp gc_down(_ctx, [], acc), do: acc
+  defp gc_down(ctx, [[] | work], acc), do: gc_down(ctx, work, acc)
+  defp gc_down(ctx, [[k | ks] | work], acc), do: gc_down(ctx, [k, ks | work], acc)
+
+  defp gc_down(%{nodes: nodes, bits: bits} = ctx, [nid | work], acc) do
+    case nodes do
+      %{^nid => n} ->
+        if gc_mark(bits, nid) do
+          acc =
+            case ctx.wrappers do
+              %{^nid => w} -> [w | acc]
+              _ -> acc
+            end
+
+          acc =
+            case ctx.extra do
+              %{^nid => l} -> [l | acc]
+              _ -> acc
+            end
+
+          # (the document of the node, which `ownerDocument` gives)
+          acc = if n.doc == nid, do: acc, else: gc_tree(ctx, n.doc, acc)
+
+          # (most nodes have no template content and no shadow root)
+          work =
+            case n do
+              %{content: nil, shadow: nil} -> work
+              %{content: c, shadow: sh} -> [c, sh | work]
+            end
+
+          gc_down(ctx, [n.kids | work], acc)
+        else
+          gc_down(ctx, work, acc)
+        end
+
+      _ ->
+        gc_down(ctx, work, acc)
+    end
+  end
+
+  # The live nodes are a bitmap with one bit for each node id below `cap` (each id in the
+  # node table is below `next`, and `cap` is above it). The word after the bitmap counts the
+  # live nodes, so the sweep does nothing when all are live.
+  defp gc_live?({bits, cap}, nid) when is_integer(nid) and nid >= 0 and nid < cap do
+    word = :atomics.get(bits, :erlang.bsr(nid, 6) + 1)
+    :erlang.band(word, :erlang.bsl(1, :erlang.band(nid, 63))) != 0
+  end
+
+  defp gc_live?(_bits, _nid), do: false
+
+  # marks `nid` live; false when it was live before (or has no bit)
+  defp gc_mark({bits, cap}, nid) when nid >= 0 and nid < cap do
+    i = :erlang.bsr(nid, 6) + 1
+    bit = :erlang.bsl(1, :erlang.band(nid, 63))
+    word = :atomics.get(bits, i)
+
+    if :erlang.band(word, bit) == 0 do
+      :atomics.put(bits, i, :erlang.bor(word, bit))
+      :atomics.add(bits, div(cap, 64) + 1, 1)
+      true
+    else
+      false
+    end
+  end
+
+  defp gc_mark(_bits, _nid), do: false
+
+  @doc """
+  The end of a collection: the nodes that are not live leave the node table, with their
+  wrappers, listeners, entries of the indexes and process keys. The walk did not mark their
+  wrappers, so the collector frees them. Gives the number of nodes that left.
+  """
+  def gc_sweep do
+    %{bits: {atomics, cap} = bits, pkeys: keys} = Process.delete(:js_gc_dom)
+    s = st()
+    live? = &gc_live?(bits, &1)
+    size = map_size(s.nodes)
+    live = :atomics.get(atomics, div(cap, 64) + 1)
+
+    for {k, _} <- keys, elem(k, 0) != :dom_open, not live?.(elem(k, 1)), do: Process.delete(k)
+
+    # (a wrapper of `classList`, `style` or `dataset` goes with its node, the wrappers of a
+    # realm stay)
+    wrappers =
+      gc_filter(s.wrappers, fn
+        k when is_integer(k) -> live?.(k)
+        {:aux, data} -> (nid = aux_nid(data)) == nil or live?.(nid)
+        _ -> true
+      end)
+
+    listeners = gc_filter(s.listeners, &(not is_integer(&1) or live?.(&1)))
+
+    s =
+      cond do
+        live == size -> s
+        2 * live < size -> gc_keep(s, live?, gc_live_nodes(s.nodes, atomics, div(cap, 64)))
+        true -> gc_drop(s, live?)
+      end
+
+    put_st(%{s | wrappers: wrappers, listeners: listeners})
+    size - live
+  end
+
+  # `map` without the keys that `keep?` refuses; the same term when it keeps all of them
+  defp gc_filter(map, keep?) do
+    case :maps.fold(fn k, _, acc -> if keep?.(k), do: acc, else: [k | acc] end, [], map) do
+      [] -> map
+      dead when 2 * length(dead) > map_size(map) -> :maps.filter(fn k, _ -> keep?.(k) end, map)
+      dead -> Map.drop(map, dead)
+    end
+  end
+
+  # The live nodes, from the bitmap: when most nodes are dead, this costs less than a walk of
+  # the node table.
+  defp gc_live_nodes(nodes, atomics, words) do
+    gc_live_nodes(nodes, atomics, words, [])
+  end
+
+  defp gc_live_nodes(_nodes, _atomics, 0, acc), do: :maps.from_list(acc)
+
+  defp gc_live_nodes(nodes, atomics, i, acc) do
+    acc = gc_word_nodes(nodes, :atomics.get(atomics, i), (i - 1) * 64, acc)
+    gc_live_nodes(nodes, atomics, i - 1, acc)
+  end
+
+  defp gc_word_nodes(_nodes, 0, _nid, acc), do: acc
+
+  defp gc_word_nodes(nodes, word, nid, acc) do
+    acc =
+      case :erlang.band(word, 1) == 1 and nodes do
+        %{^nid => n} -> [{nid, n} | acc]
+        _ -> acc
+      end
+
+    gc_word_nodes(nodes, :erlang.bsr(word, 1), nid + 1, acc)
+  end
+
+  # The state with the node table `nodes` (most nodes were dead): the indexes keep the live
+  # nodes only. They are small next to the dead nodes, so a walk of them costs less than a
+  # removal for each dead node.
+  defp gc_keep(s, live?, nodes) do
+    ids =
+      :maps.fold(
+        fn id, list, acc ->
+          case Enum.filter(list, live?) do
+            ^list -> acc
+            [] -> Map.delete(acc, id)
+            l -> Map.put(acc, id, l)
+          end
+        end,
+        s.ids,
+        s.ids
+      )
+
+    aidx =
+      :maps.map(
+        fn _name, vals ->
+          :maps.fold(
+            fn v, set, acc ->
+              case :maps.filter(fn nid, _ -> live?.(nid) end, set) do
+                kept when map_size(kept) == map_size(set) -> acc
+                kept when map_size(kept) == 0 -> Map.delete(acc, v)
+                kept -> Map.put(acc, v, kept)
+              end
+            end,
+            vals,
+            vals
+          )
+        end,
+        s.aidx
+      )
+
+    gc_rest(%{s | nodes: nodes, ids: ids, aidx: aidx}, live?)
+  end
+
+  # The state without the dead nodes (a few of them): each one leaves the indexes.
+  defp gc_drop(s, live?) do
+    dead =
+      :maps.fold(
+        fn nid, n, acc -> if live?.(nid), do: acc, else: [{nid, n} | acc] end,
+        [],
+        s.nodes
+      )
+
+    aidx = s.aidx
+    ids = :lists.foldl(fn {nid, n}, ids -> unindex(ids, element_id(n), nid) end, s.ids, dead)
+    indexed = for {_, n} = e <- dead, indexed?(n, aidx), do: e
+
+    aidx =
+      if indexed == [],
+        do: aidx,
+        else:
+          :maps.map(
+            fn name, vals ->
+              :lists.foldl(
+                fn {nid, n}, acc -> attr_out(acc, attr_value(n, name), nid) end,
+                vals,
+                indexed
+              )
+            end,
+            aidx
+          )
+
+    nodes = Map.drop(s.nodes, for({nid, _} <- dead, do: nid))
+    gc_rest(%{s | nodes: nodes, ids: ids, aidx: aidx}, live?)
+  end
+
+  # the other maps and sets of node ids: the `<iframe>`s and the custom elements made
+  defp gc_rest(s, live?) do
+    ce_done = fn set -> if MapSet.size(set) == 0, do: set, else: MapSet.filter(set, live?) end
+
+    realms =
+      for {d, r} <- s.realms, into: %{} do
+        case r.fields do
+          %{ce_done: set} = f -> {d, %{r | fields: %{f | ce_done: ce_done.(set)}}}
+          _ -> {d, r}
+        end
+      end
+
+    %{
+      s
+      | iframes: gc_filter(s.iframes, live?),
+        ce_done: ce_done.(s.ce_done),
+        realms: realms
+    }
+  end
 
   # a node of a frame that was torn down is gone from the map, but a page may still hold it:
   # it then reads as an empty, detached node
@@ -2580,9 +2941,11 @@ defmodule Browser.JS.DOM do
         set_attr(nid, "id", to_str(v))
         :ok
 
+      # (a negative size keeps the size the canvas has)
       k when k in ["width", "height"] and n.tag == "canvas" ->
         num = to_num_or_zero(v)
-        set_attr(nid, k, Integer.to_string(if(num >= 0, do: trunc(num), else: canvas_size(n, k))))
+        num = if num >= 0, do: num, else: canvas_size(n, k)
+        set_attr(nid, k, Integer.to_string(trunc(num)))
         :ok
 
       "className" ->
@@ -3284,16 +3647,10 @@ defmodule Browser.JS.DOM do
   defp match_cond(n, {:pseudo, "last-of-type", _}), do: List.last(same_type_kids(n)) == n.id
   defp match_cond(n, {:pseudo, "only-of-type", _}), do: same_type_kids(n) == [n.id]
 
-  defp match_cond(n, {:pseudo, "nth-child", arg}), do: nth_match(n, arg, false, &kid_elements/1)
-
-  defp match_cond(n, {:pseudo, "nth-last-child", arg}),
-    do: nth_match(n, arg, true, &kid_elements/1)
-
-  defp match_cond(n, {:pseudo, "nth-of-type", arg}),
-    do: nth_match(n, arg, false, &same_type_kids/1)
-
-  defp match_cond(n, {:pseudo, "nth-last-of-type", arg}),
-    do: nth_match(n, arg, true, &same_type_kids/1)
+  defp match_cond(n, {:pseudo, "nth-child", arg}), do: nth_match(n, arg, false, false)
+  defp match_cond(n, {:pseudo, "nth-last-child", arg}), do: nth_match(n, arg, true, false)
+  defp match_cond(n, {:pseudo, "nth-of-type", arg}), do: nth_match(n, arg, false, true)
+  defp match_cond(n, {:pseudo, "nth-last-of-type", arg}), do: nth_match(n, arg, true, true)
 
   defp match_cond(n, {:pseudo, "has", arg}) when is_binary(arg) do
     arg
@@ -3380,7 +3737,8 @@ defmodule Browser.JS.DOM do
   end
 
   # `:nth-child(an+b)` and its kin: is the element at a position the formula gives?
-  defp nth_match(n, arg, from_end?, siblings_fun) do
+  # `same_type?` counts only the siblings with the tag of the element (`:nth-of-type`).
+  defp nth_match(n, arg, from_end?, same_type?) do
     {anb, of_sel} =
       memo({:nth, arg}, fn ->
         case String.split(arg || "", ~r/\s+of\s+/, parts: 2) do
@@ -3389,11 +3747,17 @@ defmodule Browser.JS.DOM do
         end
       end)
 
-    kids = siblings_fun.(n)
-    kids = if of_sel, do: Enum.filter(kids, &matches?(&1, of_sel)), else: kids
-    kids = if from_end?, do: Enum.reverse(kids), else: kids
+    index =
+      if of_sel do
+        kids = if same_type?, do: same_type_kids(n), else: kid_elements(n)
+        kids = Enum.filter(kids, &matches?(&1, of_sel))
+        kids = if from_end?, do: Enum.reverse(kids), else: kids
+        Enum.find_index(kids, &(&1 == n.id))
+      else
+        sibling_index(n, from_end?, if(same_type?, do: n.tag, else: :any))
+      end
 
-    case Enum.find_index(kids, &(&1 == n.id)) do
+    case index do
       nil ->
         false
 
@@ -3409,6 +3773,33 @@ defmodule Browser.JS.DOM do
           :error ->
             false
         end
+    end
+  end
+
+  # The index of the element `n` among the element children of its parent that have the tag
+  # `tag` (`:any`: all of them), from the end when `from_end?`, or nil: as the index of `n` in
+  # `kid_elements/1` or `same_type_kids/1`. The walk stops at `n`. A query asks
+  # `:nth-child(i)` of each candidate before the match, so a list of all the children for
+  # each candidate made a query on a long list slow (Speedometer's jQuery suite).
+  defp sibling_index(%{parent: nil}, _from_end?, _tag), do: 0
+  defp sibling_index(%{kind: kind}, _from_end?, _tag) when kind != :element, do: nil
+
+  defp sibling_index(n, from_end?, tag) do
+    kids = node(n.parent).kids
+    kids = if from_end?, do: Enum.reverse(kids), else: kids
+    count_before(kids, n.id, tag, 0)
+  end
+
+  defp count_before([], _nid, _tag, _i), do: nil
+  defp count_before([nid | _], nid, _tag, i), do: i
+
+  defp count_before([k | rest], nid, tag, i) do
+    case node(k) do
+      %{kind: :element, tag: t} when tag == :any or t == tag ->
+        count_before(rest, nid, tag, i + 1)
+
+      _ ->
+        count_before(rest, nid, tag, i)
     end
   end
 
@@ -4318,7 +4709,7 @@ defmodule Browser.JS.DOM do
 
   # `<iframe>`s in the subtree that a script is putting into the document
   defp frames_arriving(nid) do
-    if Process.get(:dom_has_iframe) && connected?(nid) do
+    if Process.get(:dom_has_iframe) && frame_in_doc?(st(), nid) && connected?(nid) do
       for e <- frames_in(nid), do: load_frame(e)
     end
 
@@ -4327,7 +4718,7 @@ defmodule Browser.JS.DOM do
 
   # the realms of the frames in a subtree that is leaving the document go with it
   defp frames_leaving(nid) do
-    if Process.get(:dom_has_iframe) && st().frames != %{} do
+    if Process.get(:dom_has_iframe) && st().frames != %{} && frame_in_doc?(st(), nid) do
       for e <- frames_in(nid) do
         cancel_frame_load(e)
         if d = Map.get(st().frames, e), do: destroy_realm(d)
@@ -4366,6 +4757,22 @@ defmodule Browser.JS.DOM do
           found ->
             found
         end
+    end
+  end
+
+  # True when an `<iframe>` has the document of `nid`. A node in the subtree of `nid` has the
+  # document of `nid` (`adopt/2` moves a whole subtree, and `destroy_realm/1` also finds the
+  # nodes of a document by this field), so with no such `<iframe>` the subtree has none and
+  # `frames_in/1` has nothing to find. Most changes are in a document with no `<iframe>`, as
+  # the app in the frame of a Speedometer suite: they then do no walk.
+  defp frame_in_doc?(s, nid) do
+    case s.nodes do
+      %{^nid => %{doc: doc}} ->
+        nodes = s.nodes
+        Enum.any?(Map.keys(s.iframes), fn e -> match?(%{^e => %{doc: ^doc}}, nodes) end)
+
+      _ ->
+        true
     end
   end
 
@@ -5061,13 +5468,17 @@ defmodule Browser.JS.DOM do
   defp canvas_context(_this, _kind), do: :null
 
   # The surface of a canvas, made when first needed and again when the script changes the
-  # canvas's size (which also clears it).
+  # canvas's size (which also clears it). The size is the one that `canvas.width` and
+  # `canvas.height` give (`canvas_size/2`), read from the node: each call of the context
+  # comes here, and two reads through the properties of the element cost more than most
+  # drawing calls.
   defp canvas_surface(this) do
     nid = this_nid(this)
+    n = node(nid)
 
-    if node(nid).tag == "canvas" do
-      w = canvas_dim(this, nid, "width", 300)
-      h = canvas_dim(this, nid, "height", 150)
+    if n.tag == "canvas" do
+      w = trunc(canvas_size(n, "width"))
+      h = trunc(canvas_size(n, "height"))
 
       case Process.get({:canvas, nid}) do
         %Browser.Canvas{w: ^w, h: ^h} = surface -> surface
@@ -5090,19 +5501,6 @@ defmodule Browser.JS.DOM do
       _ ->
         default * 1.0
     end
-  end
-
-  defp canvas_dim(this, nid, name, default) do
-    from_prop = Interp.get(this, name)
-
-    n =
-      cond do
-        is_number(from_prop) -> from_prop
-        v = get_attr(node(nid), name) -> to_num(v)
-        true -> default
-      end
-
-    if is_number(n) and n >= 0, do: trunc(n), else: default
   end
 
   # `n` finite numbers from the arguments as floats, or nil: a call with a NaN or an infinite

@@ -16,8 +16,13 @@ defmodule Browser.JS.GC do
   of `Browser.JS.Async`, so the walk visits it and finds the frame that it keeps. The walk
   stops at the compiled closures in it. The process key `:js_cps_vals` holds the values of
   a lift template only while the template runs, so it is a root like any other key. The
-  walk reads the document's state through `Browser.JS.DOM.gc_root/1`, which leaves out the
-  node table and the other fields that hold no JS value. The lexer's tables and the boxes
+  walk reads the document's state through `Browser.JS.DOM.gc_begin/2`, which leaves out the
+  node table and the other fields that hold no JS value. The wrappers and the listeners of
+  the nodes are not roots either: the walk goes into them when it finds their node live, and
+  the nodes that are not live leave the node table (see "the JS collector and the node
+  table" in `Browser.JS.DOM`). A plain integer in the data of a wrapper of the DOM or in the
+  environment of an Elixir fun can be the id of a node, and the walk then reads it as a
+  reference to the node too (`push_nids/3`). The lexer's tables and the boxes
   of the layout are not roots: they hold offsets and numbers only. The fields of a heap
   record that `Browser.JS.Obj.no_refs?/1` names are not walked: they hold counts and keys,
   and a count must not keep a dead object alive. The cells of the inline
@@ -36,8 +41,13 @@ defmodule Browser.JS.GC do
   import Bitwise
   require Browser.JS.Obj, as: Obj
   require Browser.JS.Interp, as: Interp
+  require Browser.JS.DOM, as: DOM
 
   @min_collect 100_000
+
+  # (the tags of a node id and of Elixir data on the stack of the walk, see `push_nids/3`)
+  @node_tag :"$js_gc_node"
+  @nids_tag :"$js_gc_nids"
 
   # Check mode (`JS_RESOLVE_CHECK=1`): the fields of the document that the walk leaves out
   # must hold no JS value (`check_no_values/1`).
@@ -81,7 +91,7 @@ defmodule Browser.JS.GC do
   @doc "Frees every heap entry not reachable from the process dictionary; returns how many."
   def collect do
     # (the heap's objects are the process dictionary entries under integer keys)
-    {ids, roots} =
+    {ids, roots, node_keys} =
       :lists.foldl(
         fn
           # (a leaf frame of a normal build, see `Browser.JS.Interp`: no script runs during
@@ -89,7 +99,7 @@ defmodule Browser.JS.GC do
           # would be too large. The key goes, so that the walk cannot read a number of that
           # size as the id of the old frame.)
           {k, _}, acc when is_integer(k) and k >= Interp.leaf_base() -> erase_key(k, acc)
-          {k, _}, {ids, roots} when is_integer(k) and k >= 0 -> {[k | ids], roots}
+          {k, _}, {ids, roots, nk} when is_integer(k) and k >= 0 -> {[k | ids], roots, nk}
           # (a negative key is the cell of an inline cache, see `Browser.JS.Shape`: it is not
           # a heap entry, so the sweep must not erase it, and it is not a root, so the id of
           # a prototype in it does not keep the prototype alive)
@@ -137,19 +147,45 @@ defmodule Browser.JS.GC do
           {:dom_forced_rects, _}, acc -> acc
           {:dom_forced, _}, acc -> acc
           {:dom_forced_spent, _}, acc -> acc
-          # (the document's state: only the fields that can hold a JS value, see
-          # `Browser.JS.DOM.gc_root/1`; the node table is large and holds no JS value)
-          {:dom, v}, {ids, roots} when is_map(v) -> {ids, [dom_root(v) | roots]}
-          {_, v}, {ids, roots} -> {ids, [v | roots]}
+          # (the document's state is read below, see `Browser.JS.DOM.gc_begin/2`)
+          {:dom, v}, acc when is_map(v) -> acc
+          # (the process keys of a node are walked when the node is live)
+          {k, v}, {ids, roots, nk} when DOM.gc_node_key?(k) -> {ids, roots, [{k, v} | nk]}
+          {_, v}, {ids, roots, nk} -> {ids, [v | roots], nk}
         end,
-        {[], []},
+        {[], [], []},
         Process.get()
       )
 
+    # The document's state without the fields that hold no JS value (the node table is
+    # large and holds none), the terms that the live root trees of nodes hold, and the bound
+    # of the node ids.
+    {roots, terms, limit, nodes} =
+      case Process.get(:dom) do
+        %{nodes: nodes} = s ->
+          {root, terms, limit} = dom_begin(s, node_keys)
+          {[root | roots], terms, limit, nodes}
+
+        _ ->
+          {roots, [], 0, %{}}
+      end
+
     # The marks are a bitmap with one bit for each heap id up to the largest key. A bit costs
     # less than an entry of a table, and it makes no garbage for the process's collector.
-    marks = :atomics.new(div(:lists.max([0 | ids]), 64) + 1, signed: false)
-    mark(Enum.reduce(roots, [], &push(&1, &2, marks)), marks)
+    # A second bitmap has the plain integers below `limit` that the walk has looked at as
+    # node ids.
+    marks =
+      {:atomics.new(div(:lists.max([0 | ids]), 64) + 1, signed: false),
+       :atomics.new(div(limit, 64) + 1, signed: false), limit, nodes}
+
+    # (the nodes that the walk did not find live leave the node table, see
+    # `Browser.JS.DOM.gc_sweep/0`)
+    try do
+      mark(Enum.reduce(roots, push_list(terms, [], marks), &push(&1, &2, marks)), marks)
+      if limit > 0, do: DOM.gc_sweep()
+    after
+      Process.delete(:js_gc_dom)
+    end
 
     {freed, live} =
       :lists.foldl(
@@ -179,27 +215,27 @@ defmodule Browser.JS.GC do
 
   @compile {:inline, marked?: 2}
   defp marked?(marks, id),
-    do: (:atomics.get(marks, (id >>> 6) + 1) &&& 1 <<< (id &&& 63)) != 0
+    do: (:atomics.get(elem(marks, 0), (id >>> 6) + 1) &&& 1 <<< (id &&& 63)) != 0
 
-  # Marks `id`; false when it was marked before. Only a key of the process dictionary gets
-  # here, so the bitmap has a bit for it.
+  # Sets the bit of `id` in the bitmap `bits`; false when it was set before. For the heap
+  # bitmap, only a key of the process dictionary gets here, so the bitmap has a bit for it.
   @compile {:inline, mark_new: 2}
-  defp mark_new(marks, id) do
+  defp mark_new(bits, id) do
     i = (id >>> 6) + 1
     bit = 1 <<< (id &&& 63)
-    word = :atomics.get(marks, i)
+    word = :atomics.get(bits, i)
 
     if (word &&& bit) == 0 do
-      :atomics.put(marks, i, word ||| bit)
+      :atomics.put(bits, i, word ||| bit)
       true
     else
       false
     end
   end
 
-  defp dom_root(s) do
-    if @check, do: check_no_values(Browser.JS.DOM.gc_left_out(s))
-    Browser.JS.DOM.gc_root(s)
+  defp dom_begin(s, node_keys) do
+    if @check, do: check_no_values(DOM.gc_left_out(s))
+    DOM.gc_begin(s, node_keys)
   end
 
   # Check mode: `t` holds no object and no fun. The walk of `collect/0` leaves `t` out, so
@@ -371,6 +407,16 @@ defmodule Browser.JS.GC do
   # `stack` holds what is still to be looked at: only terms that can lead to heap entries
   defp mark([], _marks), do: :ok
 
+  # The id of a node that the walk found (`push_nids/3`): when the node was not live, its
+  # tree is live now, and the walk goes on into what the tree holds
+  # (`Browser.JS.DOM.gc_reach/1`).
+  defp mark([{@node_tag, nid} | rest], marks),
+    do: mark(push_list(DOM.gc_reach(nid), rest, marks), marks)
+
+  # Elixir data (see `push_nids/3`): the terms in it are Elixir data too, until the walk
+  # comes to a heap entry or to a term that `mark/2` knows.
+  defp mark([{@nids_tag, t} | rest], marks), do: mark(expand_nids(t, rest, marks), marks)
+
   # A frame: element 2 is the resolver's record. Only the parent, the root and the slots can
   # hold ids. The depths and the lines in the call chain and the line in `call_pos` must not
   # keep a random object alive. The guard names the two record structs: other tuples, such
@@ -415,16 +461,7 @@ defmodule Browser.JS.GC do
   defp mark([t | rest], marks) when is_map(t),
     do: mark(push_pairs(:maps.to_list(t), rest, marks), marks)
 
-  defp mark([t | rest], marks) when is_function(t) do
-    if compiled?(t) do
-      mark(rest, marks)
-    else
-      case :erlang.fun_info(t, :env) do
-        {:env, env} -> mark(push_list(env, rest, marks), marks)
-        _ -> mark(rest, marks)
-      end
-    end
-  end
+  defp mark([t | rest], marks) when is_function(t), do: mark(mark_fun(t, rest, marks), marks)
 
   defp mark([_ | rest], marks), do: mark(rest, marks)
 
@@ -440,6 +477,10 @@ defmodule Browser.JS.GC do
 
   defp push_fields([{k, _} | fs], stack, marks) when Obj.no_refs?(k),
     do: push_fields(fs, stack, marks)
+
+  # (the data of a wrapper of the DOM: a node id, or a tuple that holds one)
+  defp push_fields([{:host, {DOM, data}} | fs], stack, marks),
+    do: push_fields(fs, push_nids(data, stack, marks), marks)
 
   defp push_fields([{_, v} | fs], stack, marks), do: push_fields(fs, push(v, stack, marks), marks)
 
@@ -466,7 +507,23 @@ defmodule Browser.JS.GC do
   # A heap id is marked when it is first reached, and its entry is looked at then. Only an
   # integer of 0 or more can be a heap id: a negative integer (a JS value, a count) is the
   # key of the cell of an inline cache, which must not be walked as an object.
-  defp push(t, stack, marks) when is_integer(t) and t >= 0 do
+  defp push(t, stack, marks) when is_integer(t) and t >= 0, do: push_id(t, stack, marks)
+
+  # A reference `{:obj, id}` is the term that the walk meets most: its id is marked at
+  # once, so the tuple does not go on the stack. Its id is a heap id only, not a node id.
+  defp push({:obj, id}, stack, marks) when is_integer(id), do: push_id(id, stack, marks)
+
+  defp push([], stack, _marks), do: stack
+
+  defp push(t, stack, _marks) when is_tuple(t) or is_map(t) or is_list(t) or is_function(t),
+    do: [t | stack]
+
+  defp push(_, stack, _marks), do: stack
+
+  # A heap id is marked when it is first reached, and its entry is looked at then. Only an
+  # integer of 0 or more can be a heap id: a negative integer (a JS value, a count) is the
+  # key of the cell of an inline cache, which must not be walked as an object.
+  defp push_id(t, stack, marks) when t >= 0 do
     case :erlang.get(t) do
       :undefined ->
         stack
@@ -478,20 +535,89 @@ defmodule Browser.JS.GC do
         stack
 
       obj ->
-        if mark_new(marks, t), do: [obj | stack], else: stack
+        if mark_new(elem(marks, 0), t), do: [obj | stack], else: stack
     end
   end
 
-  # A reference `{:obj, id}` is the term that the walk meets most: its id is marked at
-  # once, so the tuple does not go on the stack.
-  defp push({:obj, id}, stack, marks) when is_integer(id), do: push(id, stack, marks)
+  defp push_id(_t, stack, _marks), do: stack
 
-  defp push([], stack, _marks), do: stack
+  # Elixir data that can hold node ids: the data of a wrapper of the DOM and the environment
+  # of an Elixir fun (a native can hold a node id). In it, a plain integer can also be the id
+  # of a node (see "the JS collector and the node table" in `Browser.JS.DOM`). The walk looks
+  # an integer below the bound of the node ids up in the node table the first time it finds
+  # it, and a node goes on the stack. A JS value never holds a node id (a script reaches a
+  # node only through its wrapper), so a number in a slot, a property or an element does not
+  # keep a node alive. The process keys hold counters, heap ids and sets of node ids that
+  # must not keep a node alive (the scripts that ran), so they are not Elixir data here: the
+  # node ids that the state of the document holds are roots of their own
+  # (`Browser.JS.DOM.gc_begin/2`), and the funs in the process keys are walked as funs.
+  defp push_nids(t, stack, marks) when is_integer(t) and t >= 0 do
+    push_id(t, push_node(t, stack, marks), marks)
+  end
 
-  defp push(t, stack, _marks) when is_tuple(t) or is_map(t) or is_list(t) or is_function(t),
-    do: [t | stack]
+  defp push_nids({:obj, id}, stack, marks) when is_integer(id), do: push_id(id, stack, marks)
+  defp push_nids([], stack, _marks), do: stack
 
-  defp push(_, stack, _marks), do: stack
+  defp push_nids(t, stack, _marks) when is_tuple(t) or is_map(t) or is_list(t) or is_function(t),
+    do: [{@nids_tag, t} | stack]
+
+  defp push_nids(_, stack, _marks), do: stack
+
+  @compile {:inline, push_node: 3}
+  defp push_node(t, stack, marks) do
+    if t < elem(marks, 2) and mark_new(elem(marks, 1), t) and is_map_key(elem(marks, 3), t),
+      do: [{@node_tag, t} | stack],
+      else: stack
+  end
+
+  # One level of Elixir data. A frame, a heap record, a closure and a struct (the facts of
+  # the resolver) go to `mark/2`, which knows them; a shape holds no id. An integer key of a
+  # map can be a node id, but it is not a heap id (see `push_pairs/3`).
+  defp expand_nids(t, stack, _marks)
+       when (is_tuple(t) and tuple_size(t) >= 5 and
+               (is_struct(elem(t, 1), Browser.JS.Resolve.Info) or
+                  is_struct(elem(t, 1), Browser.JS.Resolve.Scope))) or
+              Obj.heap_record?(t) or is_struct(t) or
+              (is_map(t) and is_map_key(t, :params) and is_map_key(t, :body)),
+       do: [t | stack]
+
+  defp expand_nids({:js_shape, _, _, _, _, _, _}, stack, _marks), do: stack
+
+  defp expand_nids(t, stack, marks) when is_tuple(t),
+    do: :lists.foldl(&push_nids(&1, &2, marks), stack, Tuple.to_list(t))
+
+  defp expand_nids([h | t], stack, marks) when is_list(t),
+    do: expand_nids(t, push_nids(h, stack, marks), marks)
+
+  defp expand_nids([h | t], stack, marks), do: push_nids(t, push_nids(h, stack, marks), marks)
+  defp expand_nids([], stack, _marks), do: stack
+
+  defp expand_nids(t, stack, marks) when is_map(t) do
+    :maps.fold(
+      fn
+        k, v, acc when is_integer(k) and k >= 0 -> push_nids(v, push_node(k, acc, marks), marks)
+        k, v, acc when is_integer(k) -> push_nids(v, acc, marks)
+        k, v, acc -> push_nids(v, push_nids(k, acc, marks), marks)
+      end,
+      stack,
+      t
+    )
+  end
+
+  defp expand_nids(t, stack, marks) when is_function(t), do: mark_fun(t, stack, marks)
+
+  # The environment of a fun, as Elixir data (a native can hold a node id), but not the
+  # environment of a fun of the compiled code.
+  defp mark_fun(t, stack, marks) do
+    if compiled?(t) do
+      stack
+    else
+      case :erlang.fun_info(t, :env) do
+        {:env, env} -> :lists.foldl(&push_nids(&1, &2, marks), stack, env)
+        _ -> stack
+      end
+    end
+  end
 
   # A fun of the compiled code (step 5). It holds only values known at compile time: no
   # heap id and no frame id (the capture rule of `Browser.JS.Compile`). So the walk does
