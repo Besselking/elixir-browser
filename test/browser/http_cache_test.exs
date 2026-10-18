@@ -161,4 +161,97 @@ defmodule Browser.HttpCacheTest do
       assert entry.last_modified == to_string(@lm)
     end
   end
+
+  # The table of the loads in progress (`Browser.Fetch`) belongs to this process. When the
+  # process stops, the table goes, with the rows of the loads that wait.
+  describe "a restart while a load waits for another load" do
+    # a server that tells the test of each request, and replies with what the test sends
+    defp held_server do
+      test = self()
+      {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+      {:ok, port} = :inet.port(listen)
+      spawn_link(fn -> accept_loop(listen, test) end)
+      "http://127.0.0.1:#{port}"
+    end
+
+    defp accept_loop(listen, test) do
+      case :gen_tcp.accept(listen, 5_000) do
+        {:ok, sock} ->
+          handler =
+            spawn(fn ->
+              receive do
+                :go -> :ok
+              end
+
+              {:ok, _head} = :gen_tcp.recv(sock, 0, 5_000)
+              send(test, {:held, self()})
+
+              receive do
+                {:reply, body} ->
+                  :gen_tcp.send(
+                    sock,
+                    "HTTP/1.1 200 OK\r\nContent-Length: #{byte_size(body)}\r\n" <>
+                      "Connection: close\r\n\r\n" <> body
+                  )
+              end
+
+              :gen_tcp.close(sock)
+            end)
+
+          :gen_tcp.controlling_process(sock, handler)
+          send(handler, :go)
+          accept_loop(listen, test)
+
+        _ ->
+          :gen_tcp.close(listen)
+      end
+    end
+
+    test "the load that waits makes its own request" do
+      url = held_server() <> "/restart.css"
+      test = self()
+
+      # (the first load stays alive after its load, as the process of a page does)
+      first =
+        spawn_link(fn ->
+          send(test, {:first, Browser.Fetch.load(url)})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:held, h1}
+      second = Task.async(fn -> Browser.Fetch.load(url) end)
+      refute_receive {:held, _}, 100
+
+      old = Process.whereis(HttpCache)
+      ref = Process.monitor(old)
+      Process.exit(old, :kill)
+      assert_receive {:DOWN, ^ref, _, _, _}
+
+      wait_until(fn ->
+        Process.whereis(HttpCache) not in [nil, old] and
+          :ets.whereis(Browser.Fetch.inflight_table()) != :undefined
+      end)
+
+      send(h1, {:reply, "first"})
+      assert_receive {:first, {:ok, "first", _}}
+      assert_receive {:held, h2}, 1_000
+      send(h2, {:reply, "own"})
+      assert {:ok, "own", _} = Task.await(second)
+      send(first, :stop)
+    end
+
+    defp wait_until(check, n \\ 100) do
+      cond do
+        check.() ->
+          :ok
+
+        n > 0 ->
+          Process.sleep(10)
+          wait_until(check, n - 1)
+      end
+    end
+  end
 end

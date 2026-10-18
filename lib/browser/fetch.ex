@@ -238,10 +238,25 @@ defmodule Browser.Fetch do
 
   defp shared(_url, _redirects, _ctx, fun), do: fun.()
 
+  # The table holds `{key, leader}` for each first load, and `{{:wait, key, pid}, leader}`
+  # for each load that waits for it. The leader removes its key first, then each row of a
+  # waiter of its own: only the one that removes the row of a waiter (the leader or the
+  # waiter) sends or gets the result, so that no message stays in the mailbox of a waiter.
+  # The table belongs to `Browser.HttpCache`: if that process stops, the table goes with
+  # the rows, and a waiter makes its own request.
   defp lead_or_wait(key, fun) do
-    if :ets.insert_new(@inflight, {key, self()}),
-      do: lead(key, fun),
-      else: wait(key, fun)
+    case first?(key) do
+      true -> lead(key, fun)
+      false -> wait(key, fun)
+      :gone -> fun.()
+    end
+  end
+
+  defp first?(key) do
+    :ets.insert_new(@inflight, {key, self()})
+  rescue
+    # the table went with its owner, after the check of `shared/4`
+    ArgumentError -> :gone
   end
 
   defp lead(key, fun) do
@@ -252,14 +267,7 @@ defmodule Browser.Fetch do
         kind, reason -> {:raised, kind, reason, __STACKTRACE__}
       end
 
-    # the key goes first: a load that adds itself as a waiter after this sees no key and
-    # makes its own request
-    :ets.delete(@inflight, key)
-
-    for pid <- :ets.select(@inflight, [{{{:wait, key, :"$1"}}, [], [:"$1"]}]) do
-      send(pid, {@inflight, key, outcome})
-      :ets.delete(@inflight, {:wait, key, pid})
-    end
+    finish(key, outcome)
 
     case outcome do
       {:ok, result} -> result
@@ -267,17 +275,33 @@ defmodule Browser.Fetch do
     end
   end
 
-  defp wait(key, fun) do
+  defp finish(key, outcome) do
     me = self()
-    :ets.insert(@inflight, {{:wait, key, me}})
+    # the key goes first: a load that adds itself as a waiter after this sees no key and
+    # makes its own request
+    :ets.delete_object(@inflight, {key, me})
 
-    case :ets.lookup(@inflight, key) do
-      [{_, leader}] when leader != me ->
-        ref = Process.monitor(leader)
+    for pid <- :ets.select(@inflight, [{{{:wait, key, :"$1"}, me}, [], [:"$1"]}]),
+        take(key, pid, me),
+        do: send(pid, {@inflight, key, outcome})
 
+    :ok
+  rescue
+    # the table went with its owner; each waiter watches the owner
+    ArgumentError -> :ok
+  end
+
+  # removes the row of the waiter `pid` of `leader`; false when it was not there
+  defp take(key, pid, leader),
+    do: :ets.select_delete(@inflight, [{{{:wait, key, pid}, leader}, [], [true]}]) == 1
+
+  defp wait(key, fun) do
+    case join(key) do
+      {leader, ref, owner} ->
         receive do
           {@inflight, ^key, outcome} ->
             Process.demonitor(ref, [:flush])
+            Process.demonitor(owner, [:flush])
 
             case outcome do
               {:ok, result} -> result
@@ -285,17 +309,63 @@ defmodule Browser.Fetch do
             end
 
           {:DOWN, ^ref, :process, _, _} ->
-            :ets.delete(@inflight, {:wait, key, me})
-            # a process that stopped in the middle leaves its key behind
-            :ets.delete_object(@inflight, {key, leader})
+            Process.demonitor(owner, [:flush])
+            forget(key, leader)
+            fun.()
+
+          {:DOWN, ^owner, :process, _, _} ->
+            Process.demonitor(ref, [:flush])
             fun.()
         end
 
-      _ ->
-        # the first load has just finished (or it is this process)
-        :ets.delete(@inflight, {:wait, key, me})
+      :own ->
         fun.()
     end
+  end
+
+  # Adds this load as a waiter of the first load of `key`: `{leader, ref, owner}` (the
+  # monitors of the leader and of the owner of the table), or `:own` when this load makes
+  # its own request (the first load has just finished, or it is this process).
+  defp join(key) do
+    me = self()
+
+    with [{_, leader}] when leader != me <- :ets.lookup(@inflight, key),
+         owner when is_pid(owner) <- :ets.info(@inflight, :owner) do
+      ref = Process.monitor(leader)
+      owner = Process.monitor(owner)
+
+      if joined?(key, me, leader) do
+        {leader, ref, owner}
+      else
+        Process.demonitor(ref, [:flush])
+        Process.demonitor(owner, [:flush])
+        :own
+      end
+    else
+      _ -> :own
+    end
+  rescue
+    ArgumentError -> :own
+  end
+
+  # The leader reads the waiters after it removes its key. While the key is there, the leader
+  # reads this row. If the key went before the row came, this load makes its own request,
+  # unless the leader has already taken the row: then its result comes.
+  defp joined?(key, me, leader) do
+    :ets.insert(@inflight, {{:wait, key, me}, leader})
+    :ets.lookup(@inflight, key) == [{key, leader}] or not take(key, me, leader)
+  rescue
+    # the table went with its owner: the :DOWN of the owner comes
+    ArgumentError -> true
+  end
+
+  # A leader that stopped in the middle leaves its key and the rows of its waiters behind
+  # (also of waiters that stopped).
+  defp forget(key, leader) do
+    :ets.delete_object(@inflight, {key, leader})
+    :ets.select_delete(@inflight, [{{{:wait, key, :_}, leader}, [], [true]}])
+  rescue
+    ArgumentError -> :ok
   end
 
   # `entry`: a stale cached response to revalidate, or nil

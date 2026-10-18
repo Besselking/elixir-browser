@@ -498,6 +498,47 @@ defmodule Browser.FetchTest do
       assert {:ok, "again", _} = Task.await(third)
     end
 
+    # the rows of the table of loads in progress that are about `url`
+    defp inflight_rows(url),
+      do: for(row <- :ets.tab2list(Fetch.inflight_table()), inspect(row) =~ url, do: row)
+
+    test "a first load and a load that waits for it stop: the next load removes their rows" do
+      base = held_server()
+      url = base <> "/gone.css"
+      first = spawn(fn -> Fetch.load(url) end)
+      assert_receive {:held, _, "/gone.css"}
+      second = spawn(fn -> Fetch.load(url) end)
+      refute_receive {:held, _, _}, 100
+      assert length(inflight_rows(url)) == 2
+
+      Process.exit(second, :kill)
+      Process.exit(first, :kill)
+      third = Task.async(fn -> Fetch.load(url) end)
+      assert_receive {:held, handler, "/gone.css"}
+      send(handler, {:reply, ok("x")})
+      assert {:ok, "x", _} = Task.await(third)
+      assert inflight_rows(url) == []
+    end
+
+    test "a load that waits gets the result and leaves no row and no message" do
+      base = held_server()
+      url = base <> "/clean.css"
+      first = Task.async(fn -> Fetch.load(url) end)
+      assert_receive {:held, handler, "/clean.css"}
+
+      second =
+        Task.async(fn ->
+          result = Fetch.load(url)
+          {result, Process.info(self(), :messages)}
+        end)
+
+      refute_receive {:held, _, _}, 100
+      send(handler, {:reply, ok("x")})
+      assert {:ok, "x", _} = Task.await(first)
+      assert {{:ok, "x", _}, {:messages, []}} = Task.await(second)
+      assert inflight_rows(url) == []
+    end
+
     test "two loads whose redirects go to the address of the other do not wait for each other" do
       base = held_server()
       a = Task.async(fn -> Fetch.load(base <> "/a") end)
