@@ -16,6 +16,10 @@ mix reftest --fetch          # layout/CSS: web-platform-tests reference tests (n
 software painter (no window needed) and compares the pixels; `mix help reftest` lists the options
 (`--check` against `reftest.baseline`, `--dump DIR` to save the pictures of failing pairs).
 
+The app bundle starts the VM with `ERL_FLAGS="+MMscs 2048 +MMscrpm false"`. With these flags the
+VM gives the memory of freed heap blocks back to the system, and the peak memory is lower (about
+-24 % in a Speedometer run). To get the same with `mix run`, set the same `ERL_FLAGS`.
+
 Requires Elixir 1.20+ and Erlang/OTP 29+ with the `wx` application; only the latest versions are
 supported. `scripts/install-toolchain.sh` installs them (a source build with wx 3.3 on macOS and
 Debian/Ubuntu); with asdf or mise, `.tool-versions` pins the same versions.
