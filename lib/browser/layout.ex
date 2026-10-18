@@ -376,6 +376,8 @@ defmodule Browser.Layout do
     Process.put(:layout_viewport, {0, 0, width, view_height})
     Process.put(:layout_metrics, opts[:metrics])
     Process.put(:layout_fold, Keyword.get_lazy(opts, :fold, &fold_mode_of_env/0))
+    # (`LAYOUT_LAZY=check`: an atom's entries make the items it had before, see `layout_atom/5`)
+    Process.put(:layout_lazy, Keyword.get_lazy(opts, :lazy, &lazy_mode_of_env/0))
     # the transform function lists this layout read (see `Browser.Transform.matrix/3`)
     Process.put(:layout_transforms, %{})
     {nodes, canvas} = propagate_background(nodes)
@@ -4145,6 +4147,158 @@ defmodule Browser.Layout do
     under ++ under_flow ++ flow ++ positioned
   end
 
+  # `finalize/1` that keeps an entry whole when all the items it holds paint in the same place:
+  # the same class (over the flow, under it or in it) and the same paint order. Such an entry
+  # (with the ops it waits for around it, see `wrap_ops/2`) takes the place of its items in the
+  # list, and in the sort of the positioned boxes, which is stable. So `atom_flat/1` of the
+  # result is `finalize/1` (`LAYOUT_LAZY=check` makes sure of it, see `layout_atom/5`). The
+  # entries are taken apart later, by whoever reads the items one by one; a box that clips them
+  # makes only the items it keeps (`drop_below/3`).
+  defp finalize_lazy(st) do
+    limits = if st.limits == %{}, do: nil, else: st.limits
+    {over, under_flow, flow} = sort_into_lazy(st.items, nil, limits, {[], [], []})
+    {over, under_flow, flow} = sort_into(st.rects, nil, limits, {over, under_flow, flow})
+
+    overlays = st.overlays |> Enum.reverse() |> Enum.concat()
+    overlays = if limits, do: Enum.map(overlays, &stick_limit(&1, limits)), else: overlays
+    {under, overlays} = Enum.split_with(overlays, &Map.get(&1, :under))
+
+    # (as `Enum.sort_by/2`, that also takes the entries out of their units)
+    positioned =
+      (overlays ++ over)
+      |> Enum.map(fn
+        {:unit, pz, entry} -> {pz_key(pz), entry}
+        item -> {pz_key(Map.get(item, :pz, 0)), item}
+      end)
+      |> List.keysort(0)
+      |> Enum.map(&elem(&1, 1))
+
+    under ++ under_flow ++ flow ++ positioned
+  end
+
+  # (an entry over the flow goes into `over` as `{:unit, its paint order, the entry}`)
+  defp sort_into_lazy([], _ctx, _limits, acc), do: acc
+
+  defp sort_into_lazy([{tag, d, items, _n} = entry | rest], ctx, limits, acc)
+       when tag in [:frag, :wrap] do
+    acc =
+      case ctx_summary(entry, ctx) do
+        {over?, under?, pz, _rel} ->
+          {over, under, flow} = acc
+          unit = wrap_ops(entry, ctx)
+
+          cond do
+            over? -> {[{:unit, if(pz == :none, do: 0, else: pz), unit} | over], under, flow}
+            under? -> {over, [unit | under], flow}
+            true -> {over, under, [unit | flow]}
+          end
+
+        _ ->
+          inner = if tag == :frag, do: add_dy(ctx, d), else: add_op(ctx, d)
+          sort_into_lazy(items, inner, limits, acc)
+      end
+
+    sort_into_lazy(rest, ctx, limits, acc)
+  end
+
+  defp sort_into_lazy([item | rest], ctx, limits, {over, under, flow}) do
+    item = if ctx, do: apply_ctx(item, ctx), else: item
+    item = if limits, do: stick_limit(item, limits), else: item
+
+    acc =
+      cond do
+        Map.get(item, :over) -> {[item | over], under, flow}
+        Map.get(item, :under) -> {over, [item | under], flow}
+        true -> {over, under, [item | flow]}
+      end
+
+    sort_into_lazy(rest, ctx, limits, acc)
+  end
+
+  # What all the items of an entry have that `finalize/1` reads, once the ops of the entry and
+  # of `ctx` are done: {over, under, paint order (`:none` when there is no key), the paint
+  # order of the inline box it moves with (`rel`)}. `:mixed` when two items differ, or one is
+  # sticky (`stick_limit/2` changes it at each run), and `:empty` when it holds none. This reads
+  # the items and makes no new ones. (Two items that the ops would make the same, but that
+  # differ before them, count as different.)
+  defp ctx_summary(entry, nil), do: entry_summary(entry)
+
+  defp ctx_summary(entry, {t, _}),
+    do: Enum.reduce(t, entry_summary(entry), &op_summary/2)
+
+  defp entry_summary({:frag, _, inner, _n}), do: list_summary(inner, :empty)
+  defp entry_summary({:wrap, op, inner, _n}), do: op_summary(op, list_summary(inner, :empty))
+  defp entry_summary(item), do: item_summary(item)
+
+  defp list_summary([], acc), do: acc
+
+  defp list_summary([{tag, _, _, _} = entry | rest], acc) when tag in [:frag, :wrap] do
+    case same_summary(acc, entry_summary(entry)) do
+      :mixed -> :mixed
+      acc -> list_summary(rest, acc)
+    end
+  end
+
+  defp list_summary([item | rest], {over?, under?, pz, rel} = acc)
+       when not is_map_key(item, :stick) do
+    # (most items of a long text have the same keys: they are read, and nothing is made)
+    same? =
+      Map.get(item, :over) not in [nil, false] == over? and
+        Map.get(item, :under) not in [nil, false] == under? and
+        Map.get(item, :pz, :none) === pz and
+        case item do
+          %{rel: {_, _, seq}} -> seq
+          _ -> nil
+        end === rel
+
+    if same?, do: list_summary(rest, acc), else: :mixed
+  end
+
+  defp list_summary([item | rest], acc) do
+    case same_summary(acc, item_summary(item)) do
+      :mixed -> :mixed
+      acc -> list_summary(rest, acc)
+    end
+  end
+
+  defp same_summary(:empty, s), do: s
+  defp same_summary(s, :empty), do: s
+  defp same_summary(s, s), do: s
+  defp same_summary(_, _), do: :mixed
+
+  defp item_summary(item) when is_map_key(item, :stick), do: :mixed
+
+  defp item_summary(item),
+    do:
+      {truthy?(Map.get(item, :over)), truthy?(Map.get(item, :under)), Map.get(item, :pz, :none),
+       item_rel(item)}
+
+  defp item_rel(%{rel: {_, _, seq}}), do: seq
+  defp item_rel(_item), do: nil
+
+  defp truthy?(value), do: value not in [nil, false]
+
+  # what an op does to the summary of the items it is done on (`apply_op/2`)
+  defp op_summary(_op, s) when s in [:mixed, :empty], do: s
+
+  defp op_summary({:rel, _, _, layer, pz}, {over?, under?, own, rel}),
+    do:
+      {over? or layer == :over, under? or layer == :under, if(own == :none, do: pz, else: own),
+       rel}
+
+  # (`atom_op/4`: a new paint order from `fresh`; an item that moves with an inline box goes
+  # over the rest with the paint order of that box)
+  defp op_summary({:atom, _, _, {_, _, _, _}}, {_over?, under?, _own, rel}) when rel != nil,
+    do: {true, under?, rel, nil}
+
+  defp op_summary({:atom, _, _, {_, _, _, fresh}}, {over?, under?, own, nil})
+       when fresh != nil and own not in [:none, nil] do
+    {over?, under?, fresh[own], nil}
+  end
+
+  defp op_summary({:stick, _, _}, _s), do: :mixed
+  defp op_summary(_op, s), do: s
+
   # Takes the items of a run apart (newest first, as `flat_into/3`) into what paints over the
   # flow, under it and in it, oldest first, in one pass.
   # (with the context `ctx` of the ops the entries around an item wait to do on it, see
@@ -7096,7 +7250,7 @@ defmodule Browser.Layout do
   end
 
   defp renumber_memo({:atom, _, _, _, _, _, _}, {items, height, baseline}),
-    do: {renumber_pz(items), height, baseline}
+    do: {items |> atom_flat() |> renumber_pz(), height, baseline}
 
   defp renumber_memo(_key, value), do: value
 
@@ -7620,7 +7774,11 @@ defmodule Browser.Layout do
         # heights refer to)
         sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images, cbh)
         height = sub_st.y + sub_st.gap + sub_st.ngap
-        items = finalize(sub_st)
+        items = finalize_lazy(sub_st)
+
+        if Process.get(:layout_lazy) == :check and atom_flat(items) !== finalize(sub_st),
+          do: raise("layout check: the entries an atom keeps are not the items it has")
+
         {items, height, last_baseline(items, height)}
       end
     )
@@ -9120,6 +9278,8 @@ defmodule Browser.Layout do
             dy = flex_offset(flex_align(it, gs.align), cross, it.h)
             dx = grid_justify(it, gs, it.room)
             x = Enum.at(xs, it.col) + auto_zero(it.ml) + dx
+            # (a stretched item has the items of `flex_atom/4`: see `atom_flat/1`)
+            it = %{it | items: atom_flat(it.items)}
             for item <- z_items(it), do: move(item, round(x), y + dy)
           end)
 
@@ -9187,7 +9347,7 @@ defmodule Browser.Layout do
 
   defp grid_resize(st, it, sub, w, box_h) do
     {items, h, _} = flex_atom(st, sub, w, {it.key, :grid, w, box_h})
-    %{it | items: atom_flat(items), h: h, w: w}
+    %{it | items: items, h: h, w: w}
   end
 
   # The height of every row. A row with a size of its own (`px`) has it; `fr` rows share what a
@@ -12772,6 +12932,8 @@ defmodule Browser.Layout do
   # places. `LAYOUT_FOLD=off` turns the fold off; `LAYOUT_FOLD=check` lays out as before and
   # raises when the fold finds another width (what `mix reftest --layout-check` and
   # `mix reftest --sweep` run).
+
+  defp lazy_mode_of_env, do: if(System.get_env("LAYOUT_LAZY") == "check", do: :check, else: :on)
 
   defp fold_mode_of_env do
     case System.get_env("LAYOUT_FOLD") do
