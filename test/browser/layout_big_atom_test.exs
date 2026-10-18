@@ -10,9 +10,9 @@ defmodule Browser.LayoutBigAtomTest do
 
   defp measure(text, style), do: String.length(text) * div(round(style.size), 2)
 
-  defp layout(html) do
+  defp layout(html, opts \\ []) do
     page = Page.build(html, "about:test")
-    opts = [images: %{}, svg_defs: page.svg_defs, boxes: true]
+    opts = [images: %{}, svg_defs: page.svg_defs, boxes: true] ++ opts
     {items, _height} = Layout.layout(page.nodes, 600, &measure/2, 600, opts)
     items
   end
@@ -170,8 +170,9 @@ defmodule Browser.LayoutBigAtomTest do
     for {extra, item_style} <- cases do
       # (the spaces after the fifth word are only in the big one)
       space? = &match?(%{type: :text, text: "\u00A0"}, &1)
-      small = layout(editor(extra, words(5), item_style))
-      big = layout(editor(extra, words(300), item_style))
+      # (the check mode also makes sure that the entries each atom keeps are its items)
+      small = layout(editor(extra, words(5), item_style), lazy: :check)
+      big = layout(editor(extra, words(300), item_style), lazy: :check)
       assert length(small) < 200 and length(big) > 300
 
       assert Layout.memo_norm(big |> Enum.reject(space?) |> first_words(5)) ==

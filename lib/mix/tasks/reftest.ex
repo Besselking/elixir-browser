@@ -33,7 +33,8 @@ defmodule Mix.Tasks.Reftest do
     * `--layout-check` - lay out every page also from the layout memo the page before it left
       and from its own (`LAYOUT_MEMO=check`, see `Browser.Layout.layout_kept/6`), compare each
       with a fresh layout, compare every width the sizing fold finds with the width a layout
-      finds (`LAYOUT_FOLD=check`), and exit with an error if one differs. This finds a wrong
+      finds (`LAYOUT_FOLD=check`), compare the entries each atom keeps with the items it has
+      (`LAYOUT_LAZY=check`), and exit with an error if one differs. This finds a wrong
       layout that gives the same picture, and also checks pages that fail their reference
   """
   use Mix.Task
@@ -89,6 +90,7 @@ defmodule Mix.Tasks.Reftest do
     if opts[:layout_check] do
       System.put_env("LAYOUT_MEMO", "check")
       System.put_env("LAYOUT_FOLD", "check")
+      System.put_env("LAYOUT_LAZY", "check")
     end
 
     Mix.Task.run("app.start")
