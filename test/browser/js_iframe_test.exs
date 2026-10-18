@@ -198,6 +198,42 @@ defmodule Browser.JS.IframeTest do
     assert logs == ["null 1"]
   end
 
+  # The code cache (`Browser.JS.Compile`) keeps the uids of the entries of each realm under
+  # `{:jsc_root, root}`. When a frame goes, its entries go with it; the entries of the page
+  # stay. (Only rewritten functions compile, so the test reads the cache at level 4 only.)
+  for remove? <- [false, true] do
+    test "the code cache keeps the code of a frame only while the frame is there (remove: #{remove?})" do
+      script = ~S"""
+      function inc(x) { return x + 1 }
+      for (let i = 0; i < 3; i++) inc(i);
+      const f = document.createElement("iframe");
+      f.srcdoc = "<script>function dbl(x) { return x * 2 } for (let i = 0; i < 3; i++) dbl(i)<\/script>";
+      f.onload = () => { if (window.remove) f.remove(); console.log("loaded") };
+      document.body.appendChild(f);
+      """
+
+      {raw, _} =
+        "<body><script>window.remove = #{unquote(remove?)};#{script}</script></body>"
+        |> Browser.HTML.parse()
+        |> Browser.Forms.index()
+
+      info = %{url: "http://t.test/", width: 800, height: 600, fetch: fn _ -> {:error, "404"} end}
+      pid = Runtime.start(raw, info)
+      r = Runtime.run_scripts(pid)
+      lines = for({:log, t} <- r.console, do: t) ++ collect(pid)
+      {:dictionary, dict} = Process.info(pid, :dictionary)
+      Runtime.stop(pid)
+      assert lines == ["loaded"]
+
+      if Application.get_env(:browser, :js_resolve) == 4 do
+        roots = for {{:jsc_root, _}, uids} <- dict, do: uids
+        entries = for {{:jsc, uid}, _} <- dict, do: uid
+        assert length(roots) == if(unquote(remove?), do: 1, else: 2)
+        assert Enum.sort(entries) == roots |> List.flatten() |> Enum.sort()
+      end
+    end
+  end
+
   test "document helpers of the web API work for a frame's own document" do
     {logs, errors} =
       run(~S"""
