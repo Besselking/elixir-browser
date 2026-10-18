@@ -4305,7 +4305,10 @@ defmodule Browser.Layout do
     st = %{st | clr: if(gap > 0, do: {y0, gap, st.y}, else: old)}
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
-    {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
+
+    {items, height, _base} =
+      layout_atom_flat(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
+
     # `clear` puts the float below the earlier floats on that side
     top = clear_top(st, Map.get(spec, :clear))
     top = if line_bottom, do: max(top, line_bottom), else: top
@@ -4458,7 +4461,7 @@ defmodule Browser.Layout do
     st = flush(st)
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
-    {items, height, _} = layout_atom(st, sub, w, spec.key)
+    {items, height, _} = layout_atom_flat(st, sub, w, spec.key)
     x = st.margin + st.left
     moved = for it <- items, do: move(it, x, box.top)
 
@@ -4566,7 +4569,7 @@ defmodule Browser.Layout do
     # the baseline of an inline table is the one of its first row
     base =
       if Map.get(spec, :table?, false) or Map.get(spec, :cell?, false),
-        do: table_baseline(items, base),
+        do: table_baseline(atom_flat(items), base),
         else: base
 
     place_atom(st, %{
@@ -4694,7 +4697,7 @@ defmodule Browser.Layout do
     else
       # absolutely positioned boxes are placed against their containing block, not a column
       {abs, sub} = split_outer_abs(sub)
-      {items, height, _} = layout_atom(st, sub, colw)
+      {items, height, _} = layout_atom_flat(st, sub, colw)
       {laid, height} = split_columns(items, height, n, colw, cs)
       laid = [%{type: :box, x: 0, y: 0, w: avail, h: 0, rr: 0} | laid]
 
@@ -7568,7 +7571,7 @@ defmodule Browser.Layout do
 
   # (the memo keys of atoms, extents, minimum extents and fold items hold the flex mark: the
   # layout under them reads it, and the same ops can be laid out with and without it)
-  defp layout_atom(st, sub, width, key \\ nil, cbh \\ nil) do
+  defp layout_atom(st, sub, width, key, cbh \\ nil) do
     memo(
       {:atom, key || :erlang.phash2(sub), width, cbh, Process.get(:layout_intrinsic, false),
        Process.get(:layout_boxes, false), Process.get(:layout_flex_item, false)},
@@ -7582,6 +7585,13 @@ defmodule Browser.Layout do
         {items, height, last_baseline(items, height)}
       end
     )
+  end
+
+  # `layout_atom/5` for a reader that moves, cuts or measures the items one by one: they are
+  # taken apart (see `atom_flat/1`)
+  defp layout_atom_flat(st, sub, width, key \\ nil, cbh \\ nil) do
+    {items, height, baseline} = layout_atom(st, sub, width, key, cbh)
+    {atom_flat(items), height, baseline}
   end
 
   # A flex item's height is not definite for what it holds: a percentage inside it is `auto`.
@@ -7626,37 +7636,123 @@ defmodule Browser.Layout do
     end
   end
 
-  # the `normal` line height of the last line of text in an atom
+  # the `normal` line height of the last line of text in an atom: the biggest `tn` of the texts
+  # whose top is the lowest one (in one pass, as `last_baseline/2`)
   defp last_line_tn(items) do
-    case Enum.filter(items, &(&1.type == :text)) do
-      [] ->
-        0
-
-      texts ->
-        last_y = texts |> Enum.map(& &1.y) |> Enum.max()
-        for(%{y: ^last_y} = t <- texts, do: Map.get(t, :tn, 0)) |> Enum.max()
+    case fold_texts(items, nil, &last_line_text/3) do
+      nil -> 0
+      {_top, tn} -> tn
     end
   end
+
+  defp last_line_text(it, y, nil), do: {y, Map.get(it, :tn, 0)}
+  defp last_line_text(it, y, {top, _}) when y > top, do: {y, Map.get(it, :tn, 0)}
+
+  defp last_line_text(it, y, {top, tn} = acc) when y === top do
+    case Map.get(it, :tn, 0) do
+      own when own > tn -> {top, own}
+      _ -> acc
+    end
+  end
+
+  defp last_line_text(_it, _y, acc), do: acc
 
   # the bottom of the last line of text: the lowest bottom of the texts whose top is the lowest
   # one (in one pass over the items, which an atom of a long text has many of; of equal numbers,
   # the first one counts, as with `Enum.max/1`, and a text sits on that line when its top is
   # exactly the same term)
   defp last_baseline(items, height) do
-    case Enum.reduce(items, nil, &last_text_bottom/2) do
+    case fold_texts(items, nil, &last_text_bottom/3) do
       nil -> height
       {_top, bottom} -> bottom
     end
   end
 
-  defp last_text_bottom(%{type: :text, y: y, h: h}, nil), do: {y, y + h}
-  defp last_text_bottom(%{type: :text, y: y, h: h}, {top, _}) when y > top, do: {y, y + h}
+  defp last_text_bottom(%{h: h}, y, nil), do: {y, y + h}
+  defp last_text_bottom(%{h: h}, y, {top, _}) when y > top, do: {y, y + h}
 
-  defp last_text_bottom(%{type: :text, y: y, h: h}, {top, bottom})
-       when y === top and y + h > bottom,
-       do: {top, y + h}
+  defp last_text_bottom(%{h: h}, y, {top, bottom}) when y === top and y + h > bottom,
+    do: {top, y + h}
 
-  defp last_text_bottom(_item, acc), do: acc
+  defp last_text_bottom(_it, _y, acc), do: acc
+
+  # `fun.(text, y, acc)` for each text of the items of an atom (oldest first, see
+  # `atom_flat/1`), with the `y` the text has when its entries are taken apart. No item is made:
+  # `y` is the same sum that `apply_ctx/2` makes, in the same order (`kept_into/5`). (An item
+  # that moves with an inline box around the atom, `rel`, is made: the op `:atom` moves it once
+  # more.)
+  defp fold_texts(items, acc, fun) do
+    Enum.reduce(items, acc, fn
+      {:frag, _, _, _} = entry, acc -> entry_texts(entry, nil, acc, fun)
+      {:wrap, _, _, _} = entry, acc -> entry_texts(entry, nil, acc, fun)
+      %{type: :text, y: y} = it, acc -> fun.(it, y, acc)
+      _, acc -> acc
+    end)
+  end
+
+  defp entry_texts({:frag, fdy, inner, _n}, ctx, acc, fun),
+    do: texts_newest_first(inner, add_dy(ctx, fdy), acc, fun)
+
+  defp entry_texts({:wrap, op, inner, _n}, ctx, acc, fun),
+    do: texts_newest_first(inner, add_op(ctx, op), acc, fun)
+
+  # (the entries of a run are newest first: they are visited from the end)
+  defp texts_newest_first(entries, ctx, acc, fun) do
+    dys = ctx_dys(ctx)
+
+    :lists.foldr(
+      fn
+        {:frag, _, _, _} = entry, acc -> entry_texts(entry, ctx, acc, fun)
+        {:wrap, _, _, _} = entry, acc -> entry_texts(entry, ctx, acc, fun)
+        %{type: :text} = it, acc -> fun.(it, text_y(it, ctx, dys), acc)
+        _, acc -> acc
+      end,
+      acc,
+      entries
+    )
+  end
+
+  defp text_y(%{y: y}, nil, _dys), do: y
+  defp text_y(%{rel: _} = it, {_, nil} = ctx, _dys), do: apply_ctx(it, ctx).y
+  defp text_y(%{y: y}, _ctx, dys), do: Enum.reduce(dys, y, &(&2 + &1))
+
+  @doc false
+  # For the tests: the number of items in `entries`.
+  def atom_count(entries), do: entries_count(entries)
+
+  @doc false
+  # For the tests: what the readers of an atom's items find on `items` (entries and all), and on
+  # the same items taken apart, as the readers did before entries: -> {lazy, flat}. `pzs` of the
+  # lazy side must hold every paint order of the flat side.
+  def atom_readers(items, height) do
+    flat = atom_flat(items)
+
+    texts = Enum.filter(flat, &(&1.type == :text))
+
+    tn =
+      case texts do
+        [] ->
+          0
+
+        texts ->
+          last_y = texts |> Enum.map(& &1.y) |> Enum.max()
+          for(%{y: ^last_y} = t <- texts, do: Map.get(t, :tn, 0)) |> Enum.max()
+      end
+
+    base =
+      Enum.reduce(texts, nil, fn
+        %{y: y, h: h}, nil -> {y, y + h}
+        %{y: y, h: h}, {top, _} when y > top -> {y, y + h}
+        %{y: y, h: h}, {top, bottom} when y === top and y + h > bottom -> {top, y + h}
+        _, acc -> acc
+      end)
+
+    base = if base, do: elem(base, 1), else: height
+    flat_pzs = for %{pz: pz} when pz != nil <- flat, uniq: true, do: pz
+
+    {%{baseline: last_baseline(items, height), tn: last_line_tn(items), pzs: pzs_in(items)},
+     %{baseline: base, tn: tn, pzs: flat_pzs, items: flat}}
+  end
 
   # A marker box is as wide as its content only when it is not just the measuring width: the
   # box of a block-level control fills whatever width it is laid out at.
@@ -7753,7 +7849,9 @@ defmodule Browser.Layout do
     edge = st.width - st.margin - st.right
 
     if Map.get(spec, :clear) == nil and st.x + w <= edge - st.fr do
-      {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
+      {items, height, _base} =
+        layout_atom_flat(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
+
       {x, y} = place_float(st, side, w, height, st.y, st.margin + st.left, edge)
 
       if y == st.y do
@@ -8962,7 +9060,7 @@ defmodule Browser.Layout do
               clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, span_w)
 
             w = max(round(w), 1)
-            {items, h, _} = layout_atom(st, it.sub, w, it.key)
+            {items, h, _} = layout_atom_flat(st, it.sub, w, it.key)
             Map.merge(it, %{w: w, items: items, h: h, room: room})
           end
 
@@ -9050,7 +9148,7 @@ defmodule Browser.Layout do
 
   defp grid_resize(st, it, sub, w, box_h) do
     {items, h, _} = flex_atom(st, sub, w, {it.key, :grid, w, box_h})
-    %{it | items: items, h: h, w: w}
+    %{it | items: atom_flat(items), h: h, w: w}
   end
 
   # The height of every row. A row with a size of its own (`px`) has it; `fr` rows share what a
@@ -10415,7 +10513,9 @@ defmodule Browser.Layout do
   # the distance each baseline-aligned item is moved down so that their first baselines meet
   defp baseline_offsets(sized, container) do
     bases =
-      for it <- sized, baseline_item?(it, container), do: {it, first_baseline(it.items, it.h)}
+      for it <- sized,
+          baseline_item?(it, container),
+          do: {it, first_baseline(atom_flat(it.items), it.h)}
 
     case bases do
       [] ->
@@ -11820,7 +11920,7 @@ defmodule Browser.Layout do
           {eprops, vdelta} = if ts.collapse?, do: edge_props(p, ncols, nrows), else: {%{}, 0}
           sub = if eprops == %{}, do: p.cell.sub, else: p.cell.build.(eprops)
           key = if eprops == %{}, do: p.cell.key, else: {p.cell.key, eprops}
-          {items0, h, _} = layout_atom(st, sub, w, key)
+          {items0, h, _} = layout_atom_flat(st, sub, w, key)
           Map.merge(p, %{w: w, h0: h, items0: items0, eprops: eprops, vdelta: vdelta})
         end)
 
@@ -11891,7 +11991,9 @@ defmodule Browser.Layout do
             if p.cell.plain and not ts.collapse? and p.eprops == %{} do
               if extra_top == 0, do: p.items0, else: Enum.map(p.items0, &move(&1, 0, extra_top))
             else
-              {items, _h, _} = layout_atom(st, p.cell.build.(props), p.w, {p.cell.key, props})
+              {items, _h, _} =
+                layout_atom_flat(st, p.cell.build.(props), p.w, {p.cell.key, props})
+
               items
             end
 
@@ -11972,7 +12074,7 @@ defmodule Browser.Layout do
   defp table_caption_items(_st, nil, _w), do: {[], 0}
 
   defp table_caption_items(st, sub, w) do
-    {items, h, _} = layout_atom(st, sub, max(w, 1))
+    {items, h, _} = layout_atom_flat(st, sub, max(w, 1))
     {items, h}
   end
 
@@ -12731,7 +12833,7 @@ defmodule Browser.Layout do
     :throw, :layout ->
       # (the height of the box it sits in, which its percentage heights refer to: not followed)
       if Map.get(spec, :hpct_atom) != nil, do: throw(:layout)
-      {items, _height, _base} = layout_atom(f.st, sub, w, Map.get(spec, :key))
+      {items, _height, _base} = layout_atom_flat(f.st, sub, w, Map.get(spec, :key))
       item_edges(items)
   end
 

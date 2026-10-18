@@ -8171,6 +8171,103 @@ defmodule Browser.LayoutNestedBoxesTest do
     end
   end
 
+  # an item of an atom for the walkers: a text or a rect, maybe with a paint order, an offset of
+  # an inline box (`rel`), a sticky box. (A fragment holds none of these: with `pzs` empty the
+  # item has none.)
+  defp walker_item([]) do
+    if :rand.uniform(4) == 1,
+      do: %{type: :rect, x: 0, y: Enum.random([0, 10, 40]), w: 5, h: 5},
+      else: %{type: :text, x: 0, y: Enum.random([0, 10, 10.0, 20, 20.5]), w: 5, h: 8, tn: 12}
+  end
+
+  defp walker_item(pzs) do
+    base =
+      if :rand.uniform(4) == 1,
+        do: %{type: :rect, x: 0, y: Enum.random([0, 10, 40]), w: 5, h: 5},
+        else: %{type: :text, x: 0, y: Enum.random([0, 10, 10.0, 20, 20.5, 30]), w: 5, h: 8}
+
+    base = Map.put(base, :h, Enum.random([8, 10, 10.0, 12]))
+
+    base =
+      if :rand.uniform(3) == 1, do: base, else: Map.put(base, :tn, Enum.random([12, 14, 14.0]))
+
+    base = if :rand.uniform(4) == 1, do: Map.put(base, :pz, Enum.random(pzs)), else: base
+
+    base =
+      if :rand.uniform(8) == 1,
+        do: Map.put(base, :rel, {3, Enum.random([2, 2.5]), 77}),
+        else: base
+
+    base = if :rand.uniform(6) == 1, do: Map.put(base, :over, true), else: base
+
+    if :rand.uniform(10) == 1,
+      do: Map.put(base, :stick, %{top: 0, y0: 0, h: 10, parent: nil}),
+      else: base
+  end
+
+  defp walker_op([]) do
+    Enum.random([
+      {:dy, Enum.random([7, -3, 2.5])},
+      {:move, Enum.random([0, 12]), Enum.random([9, -4, 0.5])},
+      {:clip, %{x: 5, y: 3, w: 200, h: 80}, nil},
+      {:xlim, 250},
+      {:atom, 5, Enum.random([7, 7.5]), {0, nil, nil, nil}}
+    ])
+  end
+
+  defp walker_op(pzs) do
+    fresh =
+      Map.new(Enum.take_random(pzs, 3), fn
+        {z, pz} -> {{z, pz}, {z, pz + 1000}}
+        pz -> {pz, pz + 1000}
+      end)
+
+    Enum.random([
+      {:dy, Enum.random([7, -3, 2.5])},
+      {:move, Enum.random([0, 12]), Enum.random([9, -4, 0.5])},
+      {:rel, 4, Enum.random([10, -10]), :over, Enum.random(pzs)},
+      {:clip, %{x: 5, y: 3, w: 200, h: 80}, nil},
+      {:xlim, 250},
+      {:atom, 5, Enum.random([7, 7.5]), {0, nil, nil, nil}},
+      {:atom, 2, Enum.random([0, 3]), {0, nil, nil, fresh}},
+      {:stick, %{top: 0, y0: 0, h: 10, parent: nil}, 0}
+    ])
+  end
+
+  # a list of items and entries (`{:frag, dy, entries, n}`, `{:wrap, op, entries, n}`) that
+  # nests `depth` levels deep (what a fragment holds has no paint order and is not sticky: see
+  # `holds_pz?/1`)
+  defp walker_entries(depth, pzs) do
+    for _ <- 1..Enum.random(0..5)//1 do
+      case if(depth > 0, do: :rand.uniform(3), else: 1) do
+        1 ->
+          walker_item(pzs)
+
+        2 ->
+          inner = walker_entries(depth - 1, [])
+          {:frag, Enum.random([0, 6, 1.5]), inner, Layout.atom_count(inner)}
+
+        3 ->
+          inner = walker_entries(depth - 1, pzs)
+          {:wrap, walker_op(pzs), inner, Layout.atom_count(inner)}
+      end
+    end
+  end
+
+  test "the readers of an atom's items find on its entries what they find on the items" do
+    :rand.seed(:exsss, {5, 6, 7})
+    pzs = [11, 12, 13, {2, 14}]
+
+    for _ <- 1..600 do
+      items = walker_entries(3, pzs)
+      {lazy, flat} = Layout.atom_readers(items, 99)
+      at = inspect(items, limit: :infinity)
+      assert lazy.baseline === flat.baseline, "baseline of #{at}"
+      assert lazy.tn === flat.tn, "line height of #{at}"
+      assert flat.pzs -- lazy.pzs == [], "paint orders of #{at}"
+    end
+  end
+
   describe "sizing fold" do
     alias Browser.Page
 
