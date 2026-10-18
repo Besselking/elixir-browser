@@ -5038,16 +5038,55 @@ defmodule Browser.Layout do
   # `flat_items/2`): each item gets it when it is taken apart, in one update, and an item that a
   # clipping box drops is never made (`drop_below/3`). What paints behind the text is changed
   # at once, as the line does with every item of a smaller atom.
+  #
+  # An entry among the items (see `atom_flat/1`) that paints nothing behind the text stays whole:
+  # it goes into the new entry with the ops it waits for around it. Else it is taken apart, one
+  # level at a time.
   defp pending_atom_items(items, op, {others, rects, inline_rects}) do
     {mine, inline_rects, n} =
-      Enum.reduce(atom_flat(items), {[], inline_rects, 0}, fn sub, {mine, inline_rects, n} ->
-        # (as the line sorts them: `rel_moved/1` puts the moved ones over the rest)
-        if (sub.type not in @behind_text or Map.get(sub, :over)) || match?(%{rel: {_, _, _}}, sub),
-          do: {[sub | mine], inline_rects, n + 1},
-          else: {mine, [apply_op(sub, op) | inline_rects], n}
-      end)
+      Enum.reduce(items, {[], inline_rects, 0}, &pending_sort(&1, nil, op, &2))
 
     {wrap(mine, op, n) ++ others, rects, inline_rects}
+  end
+
+  defp pending_sort({tag, d, inner, n} = entry, ctx, op, {mine, inline_rects, k} = acc)
+       when tag in [:frag, :wrap] do
+    if all_mine?(entry) do
+      {[wrap_ops(entry, ctx) | mine], inline_rects, k + n}
+    else
+      ctx = if tag == :frag, do: add_dy(ctx, d), else: add_op(ctx, d)
+      # (the entries of a run are newest first: they are taken from the end)
+      :lists.foldr(&pending_sort(&1, ctx, op, &2), acc, inner)
+    end
+  end
+
+  defp pending_sort(sub, ctx, op, {mine, inline_rects, n}) do
+    sub = if ctx, do: apply_ctx(sub, ctx), else: sub
+
+    if mine?(sub),
+      do: {[sub | mine], inline_rects, n + 1},
+      else: {mine, [apply_op(sub, op) | inline_rects], n}
+  end
+
+  # (as the line sorts them: `rel_moved/1` puts the moved ones over the rest)
+  defp mine?(sub),
+    do: (sub.type not in @behind_text or Map.get(sub, :over)) || match?(%{rel: {_, _, _}}, sub)
+
+  # whether `mine?/1` is true for every item an entry makes (a relative box puts all of its items
+  # over the rest; no other op changes what `mine?/1` reads)
+  defp all_mine?({:wrap, {:rel, _, _, :over, _}, _inner, _n}), do: true
+
+  defp all_mine?({tag, _, inner, _n}) when tag in [:frag, :wrap],
+    do: Enum.all?(inner, &all_mine?/1)
+
+  defp all_mine?(item), do: mine?(item)
+
+  # `entry` inside one entry for each op of the context `ctx` (innermost first)
+  defp wrap_ops(entry, nil), do: entry
+
+  defp wrap_ops(entry, {t, _}) do
+    n = entry_count(entry)
+    Enum.reduce(t, entry, &{:wrap, &1, [&2], n})
   end
 
   # the atom with its items changed as `place_atom/2` would change them

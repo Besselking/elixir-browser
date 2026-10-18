@@ -139,6 +139,46 @@ defmodule Browser.LayoutBigAtomTest do
     end)
   end
 
+  # The shape of the editor of the TipTap page of Speedometer: a box that clips, a flex row, a
+  # flex column, a box that scrolls and a relatively positioned block of words that keep their
+  # spaces (each space is an item). `extra` comes before the words.
+  defp editor(extra, words, item_style) do
+    ~s(<div style="position:absolute;left:10px;top:10px;width:500px;height:300px;overflow:hidden">) <>
+      ~s(<div style="display:flex;height:400px">) <>
+      ~s(<div style="display:flex;flex-direction:column;flex:1 1 0%;#{item_style}">) <>
+      ~s(<div>toolbar</div><div style="overflow:auto;flex:1 1 0%">) <>
+      ~s(<div style="position:relative;white-space:break-spaces;height:3000px">) <>
+      extra <>
+      words <>
+      "</div>" <>
+      "</div></div></div></div>"
+  end
+
+  test "the items of a big editor in flex boxes are placed as those of a small one" do
+    extras = [
+      "",
+      ~s(<span style="position:relative;z-index:3;top:2px">raised</span> ),
+      ~s(<a href="#q" style="outline:2px solid blue">outlined</a> ),
+      ~s(<div style="position:sticky;top:0;background:yellow">sticky</div>),
+      ~s(<div style="position:absolute;top:5px;left:5px">absolute</div>),
+      ~s(<span style="display:inline-block;background:#eee;width:50px">inline</span> )
+    ]
+
+    # (a flex item with a `z-index` paints with the positioned boxes)
+    cases = Enum.map(extras, &{&1, ""}) ++ [{"", "z-index:2"}, {"", "z-index:-1"}]
+
+    for {extra, item_style} <- cases do
+      # (the spaces after the fifth word are only in the big one)
+      space? = &match?(%{type: :text, text: "\u00A0"}, &1)
+      small = layout(editor(extra, words(5), item_style))
+      big = layout(editor(extra, words(300), item_style))
+      assert length(small) < 200 and length(big) > 300
+
+      assert Layout.memo_norm(big |> Enum.reject(space?) |> first_words(5)) ==
+               Layout.memo_norm(Enum.reject(small, space?))
+    end
+  end
+
   # (not only for big atoms: a clipping box works out where each item ends up before it makes
   # the item, and keeps it when it starts above its bottom)
   test "a box that clips keeps what a relative offset moves above its bottom" do
