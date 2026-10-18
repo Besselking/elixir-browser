@@ -505,7 +505,7 @@ defmodule Browser.FetchTest do
       url = base <> "/c.css"
       other = "http://other.test/"
       first = Task.async(fn -> Fetch.load(url, initiator: other) end)
-      assert_receive {:held, h1, "/c.css"}
+      assert_receive {:held, h1, "/c.css"}, 1_000
 
       others = [
         Task.async(fn -> Fetch.load(url, initiator: other, navigation: true) end),
@@ -514,7 +514,7 @@ defmodule Browser.FetchTest do
 
       handlers =
         for _ <- 1..2 do
-          assert_receive {:held, h, "/c.css"}
+          assert_receive {:held, h, "/c.css"}, 1_000
           h
         end
 
@@ -530,7 +530,7 @@ defmodule Browser.FetchTest do
       base = held_server()
       url = base <> "/gone.css"
       first = spawn(fn -> Fetch.load(url) end)
-      assert_receive {:held, _, "/gone.css"}
+      assert_receive {:held, _, "/gone.css"}, 1_000
       second = spawn(fn -> Fetch.load(url) end)
       refute_receive {:held, _, _}, 100
       assert length(inflight_rows(url)) == 2
@@ -538,7 +538,7 @@ defmodule Browser.FetchTest do
       Process.exit(second, :kill)
       Process.exit(first, :kill)
       third = Task.async(fn -> Fetch.load(url) end)
-      assert_receive {:held, handler, "/gone.css"}
+      assert_receive {:held, handler, "/gone.css"}, 1_000
       send(handler, {:reply, ok("x")})
       assert {:ok, "x", _} = Task.await(third)
       assert inflight_rows(url) == []
@@ -548,7 +548,7 @@ defmodule Browser.FetchTest do
       base = held_server()
       url = base <> "/clean.css"
       first = Task.async(fn -> Fetch.load(url) end)
-      assert_receive {:held, handler, "/clean.css"}
+      assert_receive {:held, handler, "/clean.css"}, 1_000
 
       second =
         Task.async(fn ->

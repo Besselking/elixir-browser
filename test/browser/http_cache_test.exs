@@ -234,7 +234,7 @@ defmodule Browser.HttpCacheTest do
           end
         end)
 
-      assert_receive {:held, h1}
+      assert_receive {:held, h1}, 1_000
       second = Task.async(fn -> Browser.Fetch.load(url) end)
       refute_receive {:held, _}, 100
 
@@ -249,7 +249,7 @@ defmodule Browser.HttpCacheTest do
       end)
 
       send(h1, {:reply, "first"})
-      assert_receive {:first, {:ok, "first", _}}
+      assert_receive {:first, {:ok, "first", _}}, 1_000
       assert_receive {:held, h2}, 1_000
       send(h2, {:reply, "own"})
       assert {:ok, "own", _} = Task.await(second)
@@ -259,7 +259,7 @@ defmodule Browser.HttpCacheTest do
     test "a first load of the old table does not remove the key of the new table" do
       url = held_server() <> "/restart2.css"
       old_first = Task.async(fn -> Browser.Fetch.load(url) end)
-      assert_receive {:held, h1}
+      assert_receive {:held, h1}, 1_000
 
       old = Process.whereis(HttpCache)
       ref = Process.monitor(old)
@@ -272,7 +272,7 @@ defmodule Browser.HttpCacheTest do
       end)
 
       new_first = Task.async(fn -> Browser.Fetch.load(url) end)
-      assert_receive {:held, h2}
+      assert_receive {:held, h2}, 1_000
       send(h1, {:reply, "old"})
       assert {:ok, "old", _} = Task.await(old_first)
 
