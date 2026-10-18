@@ -200,7 +200,8 @@ defmodule Browser.JS.IframeTest do
 
   # The code cache (`Browser.JS.Compile`) keeps the uids of the entries of each realm under
   # `{:jsc_root, root}`. When a frame goes, its entries go with it; the entries of the page
-  # stay. (Only rewritten functions compile, so the test reads the cache at level 4 only.)
+  # stay. (Only rewritten functions compile, so the test reads the cache at level 4 only, and
+  # with the compiler on.)
   for remove? <- [false, true] do
     test "the code cache keeps the code of a frame only while the frame is there (remove: #{remove?})" do
       script = ~S"""
@@ -225,7 +226,8 @@ defmodule Browser.JS.IframeTest do
       Runtime.stop(pid)
       assert lines == ["loaded"]
 
-      if Application.get_env(:browser, :js_resolve) == 4 do
+      if Application.get_env(:browser, :js_resolve) == 4 and
+           Application.get_env(:browser, :js_compile, true) do
         roots = for {{:jsc_root, _}, uids} <- dict, do: uids
         entries = for {{:jsc, uid}, _} <- dict, do: uid
         assert length(roots) == if(unquote(remove?), do: 1, else: 2)
