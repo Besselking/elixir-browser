@@ -203,10 +203,10 @@ defmodule Browser.Fetch do
         {:ok, entry.body, url}
 
       {_, entry} ->
-        shared(url, ctx, fn -> request(url, :get, body, redirects, ctx, entry) end)
+        shared(url, redirects, ctx, fn -> request(url, :get, body, redirects, ctx, entry) end)
 
       :miss ->
-        shared(url, ctx, fn -> request(url, :get, body, redirects, ctx, nil) end)
+        shared(url, redirects, ctx, fn -> request(url, :get, body, redirects, ctx, nil) end)
     end
   end
 
@@ -220,21 +220,23 @@ defmodule Browser.Fetch do
   # result of the first. (When a frame loads, the script process and the page both load each
   # style sheet of the frame.) A load that the first load does not finish (it raised, or its
   # process stopped) makes its own request. A load with `on_chunk` makes its own request.
+  # Only the first address of a load is shared, not the hops of a redirect: else two loads
+  # whose redirects go to the address of the other (a redirect loop) wait for each other.
   @inflight :browser_fetch_inflight
 
   @doc false
   def inflight_table, do: @inflight
 
-  defp shared(url, %{on_chunk: nil} = ctx, fun) do
+  defp shared(url, @max_redirects, %{on_chunk: nil} = ctx, fun) do
     if :ets.whereis(@inflight) == :undefined do
       fun.()
     else
       cross_site = ctx.cross_site or cross_site?(ctx.initiator, url)
-      lead_or_wait({url, ctx.cache, ctx.navigation, cross_site}, fun)
+      lead_or_wait({url, ctx.cache, ctx.navigation, cross_site, ctx.headers}, fun)
     end
   end
 
-  defp shared(_url, _ctx, fun), do: fun.()
+  defp shared(_url, _redirects, _ctx, fun), do: fun.()
 
   defp lead_or_wait(key, fun) do
     if :ets.insert_new(@inflight, {key, self()}),
@@ -290,7 +292,7 @@ defmodule Browser.Fetch do
         end
 
       _ ->
-        # the first load has just finished (or it is this process, in a redirect to itself)
+        # the first load has just finished (or it is this process)
         :ets.delete(@inflight, {:wait, key, me})
         fun.()
     end
