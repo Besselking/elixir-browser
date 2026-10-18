@@ -13332,7 +13332,35 @@ defmodule Browser.Layout do
     %{f | pending: nil, marks: [], active: active}
   end
 
-  defp fold_flush(f, soft?) do
+  # A line of one text item, with no inline box marked or open on it, in one step. This does
+  # the same work as `fold_flush_general/2`: `fold_justified!/2` cannot refuse one item (there
+  # is no gap to spread over), the item has one edge and nothing follows it on its line (so all
+  # of its hang counts), and `fold_inline_boxes/2` carries nothing and keeps the lead. A change
+  # to the general clause must also go here (the test of `fold_flush_both/2` compares the two).
+  defp fold_flush(%{line: [%{type: :text} = it], marks: [], active: []} = f, soft?)
+       when not is_map_key(it, :strut) do
+    {f, shift} = fold_shift(f, soft?)
+
+    %{
+      f
+      | line: [],
+        empty: true,
+        x: f.indent,
+        pending: nil,
+        strut: false,
+        edges: fold_text_edge(f.edges, it, shift)
+    }
+  end
+
+  defp fold_flush(f, soft?), do: fold_flush_general(f, soft?)
+
+  @doc false
+  # For the tests: a line ended by the clause `fold_flush/2` picks, and by the general clause.
+  # The two must be equal for each line.
+  def fold_flush_both(f, soft?), do: {fold_flush(f, soft?), fold_flush_general(f, soft?)}
+
+  # (the fast clause of `fold_flush/2` above does the same for a line of one text item)
+  defp fold_flush_general(f, soft?) do
     fold_justified!(f, soft?)
     {f, shift} = fold_shift(f, soft?)
     f = fold_line_edges(f, shift)
@@ -13461,6 +13489,12 @@ defmodule Browser.Layout do
       edge = min(it.x + shift + it.w - hang, @unbounded)
       %{f | edges: Map.update(f.edges, it.rr, edge, &max(&1, edge))}
     end)
+  end
+
+  # (`fold_line_edges/2` for a text that is the last on its line: all of its hang counts)
+  defp fold_text_edge(edges, it, shift) do
+    edge = min(it.x + shift + it.w - Map.get(it, :hang, 0), @unbounded)
+    Map.update(edges, it.rr, edge, &max(&1, edge))
   end
 
   # -> {the marks carried to the next line, the boxes still open, the lead of the next line}

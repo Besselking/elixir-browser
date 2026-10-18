@@ -8182,6 +8182,50 @@ defmodule Browser.LayoutNestedBoxesTest do
       {rect.w, Process.get(:layout_fold_hits), Process.get(:layout_fold_fallbacks)}
     end
 
+    test "a line of one text item ends as the general clause ends it" do
+      # (`fold_flush/2` has a fast clause for this line; the two must give the same fold)
+      :rand.seed(:exsss, {3, 1, 4})
+      aligns = [:left, :right, :center, :justify, :rjustify, :rstart, :start, nil]
+
+      for align <- aligns,
+          alast <- [nil, :right, :center, :left],
+          nojust <- [false, true],
+          hang <- [0, 3],
+          text <- ["word", "word　"],
+          shift? <- [true, false],
+          side <- [:min, :mid, :max],
+          soft? <- [true, false] do
+        x = Enum.random(0..40)
+        indent = Enum.random(0..12)
+        it = %{type: :text, x: x, w: Enum.random(0..900), text: text, size: 16, vs: :baseline}
+        it = Map.merge(it, %{align: align, alast: alast, nojust: nojust, rr: 5})
+        it = if hang > 0, do: Map.put(it, :hang, hang), else: it
+
+        f = %{
+          line: [it],
+          marks: [],
+          active: [],
+          shift?: shift?,
+          side: side,
+          aligned: false,
+          width: Enum.random([1, 300, 800, 100_000]),
+          r: Enum.random([0, 7]),
+          indent: indent,
+          x: x + it.w + Enum.random([0, 4]),
+          edges: Enum.random([%{}, %{5 => 120}, %{2 => 40}]),
+          lead: Enum.random([0, 9]),
+          line_lead: 0,
+          empty: false,
+          pending: Enum.random([nil, %{size: 16}]),
+          after_space: false,
+          strut: false
+        }
+
+        {fast, general} = Layout.fold_flush_both(f, soft?)
+        assert fast == general, "line #{inspect(it)} soft? #{soft?} in #{inspect(f)}"
+      end
+    end
+
     test "a relative box that its offsets do not move is measured with no layout" do
       # (CSS 2.1 §9.4.3: the box takes its place in the flow as a static box does)
       assert {64, hits, 0} =
