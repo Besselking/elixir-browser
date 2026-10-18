@@ -5037,7 +5037,7 @@ defmodule Browser.Layout do
   # at once, as the line does with every item of a smaller atom.
   defp pending_atom_items(items, op, {others, rects, inline_rects}) do
     {mine, inline_rects, n} =
-      Enum.reduce(items, {[], inline_rects, 0}, fn sub, {mine, inline_rects, n} ->
+      Enum.reduce(atom_flat(items), {[], inline_rects, 0}, fn sub, {mine, inline_rects, n} ->
         # (as the line sorts them: `rel_moved/1` puts the moved ones over the rest)
         if (sub.type not in @behind_text or Map.get(sub, :over)) || match?(%{rel: {_, _, _}}, sub),
           do: {[sub | mine], inline_rects, n + 1},
@@ -5049,7 +5049,7 @@ defmodule Browser.Layout do
 
   # the atom with its items changed as `place_atom/2` would change them
   defp placed_atom(%{pending: pending, items: items} = atom),
-    do: %{atom | items: Enum.map(items, &pending_place(&1, pending))}
+    do: %{atom | items: Enum.map(atom_flat(items), &pending_place(&1, pending))}
 
   defp placed_atom(atom), do: atom
 
@@ -5292,11 +5292,13 @@ defmodule Browser.Layout do
     # (the items of an atom that holds many are changed when the line moves them to their place,
     # with the move: see `pending_atom_items/3`)
     atom =
-      if atom.w < @unbounded / 2 and length(atom.items) >= @pending_min do
+      if atom.w < @unbounded / 2 and entries_count(atom.items) >= @pending_min do
         xlim = if counts?, do: nil, else: atom.w
         pending = {max(extra, 0), List.first(st.blocks), xlim, fresh_pz(atom.items)}
         Map.put(atom, :pending, pending)
       else
+        atom = %{atom | items: atom_flat(atom.items)}
+
         atom =
           if extra > 0,
             do: %{atom | items: Enum.map(atom.items, &add_rr(&1, extra))},
@@ -5370,7 +5372,10 @@ defmodule Browser.Layout do
   # the new paint order of each one the items have (nil when they have none)
   defp fresh_pz(items) do
     order =
-      for(%{pz: pz} when pz != nil <- items, uniq: true, do: pz)
+      items
+      |> pzs_in()
+      |> :lists.reverse()
+      |> Enum.uniq()
       |> Enum.sort_by(&pz_key/1)
 
     if order != [] do
@@ -7217,7 +7222,8 @@ defmodule Browser.Layout do
   # * `{:frag, dy, entries, n}`: the `n` items of a fragment placed again, `dy` lower than where
   #   they were placed;
   # * `{:wrap, op, entries, n}`: the `n` items a box holds, with what the box does to each of
-  #   them (`apply_op/2`: its clip, its relative offset, ...).
+  #   them (`apply_op/2`: its clip, its relative offset, ...). A flex container moves the items
+  #   of a flex item to its place with the op `{:move, dx, dy}`.
   #
   # A box that changes all the items it holds thus adds one entry, and does not make each item
   # again: with boxes nested `d` deep around `k` items, that is `d` entries and not `d * k` new
@@ -7259,9 +7265,10 @@ defmodule Browser.Layout do
   defp ctx_dys(nil), do: []
 
   defp ctx_dys({t, _}) do
-    for op <- t, elem(op, 0) in [:dy, :rel, :atom] do
+    for op <- t, elem(op, 0) in [:dy, :move, :rel, :atom] do
       case op do
         {:dy, dy} -> dy
+        {:move, _, dy} -> dy
         {:rel, _, dy, _, _} -> dy
         {:atom, _, dy, _} -> dy
       end
@@ -7271,6 +7278,57 @@ defmodule Browser.Layout do
   # the number of items in an entry of a run
   defp entry_count({tag, _, _, n}) when tag in [:frag, :wrap], do: n
   defp entry_count(_item), do: 1
+
+  defp entries_count(entries, k \\ 0)
+  defp entries_count([], k), do: k
+
+  defp entries_count([{tag, _, _, n} | rest], k) when tag in [:frag, :wrap],
+    do: entries_count(rest, k + n)
+
+  defp entries_count([_item | rest], k), do: entries_count(rest, k + 1)
+
+  # The items of an atom are a list oldest first, as `finalize/1` makes it. The flex moves
+  # (`moved_items/2`) put entries in it, and the items of each entry are newest first, as in a
+  # run. -> the items, oldest first, with all the entries taken apart.
+  defp atom_flat(items) do
+    if holds_entry?(items),
+      do: items |> :lists.reverse() |> flat_into(nil, []),
+      else: items
+  end
+
+  defp holds_entry?([]), do: false
+  defp holds_entry?([{tag, _, _, _} | _]) when tag in [:frag, :wrap], do: true
+  defp holds_entry?([_item | rest]), do: holds_entry?(rest)
+
+  # the paint orders that the items of `entries` have, or get from the ops around them, and
+  # maybe some more (see `fresh_pz/1`: one it does not find loses its place in the paint order,
+  # one more does no harm)
+  defp pzs_in(entries, acc \\ [])
+  defp pzs_in([], acc), do: acc
+  defp pzs_in([{:frag, _, _, _} | rest], acc), do: pzs_in(rest, acc)
+
+  defp pzs_in([{:wrap, {:rel, _, _, _, pz}, inner, _} | rest], acc),
+    do: pzs_in(rest, pzs_in(inner, [pz | acc]))
+
+  defp pzs_in([{:wrap, {:atom, _, _, {_, _, _, fresh}}, inner, _} | rest], acc)
+       when fresh != nil do
+    acc = inner |> pzs_in() |> Enum.reduce(acc, &[Map.get(fresh, &1, &1) | &2])
+    pzs_in(rest, acc)
+  end
+
+  defp pzs_in([{:wrap, _op, inner, _} | rest], acc), do: pzs_in(rest, pzs_in(inner, acc))
+
+  defp pzs_in([item | rest], acc) do
+    acc =
+      case item do
+        %{pz: pz, rel: {_, _, seq}} when pz != nil -> [seq, pz | acc]
+        %{rel: {_, _, seq}} -> [seq | acc]
+        %{pz: pz} when pz != nil -> [pz | acc]
+        _ -> acc
+      end
+
+    pzs_in(rest, acc)
+  end
 
   # the items with the ops of `ctx` done on them, oldest first, on top of `acc`
   defp flat_into([], _ctx, acc), do: acc
@@ -7301,12 +7359,13 @@ defmodule Browser.Layout do
       {t, nil}
     else
       place = Enum.reduce(t, %{x: 0, y: 0}, &place_op(&1, &2, %{}))
-      moves = for op <- t, elem(op, 0) in [:dy, :rel], do: op_move(op)
+      moves = for op <- t, elem(op, 0) in [:dy, :move, :rel], do: op_move(op)
       {t, {moves, Map.drop(place, [:x, :y])}}
     end
   end
 
   defp op_move({:dy, dy}), do: {0, dy}
+  defp op_move({:move, dx, dy}), do: {dx, dy}
   defp op_move({:rel, dx, dy, _, _}), do: {dx, dy}
 
   # `entries` (newest first, `n` items in all) with `op` to do on each item. A box that holds
@@ -7321,12 +7380,23 @@ defmodule Browser.Layout do
 
   defp wrap(entries, op, n), do: [{:wrap, op, entries, n}]
 
+  # the items of an atom (oldest first, see `atom_flat/1`), each with `op` to do on it: in one
+  # entry, or done at once on fewer than `@wrap_min` items
+  defp moved_items(items, op) do
+    case entries_count(items) do
+      n when n < @wrap_min -> items |> atom_flat() |> Enum.map(&apply_op(&1, op))
+      n -> [{:wrap, op, :lists.reverse(items), n}]
+    end
+  end
+
   # the keys `move/3` changes in an item that has none of the keys `plain_place?/1` looks for
   @place_keys [:x, :y, :xlim, :clip, :clips, :sc]
 
   # (an item whose place is only in `@place_keys` gets the ops in a small map of these keys, and
   # is made again one time; an item for which `own_place?/1` is false takes what the context
   # worked out)
+  # (one op is done as it is: the context saves nothing then)
+  defp apply_ctx(item, {[op], _}), do: apply_op(item, op)
   defp apply_ctx(item, {t, nil}), do: Enum.reduce(t, item, &apply_op(&2, &1))
 
   defp apply_ctx(item, {t, {moves, set}}) do
@@ -7368,6 +7438,7 @@ defmodule Browser.Layout do
 
   # `apply_op/2` on the keys of `item` in `@place_keys` (`place`)
   defp place_op({:dy, dy}, place, _item), do: move_place(place, 0, dy)
+  defp place_op({:move, dx, dy}, place, _item), do: move_place(place, dx, dy)
   defp place_op({:clip, clip, sid}, place, _item), do: put_clip(place, clip, sid)
   defp place_op({:xlim, limit}, place, _item), do: limit_extent(place, limit)
 
@@ -7377,6 +7448,7 @@ defmodule Browser.Layout do
   end
 
   defp apply_op(item, {:dy, dy}), do: move(item, 0, dy)
+  defp apply_op(item, {:move, dx, dy}), do: move(item, dx, dy)
   defp apply_op(item, {:clip, clip, sid}), do: put_clip(item, clip, sid)
   defp apply_op(item, {:xlim, limit}), do: limit_extent(item, limit)
 
@@ -10014,7 +10086,7 @@ defmodule Browser.Layout do
 
     {placed, y} =
       Enum.map_reduce(laid, round(start), fn {items, cross}, y ->
-        {items |> List.flatten() |> Enum.map(&move(&1, 0, y)), y + cross + gap + round(between)}
+        {items |> List.flatten() |> moved_items({:move, 0, y}), y + cross + gap + round(between)}
       end)
 
     {List.flatten(placed), max(y - gap - round(between), round(cs.height))}
@@ -10168,7 +10240,7 @@ defmodule Browser.Layout do
 
         ix = x + it.ml
         # (halves go up, so that a box shifted by -2.5 lands where one at 97.5 would be drawn)
-        moved = for item <- z_items(it), do: move(item, floor(ix + 0.5), top + dy)
+        moved = flex_moved(it, floor(ix + 0.5), top + dy)
         {moved, ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)}
       end)
 
@@ -10505,6 +10577,7 @@ defmodule Browser.Layout do
       {laid, {x_end, tallest}} =
         Enum.map_reduce(cols, {0, 0}, fn col, {x, tallest} ->
           {items, y} = flex_column_place(st, pcs, col)
+          items = atom_flat(items)
           width = col |> Enum.map(&(&1.x + &1.w + auto_zero(&1.mr))) |> Enum.max()
 
           {Enum.map(items, &{&1, y}) |> Enum.map(fn {i, y} -> {move(i, x, 0), y} end),
@@ -10699,7 +10772,7 @@ defmodule Browser.Layout do
 
     {laid, y} =
       Enum.map_reduce(sized, round(start), fn it, y ->
-        moved = for item <- z_items(it), do: move(item, round(it.x), y)
+        moved = flex_moved(it, round(it.x), y)
         {moved, y + it.h + round(cs.row_gap + between)}
       end)
 
@@ -12402,6 +12475,16 @@ defmodule Browser.Layout do
     do: Enum.map(items, &Map.update(&1, :xform, [matrix], fn list -> list ++ [matrix] end))
 
   # -- floats --------------------------------------------------------------------------------
+
+  # The items of a flex item moved to its place, in one entry (`moved_items/2`). With a
+  # `z-index` they paint with the positioned boxes, as `z_items/1` makes them.
+  defp flex_moved(%{zi: zi} = it, dx, dy) when is_integer(zi) do
+    layer = if zi < 0, do: :under, else: :over
+    seq = :erlang.unique_integer([:monotonic])
+    moved_items(it.items, {:rel, dx, dy, layer, z_order(seq, zi)})
+  end
+
+  defp flex_moved(it, dx, dy), do: moved_items(it.items, {:move, dx, dy})
 
   # the items of a flex or grid item that has a `z-index`: they paint with the positioned boxes
   defp z_items(%{zi: zi, items: items}) when is_integer(zi) do

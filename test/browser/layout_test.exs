@@ -8139,6 +8139,9 @@ defmodule Browser.LayoutNestedBoxesTest do
   @ops [
     {:dy, 7},
     {:dy, -3},
+    {:move, 12, -4},
+    {:move, 0, 9},
+    {:atom, 5, 7, {0, nil, nil, nil}},
     {:rel, 40, 10, :over, 17},
     {:rel, -5, 2, :under, {3, 18}},
     {:clip, %{x: 5, y: 3, w: 200, h: 80}, nil},
