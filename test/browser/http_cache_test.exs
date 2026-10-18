@@ -112,4 +112,53 @@ defmodule Browser.HttpCacheTest do
       assert :miss = HttpCache.lookup("http://disk.test/z")
     end
   end
+
+  describe "a 304 keeps the fields of the stored response that it does not send" do
+    @lm ~c"Mon, 01 Jan 2024 00:00:00 GMT"
+
+    test "no-cache stays: the entry is stale after the 304" do
+      url = "http://cache.test/304-no-cache"
+      HttpCache.store(url, [{~c"cache-control", ~c"no-cache"}, {~c"last-modified", @lm}], "b")
+      assert {:stale, entry} = HttpCache.lookup(url)
+      HttpCache.refresh(entry, [], url)
+      assert {:stale, _} = HttpCache.lookup(url)
+    end
+
+    test "max-age stays" do
+      url = "http://cache.test/304-max-age"
+      HttpCache.store(url, [{~c"cache-control", ~c"max-age=600"}, {~c"etag", ~c"\"a\""}], "b")
+      assert {:fresh, entry} = HttpCache.lookup(url)
+      HttpCache.refresh(entry, [], url)
+      assert {:fresh, _} = HttpCache.lookup(url)
+    end
+
+    test "Expires stays, against the Date of the 304" do
+      url = "http://cache.test/304-expires"
+      date = :httpd_util.rfc1123_date()
+      future = ~c"Fri, 01 Jan 2100 00:00:00 GMT"
+      HttpCache.store(url, [{~c"expires", future}, {~c"etag", ~c"\"a\""}], "b")
+      assert {:fresh, entry} = HttpCache.lookup(url)
+      HttpCache.refresh(entry, [{~c"date", date}], url)
+      assert {:fresh, _} = HttpCache.lookup(url)
+    end
+
+    test "the fields of the 304 replace the stored ones" do
+      url = "http://cache.test/304-replace"
+      HttpCache.store(url, [{~c"cache-control", ~c"max-age=600"}, {~c"etag", ~c"\"a\""}], "b")
+      assert {:fresh, entry} = HttpCache.lookup(url)
+      HttpCache.refresh(entry, [{~c"cache-control", ~c"no-cache"}], url)
+      assert {:stale, entry} = HttpCache.lookup(url)
+      HttpCache.refresh(entry, [{~c"last-modified", @lm}], url)
+      assert {:stale, _} = HttpCache.lookup(url)
+    end
+
+    test "a 304 without Last-Modified gets the heuristic lifetime of the stored one" do
+      url = "http://cache.test/304-heuristic"
+      HttpCache.store(url, [{~c"last-modified", @lm}], "b")
+      assert {:fresh, entry} = HttpCache.lookup(url)
+      HttpCache.refresh(entry, [], url)
+      assert {:fresh, entry} = HttpCache.lookup(url)
+      assert entry.last_modified == to_string(@lm)
+    end
+  end
 end

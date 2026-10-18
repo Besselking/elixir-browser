@@ -255,16 +255,13 @@ defmodule Browser.FetchTest do
 
     test "a 304 without Last-Modified keeps the heuristic lifetime of the stored response" do
       lm = "Mon, 01 Jan 2024 00:00:00 GMT"
-
-      base =
-        serve([
-          response("kept", ["Last-Modified: #{lm}", "Cache-Control: max-age=0"]),
-          @not_modified
-        ])
+      base = serve([response("kept", ["Last-Modified: #{lm}"]), @not_modified])
 
       assert {:ok, "kept", _} = Fetch.load(base <> "/r")
       assert_receive {:request, "GET", "/r", _, ""}
-      assert {:ok, "kept", _} = Fetch.load(base <> "/r")
+      # (a stored `max-age=0` stays after a 304 that has no `Cache-Control`, so a reload
+      # makes the request here)
+      assert {:ok, "kept", _} = Fetch.load(base <> "/r", cache: :reload)
       assert_receive {:request, "GET", "/r", %{"if-modified-since" => ^lm}, ""}
 
       # fresh now, for a tenth of its age
