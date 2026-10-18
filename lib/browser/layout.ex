@@ -7951,6 +7951,28 @@ defmodule Browser.Layout do
      %{baseline: base, tn: tn, pzs: flat_pzs, items: flat}}
   end
 
+  @doc false
+  # For the tests: the items of a run (newest first, entries and all) in paint order, from
+  # `finalize_lazy/1` taken apart and from `finalize/1`, with the bottoms of the blocks that
+  # limit sticky boxes (`limits`). The two must be equal.
+  def finalize_both(items, limits) do
+    st = %{items: items, rects: [], overlays: [], limits: limits}
+    {atom_flat(finalize_lazy(st)), finalize(st)}
+  end
+
+  @doc false
+  # For the tests: what `pending_atom_items/3` makes of the items of an atom (oldest first,
+  # entries and all) and of the same items taken apart first, with the entries it makes taken
+  # apart. The two must be equal.
+  def pending_both(items, op) do
+    sort = fn items ->
+      {mine, rects, inline_rects} = pending_atom_items(items, op, {[], [], []})
+      {flat_items(mine), rects, inline_rects}
+    end
+
+    {sort.(items), sort.(atom_flat(items))}
+  end
+
   # A marker box is as wide as its content only when it is not just the measuring width: the
   # box of a block-level control fills whatever width it is laid out at.
   defp fixed_width?(%{w: w}), do: w < @unbounded / 2

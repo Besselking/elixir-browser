@@ -8268,6 +8268,87 @@ defmodule Browser.LayoutNestedBoxesTest do
     end
   end
 
+  # what an item of an entry has that changes where it paints. Most items of an entry have the
+  # same (`keys`): then the entry can stay whole.
+  @paint_keys [
+    %{},
+    %{over: true},
+    %{under: true},
+    %{over: true, under: true},
+    %{over: false},
+    %{pz: 11},
+    %{pz: 12, over: true},
+    %{pz: {2, 14}, over: true},
+    %{pz: nil, over: true},
+    %{rel: {1, 2, 77}},
+    %{rel: {1, 2, 78}},
+    %{rel: {1, 2, 78}, pz: 11},
+    %{stick: %{top: 0, y0: 0, h: 10, parent: nil}},
+    %{stick: %{top: 0, y0: 0, h: 10, parent: :block}}
+  ]
+
+  defp paint_item(keys) do
+    keys = if :rand.uniform(8) == 1, do: Enum.random(@paint_keys), else: keys
+    item = %{type: Enum.random([:text, :rect]), x: 0, y: Enum.random([0, 10]), w: 5, h: 5}
+    Map.merge(item, keys)
+  end
+
+  defp paint_op do
+    fresh = %{11 => 1011, 12 => 1012, {2, 14} => {2, 1014}}
+
+    Enum.random([
+      {:dy, 7},
+      {:move, 12, -4},
+      {:rel, 4, 10, :over, Enum.random([11, 12, {2, 14}])},
+      {:rel, -5, 2, :under, Enum.random([11, {3, 18}])},
+      {:clip, %{x: 5, y: 3, w: 200, h: 80}, nil},
+      {:xlim, 250},
+      {:atom, 5, 7, {0, nil, nil, nil}},
+      {:atom, 2, 3, {0, nil, nil, fresh}},
+      {:stick, %{top: 0, y0: 0, h: 10, parent: Enum.random([nil, :block])}, 0}
+    ])
+  end
+
+  # a list of items and entries, `depth` levels deep, most of whose items have `keys`
+  defp paint_entries(depth, keys) do
+    for _ <- 1..Enum.random(0..5)//1 do
+      case if(depth > 0, do: :rand.uniform(3), else: 1) do
+        1 ->
+          paint_item(keys)
+
+        2 ->
+          inner = paint_entries(depth - 1, keys)
+          {:frag, Enum.random([0, 6]), inner, Layout.atom_count(inner)}
+
+        3 ->
+          inner = paint_entries(depth - 1, keys)
+          {:wrap, paint_op(), inner, Layout.atom_count(inner)}
+      end
+    end
+  end
+
+  test "an atom keeps whole only the entries whose items all paint in the same place" do
+    :rand.seed(:exsss, {8, 1, 5})
+
+    for _ <- 1..3000 do
+      items = paint_entries(3, Enum.random(@paint_keys))
+      {lazy, eager} = Layout.finalize_both(items, Enum.random([%{}, %{block: 400}]))
+      assert lazy === eager, "paint order of #{inspect(items, limit: :infinity)}"
+    end
+  end
+
+  test "an atom on its line keeps whole only the entries that paint nothing behind the text" do
+    :rand.seed(:exsss, {8, 2, 5})
+    fresh = %{11 => 1011, 12 => 1012, {2, 14} => {2, 1014}}
+
+    for _ <- 1..3000 do
+      items = paint_entries(3, Enum.random(@paint_keys))
+      op = {:atom, 6, 9, {Enum.random([0, 4]), nil, Enum.random([nil, 300]), fresh}}
+      {lazy, eager} = Layout.pending_both(items, op)
+      assert lazy === eager, "items of #{inspect(items, limit: :infinity)}"
+    end
+  end
+
   describe "sizing fold" do
     alias Browser.Page
 
