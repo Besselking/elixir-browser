@@ -221,6 +221,8 @@ defmodule Browser.JS.Modules do
       catch
         kind, e ->
           unfinished = for {k, %{status: s}} <- recs(), s in [:new, :loading], do: k
+          # (their trees go too: no record has their keys now, and each new try parses again)
+          Enum.each(unfinished, &drop_stmts/1)
           Process.put(:js_modules, Map.drop(recs(), unfinished))
           :erlang.raise(kind, e, __STACKTRACE__)
       end
@@ -406,7 +408,12 @@ defmodule Browser.JS.Modules do
             if rec(key).async_eval == false, do: Promise.resolve(cap, :undefined)
 
           {:error, e, stack} ->
-            for m <- stack, do: set(m, status: :evaluated, eval_error: {:error, e})
+            # (a module of the stack that did not run never runs now: its tree goes too)
+            for m <- stack do
+              set(m, status: :evaluated, eval_error: {:error, e})
+              drop_stmts(m)
+            end
+
             Promise.reject(cap, e)
         end
 
@@ -624,6 +631,7 @@ defmodule Browser.JS.Modules do
   defp async_rejected(key, e) do
     if rec(key).status != :evaluated do
       set(key, eval_error: {:error, e}, status: :evaluated, async_eval: false)
+      drop_stmts(key)
       if cap = rec(key).cap, do: Promise.reject(cap, e)
       for m <- rec(key).parents, do: async_rejected(m, e)
     end
