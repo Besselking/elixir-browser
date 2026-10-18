@@ -13109,7 +13109,7 @@ defmodule Browser.Layout do
           fold_wrap_glued(f, style)
 
         true ->
-          f |> fold_flush(true) |> fold_start_line(0)
+          fold_wrap_line(f)
       end
 
     glue? = glued? and not f.empty and space_w == 0 and not f.after_space
@@ -13215,6 +13215,30 @@ defmodule Browser.Layout do
     %{f | x: f.l + dx + used, indent: f.l, lead: f.lead - used, line_lead: used}
   end
 
+  # A line wraps: it ends, and the next one starts (`fold_flush(f, true)` and then
+  # `fold_start_line(f, 0)`). A line of one text item, as the fast clause of `fold_flush/2`
+  # ends it, does the two in one update.
+  defp fold_wrap_line(%{line: [%{type: :text} = it], marks: [], active: []} = f)
+       when not is_map_key(it, :strut) do
+    {f, shift} = fold_shift(f, true)
+    used = f.lead
+
+    %{
+      f
+      | line: [],
+        empty: true,
+        x: f.l + used,
+        indent: f.l,
+        lead: f.lead - used,
+        line_lead: used,
+        pending: nil,
+        strut: false,
+        edges: fold_text_edge(f.edges, it, shift)
+    }
+  end
+
+  defp fold_wrap_line(f), do: f |> fold_flush(true) |> fold_start_line(0)
+
   # `wrap_glued` with `:hold`: a space of `break-spaces` does not wrap away from the word before
   # it. Alone on its line with `overflow-wrap: break-word` or `anywhere`, the line breaks before
   # it. Else the chain glued to it goes to the next line, or it stays where it is.
@@ -13224,7 +13248,7 @@ defmodule Browser.Layout do
         throw(:layout)
 
       match?([%{type: :text}], f.line) and style.wrap_chars in [:word, :anywhere] ->
-        f |> fold_flush(true) |> fold_start_line(0)
+        fold_wrap_line(f)
 
       true ->
         {chain, rest} = Enum.split_while(f.line, &Map.get(&1, :glue, false))
@@ -13261,10 +13285,10 @@ defmodule Browser.Layout do
       [%{type: :text} = first | [_ | _] = older] ->
         if Enum.all?(chain, &(&1.type == :text)),
           do: fold_carry_chain(f, [first | chain], older),
-          else: f |> fold_flush(true) |> fold_start_line(0)
+          else: fold_wrap_line(f)
 
       _ ->
-        f |> fold_flush(true) |> fold_start_line(0)
+        fold_wrap_line(f)
     end
   end
 
@@ -13281,7 +13305,7 @@ defmodule Browser.Layout do
       end)
 
     f = %{f | line: older, marks: kept, x: hd(older).x + hd(older).w}
-    f = f |> fold_flush(true) |> fold_start_line(0)
+    f = fold_wrap_line(f)
     shift = f.x - first_x
 
     mark_shift = fn
@@ -13358,6 +13382,11 @@ defmodule Browser.Layout do
   # For the tests: a line ended by the clause `fold_flush/2` picks, and by the general clause.
   # The two must be equal for each line.
   def fold_flush_both(f, soft?), do: {fold_flush(f, soft?), fold_flush_general(f, soft?)}
+
+  @doc false
+  # For the tests: a line wrapped by `fold_wrap_line/1`, and by the general clause.
+  def fold_wrap_both(f),
+    do: {fold_wrap_line(f), f |> fold_flush_general(true) |> fold_start_line(0)}
 
   # (the fast clause of `fold_flush/2` above does the same for a line of one text item)
   defp fold_flush_general(f, soft?) do
@@ -13536,7 +13565,7 @@ defmodule Browser.Layout do
     f =
       if not f.empty and f.x + space_w + w > f.width - f.r and
            not fold_glued_before?(f, space_w),
-         do: f |> fold_flush(true) |> fold_start_line(0),
+         do: fold_wrap_line(f),
          else: f
 
     space_w = if f.empty, do: 0, else: space_w

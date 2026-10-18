@@ -8182,8 +8182,9 @@ defmodule Browser.LayoutNestedBoxesTest do
       {rect.w, Process.get(:layout_fold_hits), Process.get(:layout_fold_fallbacks)}
     end
 
-    test "a line of one text item ends as the general clause ends it" do
-      # (`fold_flush/2` has a fast clause for this line; the two must give the same fold)
+    test "a line of one text item ends and wraps as the general clause does it" do
+      # (`fold_flush/2` and `fold_wrap_line/1` have a fast clause for this line; the two must
+      # give the same fold)
       :rand.seed(:exsss, {3, 1, 4})
       aligns = [:left, :right, :center, :justify, :rjustify, :rstart, :start, nil]
 
@@ -8211,9 +8212,10 @@ defmodule Browser.LayoutNestedBoxesTest do
           width: Enum.random([1, 300, 800, 100_000]),
           r: Enum.random([0, 7]),
           indent: indent,
+          l: Enum.random([0, 6]),
           x: x + it.w + Enum.random([0, 4]),
           edges: Enum.random([%{}, %{5 => 120}, %{2 => 40}]),
-          lead: Enum.random([0, 9]),
+          lead: Enum.random([0, 9, 2.5]),
           line_lead: 0,
           empty: false,
           pending: Enum.random([nil, %{size: 16}]),
@@ -8223,6 +8225,8 @@ defmodule Browser.LayoutNestedBoxesTest do
 
         {fast, general} = Layout.fold_flush_both(f, soft?)
         assert fast == general, "line #{inspect(it)} soft? #{soft?} in #{inspect(f)}"
+        {fast, general} = Layout.fold_wrap_both(f)
+        assert fast == general, "wrap of line #{inspect(it)} in #{inspect(f)}"
       end
     end
 
