@@ -234,6 +234,17 @@ defmodule Browser.JS.IframeTest do
     end
   end
 
+  test "an erase of the code cache also erases the uids of the realms" do
+    Task.async(fn ->
+      Process.put({:jsc_root, 1}, [:a])
+      Process.put({:jsc, :a}, {nil, nil})
+      Browser.JS.Compile.erase_entries()
+      assert Process.get({:jsc_root, 1}) == nil
+      assert Process.get({:jsc, :a}) == nil
+    end)
+    |> Task.await()
+  end
+
   test "document helpers of the web API work for a frame's own document" do
     {logs, errors} =
       run(~S"""
