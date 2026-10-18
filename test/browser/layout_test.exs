@@ -4623,6 +4623,27 @@ defmodule Browser.LayoutTest do
     assert word_x(items, "P") == 8 + 64
   end
 
+  # (a flex item of 8 items or more is moved to its place in one entry, a smaller one item by
+  # item: the two must paint in the same layer)
+  test "a flex item with a z-index paints in its layer, with few items and with many" do
+    for n <- [2, 12], {z, layer, other} <- [{-1, :under, :over}, {2, :over, :under}] do
+      words = Enum.map_join(1..n, " ", &"u#{&1}")
+
+      html =
+        ~s(<div style="display:flex"><div style="z-index:#{z}">#{words}</div><div>flow</div></div>)
+
+      page = Browser.Page.build(html, "about:home")
+      opts = [images: %{}, svg_defs: page.svg_defs]
+      {items, _height} = Layout.layout(page.nodes, 400, &measure/2, 600, opts)
+      mine = Enum.filter(items, &match?(%{text: "u" <> _}, &1))
+      assert length(mine) == n
+      assert Enum.all?(mine, &(Map.get(&1, layer) == true and Map.get(&1, other) in [nil, false]))
+      # (what paints under the flow comes before it, and what paints over it after it)
+      at = fn text -> Enum.find_index(items, &match?(%{text: ^text}, &1)) end
+      assert at.("u1") < at.("flow") == (layer == :under)
+    end
+  end
+
   test "a relatively positioned box paints above a later absolute one only through tree order and z-index" do
     page =
       Browser.Page.build(

@@ -154,6 +154,19 @@ defmodule Browser.LayoutBigAtomTest do
       "</div></div></div></div>"
   end
 
+  # (a flex item of 8 items or more is moved in one entry: with a negative `z-index`, what it
+  # paints behind the text still goes behind the text of the line, as for a small atom)
+  test "the backgrounds of flex items with a negative z-index in a big flex row paint behind its text" do
+    item =
+      &~s(<div style="z-index:-1;flex:none;width:100px;background:#ddd;border:1px solid">i#{&1} a b c d e f</div>)
+
+    same_small_and_big!(fn words ->
+      ~s(<div style="display:flex;align-items:flex-start">) <>
+        Enum.map_join(1..4, item) <>
+        ~s(<div style="flex:1;min-width:0;height:3000px">#{words}</div></div>)
+    end)
+  end
+
   test "the items of a big editor in flex boxes are placed as those of a small one" do
     extras = [
       "",
