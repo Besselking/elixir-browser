@@ -249,6 +249,39 @@ defmodule Browser.JS.ActivationTest do
       Runtime.stop(pid)
     end
 
+    test "a click that does not bubble runs the activation behavior of its target only" do
+      {pid, r} =
+        start(~S"""
+        <body><a id=a href="#a"><span id=s>s</span></a><details id=d><summary>1</summary><summary id=t>2</summary></details>
+        <script>
+        document.getElementById("s").dispatchEvent(new MouseEvent("click"));
+        console.log(location.hash === "");
+        document.getElementById("t").click();
+        console.log(document.getElementById("d").open);
+        </script></body>
+        """)
+
+      assert errors(r) == []
+      assert logs(r) == ["true", "false"]
+      assert r.outbox == []
+      Runtime.stop(pid)
+    end
+
+    test "a link that its click handler removes is not followed" do
+      {pid, r} =
+        start(~S"""
+        <body><a id=a href="/next">a</a><script>
+        var a = document.getElementById("a");
+        a.addEventListener("click", function () { a.remove(); });
+        a.click();
+        </script></body>
+        """)
+
+      assert errors(r) == []
+      assert r.outbox == []
+      Runtime.stop(pid)
+    end
+
     test "a link to another page navigates, a javascript: or _blank link does not" do
       {pid, r} =
         start(~S"""
@@ -342,6 +375,40 @@ defmodule Browser.JS.ActivationTest do
       assert logs(r) == [
                "change b | false,true,true | change a | true,false | click falsetrue | true,false"
              ]
+    end
+
+    test "the group of a radio button: the same name in the same form; a radio button with no name is alone" do
+      r =
+        run(
+          ~S"<form><input type=radio name=g id=a checked></form><form><input type=radio name=g id=b checked></form><input type=radio name=g id=c checked><input type=radio id=x checked><input type=radio id=y checked><input type=radio name=g id=d>",
+          ~S"""
+          var $ = function (id) { return document.getElementById(id); };
+          var all = function () { return ["a", "b", "c", "d", "x", "y"].map(function (id) { return $(id).checked ? 1 : 0; }).join(""); };
+          $("x").click();
+          var out = [all()];
+          $("d").click();
+          out.push(all());
+          $("c").checked = true;
+          out.push(all());
+          console.log(out.join(" "));
+          """
+        )
+
+      assert logs(r) == ["111011 110111 111011"]
+    end
+
+    test "a click in a label on a field of the label does not click the field again" do
+      r =
+        run("<label id=l>L <input id=t> <span id=s>s</span></label>", ~S"""
+        var t = document.getElementById("t"), n = 0;
+        t.addEventListener("click", function () { n++; });
+        t.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        var a = n;
+        document.getElementById("s").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        console.log(a, n);
+        """)
+
+      assert logs(r) == ["1 2"]
     end
 
     test "a label clicks its control; a summary opens and closes its details" do
