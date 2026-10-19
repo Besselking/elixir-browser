@@ -67,8 +67,9 @@ defmodule Browser.Nids do
   def rects(items, parents) do
     items
     |> Enum.reduce(%{}, fn
-      %{nid: nid, x: x, y: y, w: w, h: h}, acc when is_integer(nid) and is_number(w) ->
-        grow(acc, nid, parents, x, y, x + w, y + h)
+      %{nid: nid, x: x, y: y, w: w, h: h} = item, acc when is_integer(nid) and is_number(w) ->
+        full = {x, y, x + w, y + h}
+        grow(acc, nid, parents, full, visible(full, Map.get(item, :clip)))
 
       _, acc ->
         acc
@@ -76,16 +77,38 @@ defmodule Browser.Nids do
     |> Map.new(fn {nid, {x0, y0, x1, y1}} -> {nid, {x0, y0, x1 - x0, y1 - y0}} end)
   end
 
-  defp grow(acc, nil, _parents, _x0, _y0, _x1, _y1), do: acc
+  # the part of a box that the clip of its ancestors leaves (nil: none of it)
+  defp visible(box, nil), do: box
 
-  defp grow(acc, nid, parents, x0, y0, x1, y1) do
-    box =
-      case acc do
-        %{^nid => {a, b, c, d}} -> {min(a, x0), min(b, y0), max(c, x1), max(d, y1)}
-        _ -> {x0, y0, x1, y1}
+  defp visible({x0, y0, x1, y1}, %{x: cx, y: cy, w: cw, h: ch}) do
+    {a, b, c, d} = {max(x0, cx), max(y0, cy), min(x1, cx + cw), min(y1, cy + ch)}
+    if c > a and d > b, do: {a, b, c, d}
+  end
+
+  defp visible(box, _), do: box
+
+  defp grow(acc, nil, _parents, _full, _visible), do: acc
+
+  defp grow(acc, nid, parents, full, visible) do
+    # (what a box with `overflow: hidden` clips does not widen `html` and `body`: they are as
+    # wide as the inside of the clips, whatever a slider of 10000 px holds)
+    parent = Map.get(parents, nid)
+    root? = parent == nil or Map.get(parents, parent) == nil
+    box = if root?, do: visible, else: full
+
+    acc =
+      case {box, acc} do
+        {nil, _} ->
+          acc
+
+        {{x0, y0, x1, y1}, %{^nid => {a, b, c, d}}} ->
+          Map.put(acc, nid, {min(a, x0), min(b, y0), max(c, x1), max(d, y1)})
+
+        {b, _} ->
+          Map.put(acc, nid, b)
       end
 
-    grow(Map.put(acc, nid, box), Map.get(parents, nid), parents, x0, y0, x1, y1)
+    grow(acc, parent, parents, full, visible)
   end
 
   @doc """

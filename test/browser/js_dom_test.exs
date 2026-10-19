@@ -1165,6 +1165,28 @@ defmodule Browser.JS.DOMTest do
       refute_received {:layout_now, _, _, _}
     end
 
+    test "a resized window gives scripts the new size and a resize event" do
+      raw =
+        ~s|<body><script>window.addEventListener('resize', function () { console.log('resized', innerWidth, innerHeight) })</script></body>|
+
+      {parsed, _} = raw |> Browser.HTML.parse() |> Browser.Forms.index()
+
+      pid =
+        Runtime.start(parsed, %{
+          url: "http://t.test/",
+          width: 800,
+          height: 600,
+          fetch: fn _ -> {:error, "404"} end
+        })
+
+      Runtime.run_scripts(pid)
+      Runtime.resized(pid, 500, 400)
+      # (what the scripts did is told to the owner, as for a scroll)
+      assert_receive {:js_async, ^pid, reply}, 2000
+      assert errors(reply) == []
+      assert "resized 500 400" in logs(reply)
+    end
+
     test "an element with no box after a layout does not lay the same tree out again" do
       # (the export gives numbers to both new elements. The hidden one gets no box, and the
       # question about it must not ask for a second layout of the same tree)

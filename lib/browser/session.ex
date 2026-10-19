@@ -810,7 +810,10 @@ defmodule Browser.Session do
         {:noreply, %{state | width: w}}
 
       true ->
-        {:noreply, start_layout_job(%{state | width: w})}
+        state = %{state | width: w}
+        # (scripts that place things by the width of the window hear of it)
+        if state.js, do: Browser.JS.Runtime.resized(state.js, w, UI.client_height(state.ui))
+        {:noreply, start_layout_job(state)}
     end
   end
 
