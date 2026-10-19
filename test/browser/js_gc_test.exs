@@ -530,6 +530,9 @@ defmodule Browser.JSGCTest do
       Interp.init(10_000_000)
       Builtins.install()
       Process.put(:js_gc_at, 0)
+      # (nothing holds this object, and only a collect frees it: `free/1` frees only what
+      # the interpreter dropped, so a count of `:js_freed` also changes with no collect)
+      {:obj, stray} = Interp.new_object([{"x", 1.0}])
 
       {:ok, p} =
         Parser.parse(
@@ -541,9 +544,9 @@ defmodule Browser.JSGCTest do
         )
 
       Interp.run_program(p, true)
-      assert Process.get(:js_freed) == 0
+      assert Process.get(stray) != nil
       Builtins.run_timers(fn v -> throw({:uncaught, v}) end)
-      assert Process.get(:js_freed) > 0
+      assert Process.get(stray) == nil
       {:ok, q} = Parser.parse("out")
       assert Interp.run_program(q) == "tmp!"
     end)
