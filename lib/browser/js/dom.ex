@@ -3494,7 +3494,7 @@ defmodule Browser.JS.DOM do
         :window -> [:window]
         {:window, _} -> [target]
         {:objt, _} -> [target]
-        nid -> tree_path(nid, Map.get(init, :composed, true)) ++ [window_key_of(nid)]
+        nid -> nid |> tree_path(Map.get(init, :composed, true)) |> with_window()
       end
 
     # (the element whose activation behavior a click runs, and what it changed before)
@@ -3609,6 +3609,14 @@ defmodule Browser.JS.DOM do
 
   defp window_of_target(nid) when is_integer(nid), do: window_key_of(nid)
   defp window_of_target(target), do: target
+
+  # The window comes after the document. An event in a tree that is not in a document (an
+  # element that is not connected, or a shadow tree for an event that is not composed) does not
+  # go to the window.
+  defp with_window(path) do
+    root = List.last(path)
+    if node(root).kind == :document, do: path ++ [window_key_of(root)], else: path
+  end
 
   # the node and its ancestors; a composed event goes on from a shadow root to its host
   defp tree_path(nid, composed) do

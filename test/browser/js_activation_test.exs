@@ -132,6 +132,32 @@ defmodule Browser.JS.ActivationTest do
              ]
     end
 
+    test "on an element that is not connected: the click does not go to the window" do
+      r =
+        run("<div id=h></div>", ~S"""
+        var out = [];
+        window.addEventListener("click", function () { out.push("window"); });
+        window.addEventListener("x", function () { out.push("window x"); });
+        var p = document.createElement("p"), d = document.createElement("div");
+        p.appendChild(d);
+        p.addEventListener("click", function (e) { out.push("p " + e.target.tagName); });
+        d.click();
+        var c = document.createElement("input");
+        c.type = "checkbox";
+        c.addEventListener("change", function () { out.push("change"); });
+        c.click();
+        out.push("checked " + c.checked);
+        // (an event that is not composed stays in the shadow tree)
+        var root = document.getElementById("h").attachShadow({ mode: "open" });
+        root.innerHTML = "<span>s</span>";
+        root.firstChild.dispatchEvent(new Event("x", { bubbles: true }));
+        root.firstChild.dispatchEvent(new Event("x", { bubbles: true, composed: true }));
+        console.log(out.join(" | "));
+        """)
+
+      assert logs(r) == ["p DIV | checked true | window x"]
+    end
+
     test "a disabled control does not click, and a click in its own click() does not click" do
       r =
         run("<button id=b disabled>x</button><div id=d></div>", ~S"""
