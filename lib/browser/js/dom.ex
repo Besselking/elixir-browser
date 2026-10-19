@@ -3484,6 +3484,8 @@ defmodule Browser.JS.DOM do
   defp do_dispatch(target, type, init) do
     bubbles = Map.get(init, :bubbles, true)
     event = event_for(target, type, init, bubbles)
+    # (the dispatch flag: a script cannot dispatch this event again while it is in dispatch)
+    put_hidden(event, "__dispatching", true)
 
     pointer_coords(event, target, init)
 
@@ -3511,11 +3513,12 @@ defmodule Browser.JS.DOM do
         if bubbles, do: Enum.each(tl(path), &fire(&1, event, :bubble))
       end)
     after
+      # (a script can keep the event and dispatch it again: the flags of this dispatch go)
       put(event, "currentTarget", :null)
       put(event, "eventPhase", 0.0)
+      put_hidden(event, "__dispatching", false)
 
-      if Map.has_key?(init, :event) do
-        put_hidden(event, "__dispatching", false)
+      if truthy(Interp.get(event, "__stop")) do
         put_hidden(event, "__stop", false)
         put_hidden(event, "__stop_immediate", false)
       end
@@ -3544,7 +3547,8 @@ defmodule Browser.JS.DOM do
       )
     end
 
-    put_hidden(ev, "__dispatching", true)
+    # (`dispatchEvent` sets `isTrusted` to false, also for an event that the browser fired)
+    put(ev, "isTrusted", false)
     put(ev, "target", target_obj(target))
     put(ev, "currentTarget", :null)
     put(ev, "eventPhase", 0.0)
@@ -3626,6 +3630,8 @@ defmodule Browser.JS.DOM do
   end
 
   defp fire(target, event, phase) do
+    # (a script can stop the propagation before the dispatch: then no listener runs)
+    if truthy(Interp.get(event, "__stop")), do: throw(:dom_stop)
     listeners = Map.get(st().listeners, target, [])
     type = Interp.get(event, "type")
     if phase != :capture, do: run_inline_handler(target, type, event)

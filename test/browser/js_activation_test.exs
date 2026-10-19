@@ -73,6 +73,45 @@ defmodule Browser.JS.ActivationTest do
     end
   end
 
+  describe "dispatchEvent" do
+    test "an event that the browser fired can be dispatched again: no stop flag stays, it is not trusted" do
+      r =
+        run("<div id=a></div><div id=b></div>", ~S"""
+        var a = document.getElementById("a"), b = document.getElementById("b"), kept, out = [];
+        a.addEventListener("click", function (e) { kept = e; e.stopImmediatePropagation(); });
+        b.addEventListener("click", function (e) { out.push("b " + e.isTrusted + " " + e.target.id + " " + e.eventPhase); });
+        document.body.addEventListener("click", function (e) { out.push("body " + e.target.id); });
+        a.click();
+        out.push(b.dispatchEvent(kept));
+        out.push(kept.target.id + " " + kept.currentTarget + " " + kept.eventPhase);
+        console.log(out.join(" | "));
+        """)
+
+      assert logs(r) == ["b false b 2 | body b | true | b null 0"]
+    end
+
+    test "a dispatch of an event in dispatch throws; an event stopped before its dispatch reaches no listener" do
+      r =
+        run("<div id=a></div><div id=b></div>", ~S"""
+        var a = document.getElementById("a"), b = document.getElementById("b"), out = [];
+        a.addEventListener("click", function (e) {
+          try { b.dispatchEvent(e); } catch (err) { out.push(err.name + " " + e.target.id); }
+        });
+        a.click();
+        var n = 0, d = document.createElement("div");
+        d.addEventListener("x", function () { n++; });
+        var e = new Event("x");
+        e.stopPropagation();
+        d.dispatchEvent(e);
+        d.dispatchEvent(e);
+        out.push(n);
+        console.log(out.join(" | "));
+        """)
+
+      assert logs(r) == ["InvalidStateError a | 1"]
+    end
+  end
+
   describe "click()" do
     test "fires a PointerEvent that a script caused: button 0, no position, it bubbles" do
       r =
