@@ -349,6 +349,43 @@ defmodule Browser.JS.ActivationTest do
     end
   end
 
+  describe "buttons" do
+    test "a click on a submit button (or in it, or on its label) submits; the event has the submitter" do
+      {pid, r} =
+        start(~S"""
+        <body><form id=f action="/go"><label id=l>Send <button id=b><span id=s>go</span></button></label>
+        <input type=reset id=r></form><script>
+        var f = document.getElementById("f"), n = 0;
+        f.addEventListener("submit", function (e) {
+          console.log("submit", e.constructor.name, e.submitter && e.submitter.id);
+          if (++n < 3) e.preventDefault();
+        });
+        f.addEventListener("reset", function () { console.log("reset"); });
+        document.getElementById("s").click();
+        document.getElementById("l").click();
+        document.getElementById("r").click();
+        f.requestSubmit();
+        </script></body>
+        """)
+
+      assert errors(r) == []
+
+      assert logs(r) == [
+               "submit SubmitEvent b",
+               "submit SubmitEvent b",
+               "reset",
+               "submit SubmitEvent null"
+             ]
+
+      assert r.outbox == [{:submit, 0}]
+
+      # (a submission from the window gives the number of its button)
+      reply = Runtime.dispatch(pid, {:form, 0}, "submit", %{"submitter" => 0})
+      assert logs(reply) == ["submit SubmitEvent b"]
+      Runtime.stop(pid)
+    end
+  end
+
   describe "the clicks of the window" do
     test "a click of the user is a trusted PointerEvent with the button and the position" do
       {pid, _} =

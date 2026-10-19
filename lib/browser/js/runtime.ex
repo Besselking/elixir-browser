@@ -540,7 +540,7 @@ defmodule Browser.JS.Runtime do
     prevented =
       case resolve_target(target) do
         nil -> :ok
-        t -> guard(fn -> DOM.dispatch(t, type, init) end, :ok)
+        t -> guard(fn -> DOM.dispatch(t, type, dom_init(init)) end, :ok)
       end
 
     # what the window does when the page did not stop the event: Escape closes a modal dialog,
@@ -657,6 +657,13 @@ defmodule Browser.JS.Runtime do
     DOM.apply_controls(controls)
     finish(%{force_raw: true})
   end
+
+  # the event's members from the session: the submitter of a `submit` is a control number there,
+  # and the element in the event
+  defp dom_init(%{"submitter" => cid} = init),
+    do: %{init | "submitter" => DOM.control_object(cid)}
+
+  defp dom_init(init), do: init
 
   defp resolve_target({:control, cid}), do: DOM.control_node(cid)
   defp resolve_target({:form, fid}), do: DOM.form_node(fid)

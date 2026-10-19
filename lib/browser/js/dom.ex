@@ -2276,6 +2276,9 @@ defmodule Browser.JS.DOM do
     end)
   end
 
+  @doc "The element of the page's control `cid` (nil: none) as a JS value, or null."
+  def control_object(cid), do: wrap_or_null(cid && control_node(cid))
+
   def get_attr(n, name), do: with({_, v} <- List.keyfind(n.attrs, name, 0), do: v)
 
   defp attr_or(n, name, default), do: get_attr(n, name) || default
@@ -7124,7 +7127,8 @@ defmodule Browser.JS.DOM do
 
   # the submit event, then the submission unless a script stopped it
   defp request_submit(form, submitter) do
-    if dispatch(form, "submit", %{}) == :ok, do: submit_form(form, submitter)
+    if dispatch(form, "submit", %{"submitter" => wrap_or_null(submitter)}) == :ok,
+      do: submit_form(form, submitter)
   end
 
   # `<form method="dialog">` closes its dialog (see `Browser.Modal`); any other goes to the window
