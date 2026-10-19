@@ -2498,7 +2498,9 @@ defmodule Browser.JS.DOM do
   defp set_attr(nid, name, value) do
     name = Str.downcase(name)
     old_value = nid |> node() |> get_attr(name)
+    was_open = name == "open" and open_of(node(nid))
     set_attr_quiet(nid, name, value)
+    if name == "open", do: details_toggled(nid, was_open)
     attribute_changed(nid, name, old_value, value)
   end
 
@@ -2523,10 +2525,27 @@ defmodule Browser.JS.DOM do
     if name == "open" and List.keymember?(node(nid).internal, "@modal", 0),
       do: out({:modal, :close})
 
+    was_open = name == "open" and open_of(node(nid))
+
     update_node(nid, fn n ->
       n = %{n | attrs: List.keydelete(n.attrs, name, 0)}
       if name == "open", do: %{n | internal: List.keydelete(n.internal, "@modal", 0)}, else: n
     end)
+
+    if name == "open", do: details_toggled(nid, was_open)
+  end
+
+  # A `<details>` that opened or closed (it was open when `was_open`) queues its `toggle` event
+  # (see `__detailsToggle` in `Browser.JS.WebAPI`).
+  defp details_toggled(nid, was_open) do
+    n = node(nid)
+    open = open_of(n)
+    state = fn o -> if o, do: "open", else: "closed" end
+
+    if n.tag == "details" and open != was_open,
+      do: call_global("__detailsToggle", [wrap(nid), state.(was_open), state.(open)])
+
+    :ok
   end
 
   # ── wrappers ───────────────────────────────────────────────
@@ -3166,7 +3185,9 @@ defmodule Browser.JS.DOM do
       "open" ->
         cond do
           node(nid).tag != "dialog" ->
+            was_open = open_of(node(nid))
             update_node(nid, &%{&1 | props: Map.put(&1.props, "open", truthy(v))})
+            details_toggled(nid, was_open)
 
           truthy(v) ->
             set_attr(nid, "open", "")
@@ -7383,8 +7404,9 @@ defmodule Browser.JS.DOM do
   defp toggle_details(nil), do: :ok
 
   defp toggle_details(details) do
-    open = not open_of(node(details))
-    update_node(details, &%{&1 | props: Map.put(&1.props, "open", open)})
+    was_open = open_of(node(details))
+    update_node(details, &%{&1 | props: Map.put(&1.props, "open", not was_open)})
+    details_toggled(details, was_open)
   end
 
   # A checkbox's or radio button's checked state. A radio button that is checked unchecks the

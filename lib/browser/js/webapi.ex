@@ -798,6 +798,24 @@ defmodule Browser.JS.WebAPI do
         closeDialog(dlg, value);
       };
     }
+    // the toggle event of a <details> that opened or closed: it comes in a task of its own, one
+    // event for all the changes before that task (with the first old state and the last new state)
+    (function () {
+      var pending = [];
+      g.__detailsToggle = function (el, oldState, newState) {
+        for (var i = 0; i < pending.length; i++) {
+          if (pending[i].el === el) { pending[i].newState = newState; return; }
+        }
+        var p = { el: el, oldState: oldState, newState: newState };
+        pending.push(p);
+        setTimeout(function () {
+          pending.splice(pending.indexOf(p), 1);
+          var e = new Event("toggle", { bubbles: false, cancelable: false });
+          e.oldState = p.oldState; e.newState = p.newState;
+          el.dispatchEvent(e);
+        }, 0);
+      };
+    })();
     // the Popover API: a `popover` element in the top layer, hidden again by Escape or a click elsewhere
     (function () {
       var stack = [];

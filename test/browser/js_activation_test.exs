@@ -20,6 +20,22 @@ defmodule Browser.JS.ActivationTest do
   end
 
   defp logs(reply), do: for({:log, t} <- reply.console, do: t)
+
+  # The console of the timers that are left. (The runtime can run a timer that comes due before
+  # the flush, and then sends its output as a `:js_async` message before the flush's reply.)
+  defp settle(pid) do
+    flushed = Runtime.flush(pid).console
+    %{console: early_console(pid) ++ flushed}
+  end
+
+  defp early_console(pid) do
+    receive do
+      {:js_async, ^pid, reply} -> reply.console ++ early_console(pid)
+    after
+      0 -> []
+    end
+  end
+
   defp errors(reply), do: for({:error, t} <- reply.console, do: t)
 
   defp run(body, script) do
@@ -382,6 +398,41 @@ defmodule Browser.JS.ActivationTest do
       # (a submission from the window gives the number of its button)
       reply = Runtime.dispatch(pid, {:form, 0}, "submit", %{"submitter" => 0})
       assert logs(reply) == ["submit SubmitEvent b"]
+      Runtime.stop(pid)
+    end
+  end
+
+  describe "details" do
+    test "a summary click, details.open and the open attribute queue one toggle event" do
+      {pid, r} =
+        start(~S"""
+        <body><details id=d><summary id=s>S</summary>x</details><details id=e ontoggle="log(event)">
+        <summary>T</summary></details><script>
+        var d = document.getElementById("d"), e = document.getElementById("e");
+        function log(ev) { console.log(ev.type, ev.target.id, ev.oldState, ev.newState, ev.bubbles); }
+        d.addEventListener("toggle", log);
+        document.getElementById("s").click();
+        console.log("open", d.open);
+        e.open = true;
+        e.open = true;
+        </script></body>
+        """)
+
+      assert errors(r) == []
+      assert logs(r) == ["open true"]
+      assert logs(settle(pid)) == ["toggle d closed open false", "toggle e closed open false"]
+
+      # (two changes before the task: one event, with the first old state and the last new one)
+      r =
+        Runtime.eval(
+          pid,
+          ~S"d.removeAttribute('open'); d.open = false; d.setAttribute('open', '');"
+        )
+
+      assert logs(r) == []
+      assert logs(settle(pid)) == ["toggle d open open false"]
+      Runtime.eval(pid, ~S"d.open = false; d.open = false;")
+      assert logs(settle(pid)) == ["toggle d open closed false"]
       Runtime.stop(pid)
     end
   end
