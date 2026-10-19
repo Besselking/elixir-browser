@@ -45,7 +45,11 @@ info = %{
 }
 
 # LAYOUT=1 answers the scripts' questions about sizes with a real layout (the way the session
-# does, but with a fixed width per character), and adds up what those layouts cost
+# does, but with a fixed width per character), and adds up what those layouts cost. As in the
+# session, the layouts go through a layout worker that keeps the memo of the last layout
+# (`Browser.LayoutWorker`), and a prewarm lays out in the worker too. LAYOUT_DIRECT=1 gives the
+# old mode, to compare with older numbers: each request lays out in its own process with no
+# memo, and a prewarm only styles. (A tree with no layout worker always uses the old mode)
 layout? = System.get_env("LAYOUT") != nil
 info = if layout?, do: Map.put(info, :layout_now, true), else: info
 {:ok, forced} = Agent.start_link(fn -> {0, 0} end)
@@ -248,6 +252,13 @@ spawn(fn -> send(me, {:scripts_done, Runtime.run_scripts(pid)}) end)
 # tree starts its layouts as its own session does)
 Code.ensure_loaded(Browser.Session)
 
+# (the layout worker of the bench, nil in the old mode: see LAYOUT_DIRECT above)
+bench_lw =
+  if System.get_env("LAYOUT_DIRECT") == nil and Code.ensure_loaded?(Browser.LayoutWorker),
+    do: Browser.LayoutWorker.start(&Browser.Screenshot.measure/2)
+
+layout_opts = fn laid -> [scrollers: true, boxes: true, svg_defs: laid.svg_defs] end
+
 spawn_layout =
   if function_exported?(Browser.Session, :spawn_layout, 1),
     do: &Browser.Session.spawn_layout/1,
@@ -305,14 +316,18 @@ run_style = fn base, job ->
     )
   end
 
-  # A prewarm (`ref` is nil) only makes the style memo: no script reads its boxes, and the
-  # bench keeps no layout memo. A twin that came while it styled starts from that memo.
+  # A prewarm (`ref` is nil) makes the style memo, and with the layout worker it also lays out
+  # there, as in the session: no script reads its boxes, but the worker keeps the memo of that
+  # layout. A twin that came while it styled starts from the style memo.
   twin = (ref == nil and twins?) && apply(Browser.Session, :take_twin, [])
 
   cond do
     twin && apply(Browser.Session, :twin_wanted?, [twin]) ->
       {base, refs} = apply(Browser.Session, :twin_base, [laid, twin])
       {:twin, base, %{twin | refs: refs}}
+
+    ref == nil and bench_lw != nil ->
+      {:prewarm_layout, laid}
 
     ref == nil ->
       :ok
@@ -328,20 +343,40 @@ twin_style = fn
   step -> step
 end
 
+# A layout through the worker (when the worker is busy, in the caller with no memo, as in the
+# session), or in the old mode in the caller
+layout_of = fn laid ->
+  if bench_lw,
+    do:
+      Browser.LayoutWorker.layout(
+        bench_lw,
+        :bench_tab,
+        laid.nodes,
+        1000,
+        &Browser.Screenshot.measure/2,
+        800,
+        layout_opts.(laid)
+      ),
+    else:
+      Browser.Layout.layout(
+        laid.nodes,
+        1000,
+        &Browser.Screenshot.measure/2,
+        800,
+        layout_opts.(laid)
+      )
+end
+
 # The layout of a request after its style. The watchdog stops a layout that the script no longer
-# waits for.
+# waits for. Gives `{:twin, base, twin}` for a prewarm that has a twin to style next (one that
+# came while the prewarm laid out, as in the session), else something else.
 lay_out = fn
   {:layout, laid, %{js: js, ref: ref, raw: raw, deadline: deadline} = job, t, base} ->
     watch_layout.(deadline)
 
     t1 = System.monotonic_time(:microsecond)
 
-    {items, height} =
-      Browser.Layout.layout(laid.nodes, 1000, &Browser.Screenshot.measure/2, 800,
-        scrollers: true,
-        boxes: true,
-        svg_defs: laid.svg_defs
-      )
+    {items, height} = layout_of.(laid)
 
     t2 = System.monotonic_time(:microsecond)
 
@@ -367,6 +402,23 @@ lay_out = fn
         )
 
     send(js, {:layout_now_done, ref, rects, {1000.0, height}})
+
+  {:prewarm_layout, laid} ->
+    t1 = System.monotonic_time(:microsecond)
+    {items, _height} = layout_of.(laid)
+
+    if System.get_env("LAYOUT") == "2",
+      do:
+        IO.puts(
+          "prewarm layout #{div(System.monotonic_time(:microsecond) - t1, 1000)} ms, #{length(items)} items"
+        )
+
+    twin = twins? && apply(Browser.Session, :take_twin, [])
+
+    if twin && apply(Browser.Session, :twin_wanted?, [twin]) do
+      {base, refs} = apply(Browser.Session, :twin_base, [laid, twin])
+      {:twin, base, %{twin | refs: refs}}
+    end
 
   _ ->
     :ok
@@ -443,7 +495,8 @@ start_layout = fn %{js: js, ref: ref, raw: raw, deadline: deadline, seq: seq} ->
       # (This file is not compiled: a function keeps all its values while it calls another one.
       # Each step goes as an argument into the next, so that the layout does not keep what the
       # style worked with, as in the session)
-      lay_out.(twin_style.(run_style.(base, job)))
+      # (a prewarm that lays out can give a twin to style and lay out next)
+      lay_out.(twin_style.(lay_out.(twin_style.(run_style.(base, job)))))
     end)
 
   # (the gate opens also when the process stops before it sends its style state)

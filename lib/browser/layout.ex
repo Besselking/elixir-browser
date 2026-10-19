@@ -451,6 +451,9 @@ defmodule Browser.Layout do
 
   # `letter-spacing` adds its length after every character, `word-spacing` after every space
   defp spaced(measure) do
+    # (the pattern is read one time for each layout, not for each word that is measured)
+    zwsp = compiled("\u200B")
+
     fn
       :content_height, style ->
         measure.(:content_height, style)
@@ -462,7 +465,9 @@ defmodule Browser.Layout do
       text, style ->
         # (a zero-width space takes no room)
         measured =
-          if contains?(text, "\u200B"), do: String.replace(text, "\u200B", ""), else: text
+          if :binary.match(text, zwsp) != :nomatch,
+            do: String.replace(text, "\u200B", ""),
+            else: text
 
         measure.(measured, style) + extra_width(text, style)
     end
@@ -485,6 +490,74 @@ defmodule Browser.Layout do
         compiled
     end
   end
+
+  # `contains?/2` for the patterns looked for in each word: the compiled pattern is read from
+  # `:persistent_term` one time and then kept in the process dictionary under `key`, where a
+  # look-up costs less
+  defp word_contains?(text, key, pattern) do
+    compiled =
+      case :erlang.get(key) do
+        :undefined ->
+          compiled = compiled(pattern)
+          Process.put(key, compiled)
+          compiled
+
+        compiled ->
+          compiled
+      end
+
+    :binary.match(text, compiled) != :nomatch
+  end
+
+  defp shy?(text), do: word_contains?(text, :layout_pattern_shy, "\u00AD")
+
+  # `Map.get/3` of the keys that each word reads, with no remote call
+  defp wrap_chars_of(%{wrap_chars: mode}), do: mode
+  defp wrap_chars_of(_style), do: :none
+  defp tail_of(%{tail: tail}), do: tail
+  defp tail_of(_style), do: 0
+  defp hang_of(%{hang: hang}), do: hang
+  defp hang_of(_item), do: 0
+
+  # `String.length/1` with a fast path: in ASCII text with no carriage return, each byte is one
+  # character (grapheme)
+  defp text_length(text), do: text_length(text, text, 0)
+
+  defp text_length(<<c, rest::binary>>, text, n) when c < 128 and c != ?\r,
+    do: text_length(rest, text, n + 1)
+
+  # (also a character from U+0080 to U+02FF, as a no-break space or a Latin letter with an
+  # accent: none of them joins the character before it)
+  defp text_length(<<a, c, rest::binary>>, text, n)
+       when a >= 0xC2 and a <= 0xCB and c >= 0x80 and c <= 0xBF,
+       do: text_length(rest, text, n + 1)
+
+  defp text_length(<<>>, _text, n), do: n
+  defp text_length(_rest, text, _n), do: String.length(text)
+
+  # `String.length(text) < 2` without the count. A character from U+0000 to U+02FF, but a
+  # carriage return, is one character (grapheme) and none of them joins the one before it: a
+  # text that starts with two of them has two characters or more.
+  defp under_two?(text), do: under_two?(text, text)
+
+  defp under_two?(<<c, rest::binary>>, text) when c < 128 and c != ?\r,
+    do: not second_char?(rest, text)
+
+  defp under_two?(<<a, c, rest::binary>>, text)
+       when a >= 0xC2 and a <= 0xCB and c >= 0x80 and c <= 0xBF,
+       do: not second_char?(rest, text)
+
+  defp under_two?(_rest, text), do: String.length(text) < 2
+
+  # (`rest` is what follows the first character)
+  defp second_char?(<<>>, _text), do: false
+  defp second_char?(<<c, _::binary>>, _text) when c < 128 and c != ?\r, do: true
+
+  defp second_char?(<<a, c, _::binary>>, _text)
+       when a >= 0xC2 and a <= 0xCB and c >= 0x80 and c <= 0xBF,
+       do: true
+
+  defp second_char?(_rest, text), do: String.length(text) >= 2
 
   defp extra_width(text, %{ls: ls, wsp: wsp}) when ls != 0 or wsp != 0,
     do: round(ls * spaced_length(text) + wsp * count_spaces(text))
@@ -3830,10 +3903,9 @@ defmodule Browser.Layout do
   defp line_ops(line, style, :break_spaces, prev) do
     style = if String.contains?(line, "\t"), do: %{style | nojust: true}, else: style
 
-    re(
-      ~r/\t|[ \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}]|[^ \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}\t]+/u
-    )
-    |> Regex.scan(String.replace(line, "\r", " "))
+    line
+    |> String.replace("\r", " ")
+    |> break_space_tokens()
     |> Enum.map_reduce({prev, 0}, fn
       # a tab is one unbreakable word as wide as the spaces it stands for
       ["\t"], {prev, col} ->
@@ -3853,7 +3925,7 @@ defmodule Browser.Layout do
         {{:word, nbsp_of(sp), style}, {:space, col + 1}}
 
       [run], {_, col} ->
-        {ideograph_breaks({:word, run, style}, style), {:text, col + String.length(run)}}
+        {ideograph_breaks({:word, run, style}, style), {:text, col + text_length(run)}}
     end)
     |> elem(0)
     |> List.flatten()
@@ -3887,6 +3959,48 @@ defmodule Browser.Layout do
     end)
     |> List.flatten()
   end
+
+  # The tokens of a line of `break-spaces`, as `Regex.scan/2` gives them with the regex below: a
+  # tab, one space, or a run of other characters. A loop on the characters makes the same tokens
+  # with no regex; text that is not UTF-8 goes to the regex.
+  defp break_space_tokens(line) do
+    case break_tokens(line, line, 0, 0, []) do
+      :other ->
+        Regex.scan(
+          re(
+            ~r/\t|[ \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}]|[^ \x{1680}\x{2000}-\x{2006}\x{2008}-\x{200A}\x{205F}\x{3000}\t]+/u
+          ),
+          line
+        )
+
+      tokens ->
+        tokens
+    end
+  end
+
+  # (`pos` is the byte offset of `rest` in `line`, `run` that of the run of other characters
+  # that goes on to `pos`)
+  defp break_tokens(<<>>, line, pos, run, acc), do: :lists.reverse(run_token(line, run, pos, acc))
+
+  defp break_tokens(<<c, rest::binary>>, line, pos, run, acc) when c < 128 do
+    if c == ?\t or c == ?\s,
+      do: break_tokens(rest, line, pos + 1, pos + 1, [[<<c>>] | run_token(line, run, pos, acc)]),
+      else: break_tokens(rest, line, pos + 1, run, acc)
+  end
+
+  defp break_tokens(<<c::utf8, rest::binary>> = text, line, pos, run, acc) do
+    next = pos + byte_size(text) - byte_size(rest)
+
+    if c == 0x1680 or (c >= 0x2000 and c <= 0x2006) or (c >= 0x2008 and c <= 0x200A) or
+         c == 0x205F or c == 0x3000,
+       do: break_tokens(rest, line, next, next, [[<<c::utf8>>] | run_token(line, run, pos, acc)]),
+       else: break_tokens(rest, line, next, run, acc)
+  end
+
+  defp break_tokens(_rest, _line, _pos, _run, _acc), do: :other
+
+  defp run_token(_line, run, run, acc), do: acc
+  defp run_token(line, run, pos, acc), do: [[binary_part(line, run, pos - run)] | acc]
 
   # what the text laid out so far ends in: `:text`, or `:space` for a preserved space
   defp prev_kind([{:word, text, _} | _]), do: word_kind(text)
@@ -4238,6 +4352,14 @@ defmodule Browser.Layout do
       acc -> list_summary(rest, acc)
     end
   end
+
+  # (an item with none of the keys, as most words are, has the summary {false, false, :none, nil}:
+  # the guards find it with no call)
+  defp list_summary([item | rest], {false, false, :none, nil} = acc)
+       when not is_map_key(item, :stick) and not is_map_key(item, :over) and
+              not is_map_key(item, :under) and not is_map_key(item, :pz) and
+              not is_map_key(item, :rel),
+       do: list_summary(rest, acc)
 
   defp list_summary([item | rest], {over?, under?, pz, rel} = acc)
        when not is_map_key(item, :stick) do
@@ -5164,9 +5286,10 @@ defmodule Browser.Layout do
   end
 
   # the offset the relatively positioned inlines around the current place add up to
+  # (most words are in no such inline: `rels` is empty, or holds only nils, and no list is made)
   defp current_rel(%{rels: rels}) do
-    case Enum.reject(rels, &is_nil/1) do
-      [] ->
+    case no_rel?(rels) || Enum.reject(rels, &is_nil/1) do
+      true ->
         nil
 
       list ->
@@ -5174,6 +5297,9 @@ defmodule Browser.Layout do
          elem(hd(list), 2)}
     end
   end
+
+  defp no_rel?([nil | rest]), do: no_rel?(rest)
+  defp no_rel?(rels), do: rels == []
 
   defp atom_items(%{rel: rel, items: items}), do: Enum.map(items, &Map.put(&1, :rel, rel))
   defp atom_items(%{items: items}), do: items
@@ -7451,7 +7577,7 @@ defmodule Browser.Layout do
 
   defp kept_into([item | rest], ctx, dys, limit, acc) do
     acc =
-      if Enum.reduce(dys, item.y, &(&2 + &1)) < limit or item.type == :bounds,
+      if add_dys(dys, item.y) < limit or item.type == :bounds,
         do: [if(ctx, do: apply_ctx(item, ctx), else: item) | acc],
         else: acc
 
@@ -7911,7 +8037,12 @@ defmodule Browser.Layout do
 
   defp text_y(%{y: y}, nil, _dys), do: y
   defp text_y(%{rel: _} = it, {_, nil} = ctx, _dys), do: apply_ctx(it, ctx).y
-  defp text_y(%{y: y}, _ctx, dys), do: Enum.reduce(dys, y, &(&2 + &1))
+  defp text_y(%{y: y}, _ctx, dys), do: add_dys(dys, y)
+
+  # `Enum.reduce(dys, y, &(&2 + &1))`: the same sums in the same order, with no call of a fun
+  # for each one (each item of a text reads it)
+  defp add_dys([], y), do: y
+  defp add_dys([dy | rest], y), do: add_dys(rest, y + dy)
 
   @doc false
   # For the tests: the number of items in `entries`.
@@ -8008,11 +8139,17 @@ defmodule Browser.Layout do
   # font, or a fixed guess when nothing can measure the font.
   defp content_factor(style) do
     cond do
-      contains?(to_string(Map.get(style, :family)), "ahem") -> 1.0
+      ahem_family?(Map.get(style, :family)) -> 1.0
       metrics = Process.get(:layout_metrics) -> metrics.(style) / style.size
       true -> @content_factor
     end
   end
+
+  # (each word reads it)
+  defp ahem_family?(nil), do: false
+
+  defp ahem_family?(family),
+    do: word_contains?(to_string(family), :layout_pattern_ahem, "ahem")
 
   # the line-height of text in px: `normal` is the font's content height, a number is a
   # factor of the font size
@@ -8144,7 +8281,7 @@ defmodule Browser.Layout do
   end
 
   defp word(text, style, nowrap?, st, dx \\ 0, glue \\ false) do
-    if contains?(text, "\u00AD"),
+    if shy?(text),
       do: shy_word(text, style, nowrap?, st, dx, glue),
       else: plain_word(text, style, nowrap?, st, dx, glue)
   end
@@ -8221,7 +8358,7 @@ defmodule Browser.Layout do
   # fit break between its characters. -> nil, or {head, rest}: what fits on the line and the rest
   # ("" for head when the line has to wrap before anything of the word goes on it)
   defp split_point(text, style, nowrap?, st, w, space_w) do
-    mode = Map.get(style, :wrap_chars, :none)
+    mode = wrap_chars_of(style)
     # break-word's opportunities do not count when sizing to the content; anywhere's do
     mode = if mode == :word and Process.get(:layout_intrinsic), do: :none, else: mode
     mode = if mode == :anywhere, do: :word, else: mode
@@ -8230,7 +8367,7 @@ defmodule Browser.Layout do
     space_w = if st.line == [], do: 0, else: space_w
 
     cond do
-      nowrap? or mode == :none or String.length(text) < 2 ->
+      nowrap? or mode == :none or under_two?(text) ->
         nil
 
       st.x + space_w + w - trailing_ls(style) <= right ->
@@ -8318,12 +8455,12 @@ defmodule Browser.Layout do
 
   defp word_placed(text, style, nowrap?, st, glue, w, space_w, line_left) do
     glued? = glue != false
-    hang = hang_width(text, style, st)
+    hang = hang_width(text, style, st, w)
 
     st =
       cond do
         st.line == [] or nowrap? or hang == w or glued_after?(st, text, space_w) or
-            st.x + space_w + w + Map.get(style, :tail, 0) - hang <=
+            st.x + space_w + w + tail_of(style) - hang <=
               st.width - st.margin - st.right - st.fr - st.bal ->
           st
 
@@ -8369,7 +8506,6 @@ defmodule Browser.Layout do
       ls: style.ls,
       vs: style.vs,
       wsp: style.wsp,
-      alast: style.alast,
       nojust: style.nojust or style.ws == :pre,
       align: style.align,
       cid: style.cid,
@@ -8380,7 +8516,7 @@ defmodule Browser.Layout do
 
     # (no `alast` key when it is nil: a text item then has 32 keys or fewer, and the VM keeps
     # it as a flat map, not as a tree. Read it with `Map.get/2`)
-    item = if style.alast == nil, do: Map.delete(item, :alast), else: item
+    item = if style.alast == nil, do: item, else: Map.put(item, :alast, style.alast)
 
     item = if hang > 0, do: Map.put(item, :hang, hang), else: item
     item = if style.wrap_chars != :none, do: Map.put(item, :wc, style.wrap_chars), else: item
@@ -8423,8 +8559,31 @@ defmodule Browser.Layout do
     # (the cheap tests first, the regex last and compiled one time)
     prev.x + prev.w == item.x and not is_map_key(prev, :hang) and not is_map_key(prev, :wc) and
       :maps.without(keys, prev) == :maps.without(keys, item) and
-      not String.match?(prev.text <> item.text, re(~r/\s|[\x{2000}-\x{200A}\x{3000}]/u))
+      not run_space?(prev.text, item.text)
   end
+
+  # Whether `a <> b` holds a white space or a wide space (the regex below finds them). Most text
+  # is ASCII, or Latin text with no-break spaces: a loop on the bytes finds the same characters
+  # with no regex. Other text goes to the regex.
+  defp run_space?(a, b) do
+    case {space_bytes(a, false), space_bytes(b, false)} do
+      {found_a, found_b} when is_boolean(found_a) and is_boolean(found_b) -> found_a or found_b
+      _ -> String.match?(a <> b, re(~r/\s|[\x{2000}-\x{200A}\x{3000}]/u))
+    end
+  end
+
+  # -> whether the text has a space, or :other when it has a character that is not ASCII nor of
+  # two bytes (or bytes that are not UTF-8). In ASCII the regex finds \t \n \v \f \r and the
+  # space; of the two-byte characters (U+0080 to U+07FF) it finds only U+0085 and U+00A0.
+  defp space_bytes(<<c, rest::binary>>, found) when c < 128,
+    do: space_bytes(rest, found or c == ?\s or (c >= ?\t and c <= ?\r))
+
+  defp space_bytes(<<a, c, rest::binary>>, found)
+       when a >= 0xC2 and a <= 0xDF and c >= 0x80 and c <= 0xBF,
+       do: space_bytes(rest, found or (a == 0xC2 and (c == 0x85 or c == 0xA0)))
+
+  defp space_bytes(<<>>, found), do: found
+  defp space_bytes(_rest, _found), do: :other
 
   # (the item's `lm` holds what its style gives the line: see `word_placed/8`)
   defp push_word(st, item, x, w, style) do
@@ -8445,30 +8604,42 @@ defmodule Browser.Layout do
 
   # ideographic spaces at the end of a word hang: they take no room when the line is filled
   # or the content measured
-  defp hang_width(_text, %{ws: :break_spaces}, _st), do: 0
+  # (`w` is the width of the word: see `text_w/4`)
+  defp hang_width(_text, %{ws: :break_spaces}, _st, _w), do: 0
 
   # (the spaces `pre-wrap` preserves hang when they do not fit)
-  defp hang_width(text, %{ws: :pre_wrap} = style, st) do
-    w = st.measure.(text, style)
+  defp hang_width(text, %{ws: :pre_wrap} = style, st, w) do
+    w = text_w(text, style, st, w)
 
     if text != "" and String.trim(text, "\u00A0") == "" and
          st.x + w > st.width - st.margin - st.right - st.fr - st.bal,
        do: w,
-       else: ideographic_hang(text, style, st)
+       else: ideographic_hang(text, style, st, w)
   end
 
-  defp hang_width(text, style, st), do: ideographic_hang(text, style, st)
+  defp hang_width(text, style, st, w), do: ideographic_hang(text, style, st, w)
 
-  defp ideographic_hang(text, style, st) do
+  # What `text` measures. The callers of `word_placed/8` give the width of the word, which is
+  # that, except for a tab (`plain_word/6`): it is measured again only then
+  defp text_w(_text, %{tabw: nil}, _st, w), do: w
+  defp text_w(text, style, st, _w), do: st.measure.(text, style)
+
+  defp ideographic_hang(text, style, st, w) do
+    w = text_w(text, style, st, w)
+
+    # (`String.trim_trailing/2` changes nothing when the text does not end with the space)
     hang =
-      case String.trim_trailing(text, "\u3000") do
-        ^text -> 0
-        "" -> st.measure.(text, style)
-        body -> st.measure.(text, style) - st.measure.(body, style)
+      if String.ends_with?(text, "\u3000") do
+        case String.trim_trailing(text, "\u3000") do
+          "" -> w
+          body -> w - st.measure.(body, style)
+        end
+      else
+        0
       end
 
     # (the spacing after the last letter of a line is not shown nor counted)
-    min(hang + trailing_ls(style), st.measure.(text, style))
+    min(hang + trailing_ls(style), w)
   end
 
   # A word that does not fit, glued to the text before it (`bb<b>cc</b>`): everything back to
@@ -8687,21 +8858,16 @@ defmodule Browser.Layout do
     fnormal = Enum.reduce(on_baseline, normal, &max(&2, Map.get(&1, :tn, 0)))
     lift_fudge = if fnormal > normal, do: div(normal - st.lh, 4), else: 0
 
+    # (one pass over the words of the line, and one new map for each)
     placed =
-      for it <- texts,
-          do: %{
-            it
-            | x: it.x + shift,
-              y:
-                st.y + dy + half + normal - it.h - div(fnormal - it.h, 4) + lift_fudge -
-                  Map.get(it, :vs, 0)
-          }
+      for it <- texts, not is_map_key(it, :strut) or it.strut in [nil, false] do
+        vs = if is_map_key(it, :vs), do: it.vs, else: 0
+        y = st.y + dy + half + normal - it.h - div(fnormal - it.h, 4) + lift_fudge - vs
+        it = :maps.remove(:lm, :maps.remove(:glue, it))
+        Map.merge(it, %{x: it.x + shift, y: y, tn: normal})
+      end
 
-    placed =
-      placed
-      |> Enum.reject(&Map.get(&1, :strut))
-      |> Enum.map(&(&1 |> Map.drop([:glue, :lm]) |> Map.put(:tn, normal)))
-      |> apply_rel()
+    placed = apply_rel(placed)
 
     {placed, st, widen} = justify(placed, st, List.last(st.line), shift)
 
@@ -13467,7 +13633,7 @@ defmodule Browser.Layout do
     if style.tabw != nil, do: throw(:layout)
 
     {text, f, dx} =
-      if contains?(text, "­") do
+      if shy?(text) do
         # (`shy_word` starts the line once more than `plain_word`: the lead is used up unapplied)
         f = if f.empty, do: %{f | lead: 0}, else: f
         {String.replace(text, "­", ""), f, 0}
@@ -13487,14 +13653,14 @@ defmodule Browser.Layout do
     right = f.width - f.r
 
     # `split_point`
-    mode = Map.get(style, :wrap_chars, :none)
+    mode = wrap_chars_of(style)
     mode = if mode == :word, do: :none, else: mode
     mode = if mode == :anywhere, do: :word, else: mode
     mode = if mode == :every, do: :all, else: mode
     space_w0 = if f.empty, do: 0, else: space_w
 
     cond do
-      nowrap? or mode == :none or String.length(text) < 2 -> :ok
+      nowrap? or mode == :none or under_two?(text) -> :ok
       f.x + space_w0 + w - trailing_ls(style) <= right -> :ok
       mode == :word and w <= right - f.indent -> :ok
       true -> throw(:layout)
@@ -13507,7 +13673,7 @@ defmodule Browser.Layout do
     f =
       cond do
         f.empty or nowrap? or hang == w or fold_glued_after?(f, text, space_w) or
-            f.x + space_w + w + Map.get(style, :tail, 0) - hang <= right ->
+            f.x + space_w + w + tail_of(style) - hang <= right ->
           f
 
         glued? and space_w == 0 and not f.after_space and glue == :hold ->
@@ -13585,12 +13751,13 @@ defmodule Browser.Layout do
     if style.wrap_chars != :none, do: Map.put(item, :wc, style.wrap_chars), else: item
   end
 
+  # (as `mergeable?/2`: the cheap tests first)
   defp fold_mergeable?(prev, item) do
     keys = [:x, :w, :text, :glue, :hang]
 
-    Map.drop(prev, keys) == Map.drop(item, keys) and prev.x + prev.w == item.x and
-      not String.match?(prev.text <> item.text, re(~r/\s|[\x{2000}-\x{200A}\x{3000}]/u)) and
-      not Map.has_key?(prev, :hang) and not Map.has_key?(prev, :wc)
+    prev.x + prev.w == item.x and not is_map_key(prev, :hang) and not is_map_key(prev, :wc) and
+      :maps.without(keys, prev) == :maps.without(keys, item) and
+      not run_space?(prev.text, item.text)
   end
 
   defp fold_hang(f, text, style, w) do
@@ -13603,7 +13770,7 @@ defmodule Browser.Layout do
         w
 
       true ->
-        ideographic_hang(text, style, f.st)
+        ideographic_hang(text, style, f.st, w)
     end
   end
 
@@ -13930,7 +14097,7 @@ defmodule Browser.Layout do
 
   # (`fold_line_edges/2` for a text that is the last on its line: all of its hang counts)
   defp fold_text_edge(edges, it, shift) do
-    edge = min(it.x + shift + it.w - Map.get(it, :hang, 0), @unbounded)
+    edge = min(it.x + shift + it.w - hang_of(it), @unbounded)
     Map.update(edges, it.rr, edge, &max(&1, edge))
   end
 

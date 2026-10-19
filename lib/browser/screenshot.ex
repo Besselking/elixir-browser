@@ -9,9 +9,28 @@ defmodule Browser.Screenshot do
 
   @doc "Measures text the way `svg/4` draws it: a fixed advance per character."
   def measure(text, %{size: size} = style) do
-    advance = if Map.get(style, :mono), do: 0.6, else: 0.52
-    round(String.length(text) * size * advance)
+    advance =
+      case style do
+        %{mono: mono} when mono not in [nil, false] -> 0.6
+        _ -> 0.52
+      end
+
+    round(text_length(text, text, 0) * size * advance)
   end
+
+  # `String.length/1` with a fast path: in ASCII text with no carriage return, each byte is one
+  # character (grapheme). The layout measures each word, so this is a hot path.
+  defp text_length(<<c, rest::binary>>, text, n) when c < 128 and c != ?\r,
+    do: text_length(rest, text, n + 1)
+
+  # (also a character from U+0080 to U+02FF, as a no-break space or a Latin letter with an
+  # accent: none of them joins the character before it)
+  defp text_length(<<a, c, rest::binary>>, text, n)
+       when a >= 0xC2 and a <= 0xCB and c >= 0x80 and c <= 0xBF,
+       do: text_length(rest, text, n + 1)
+
+  defp text_length(<<>>, _text, n), do: n
+  defp text_length(_rest, text, _n), do: String.length(text)
 
   @doc "The SVG for `items` (from `Browser.Layout.layout/5`) on a `width` x `height` canvas."
   def svg(items, width, height, opts \\ []) do
