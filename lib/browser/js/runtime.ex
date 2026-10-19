@@ -63,6 +63,9 @@ defmodule Browser.JS.Runtime do
   @doc "The window was scrolled: scripts see the new position and get a `scroll` event."
   def scrolled(pid, x, y), do: send(pid, {:scrolled, x, y})
 
+  @doc "The window got a new size: scripts see it (`innerWidth`, the boxes) and get a `resize` event."
+  def resized(pid, w, h), do: send(pid, {:resized, w, h})
+
   def stop(pid) do
     Process.exit(pid, :kill)
     Browser.Console.drop(pid)
@@ -394,6 +397,22 @@ defmodule Browser.JS.Runtime do
         Process.put(:js_now, elapsed(t0))
         Process.put(:js_steps, @steps)
         guard(fn -> DOM.set_hidden(not visible?) end, :ok)
+        Browser.JS.Promise.run_microtasks()
+        reply = finish(%{})
+
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
+      {:resized, w, h} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        DOM.set_viewport(w, h)
+
+        guard(
+          fn -> DOM.dispatch(:window, "resize", %{bubbles: false, cancelable: false}) end,
+          :ok
+        )
+
         Browser.JS.Promise.run_microtasks()
         reply = finish(%{})
 

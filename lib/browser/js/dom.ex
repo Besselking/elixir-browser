@@ -1796,6 +1796,27 @@ defmodule Browser.JS.DOM do
     :ok
   end
 
+  @doc """
+  The window has another size: `innerWidth` and the like change, and the boxes a layout for the
+  scripts made are the boxes of the old size, so the next question lays the page out again.
+  """
+  def set_viewport(w, h) do
+    w = w * 1.0
+    h = h * 1.0
+    put_st(%{st() | width: w, height: h, rects: %{}})
+    Enum.each([:dom_forced, :dom_forced_rects, :dom_page_rects], &Process.delete/1)
+
+    for {name, v} <- [
+          {"innerWidth", w},
+          {"innerHeight", h},
+          {"outerWidth", w},
+          {"outerHeight", h}
+        ],
+        do: declare(global(), name, v)
+
+    :ok
+  end
+
   @doc "The window scrolled (or a script asked it to): the position scripts read."
   def set_scroll(x, y) do
     x = x * 1.0
