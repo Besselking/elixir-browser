@@ -331,20 +331,44 @@ defmodule Browser.Page do
         width: env.width,
         height: env.height,
         history_before: 0,
+        layout_now: true,
         fetch: &Browser.Fetch.load(&1, initiator: initiator),
         request: &Browser.Fetch.load(&1, [initiator: initiator] ++ &2)
       }
 
+      # (the scripts ask where things are, as `offsetWidth`: like the session, answer with a
+      # layout of the tree as it is)
+      Process.put(:layout_serve, &serve_layout(page, env, &1))
       pid = Runtime.start(page.raw, info)
       Runtime.run_scripts(pid)
       Runtime.flush(pid)
       fun.(pid)
       reply = Runtime.snapshot(pid)
       Runtime.stop(pid)
+      Process.delete(:layout_serve)
       if reply.raw, do: from_raw(page, reply.raw, env), else: page
     else
       page
     end
+  end
+
+  # a layout for the scripts of `run_js/3` (a request with no reference is a prewarm: no answer)
+  defp serve_layout(page, env, {:layout_now, js, ref, raw}) do
+    if ref != nil do
+      laid = from_raw(page, raw, env)
+
+      {items, height} =
+        Layout.layout(laid.nodes, env.width, &Browser.Screenshot.measure/2, env.height,
+          svg_defs: laid.svg_defs,
+          boxes: true,
+          metrics: fn _style -> 16 end
+        )
+
+      rects = Browser.Nids.rects(items, Browser.Nids.parents(laid.pruned || []))
+      send(js, {:layout_now_done, ref, rects, {env.width * 1.0, height * 1.0}})
+    end
+
+    :ok
   end
 
   @doc "True when the page has a `<script>` element or something editable (the runtime holds its document)."

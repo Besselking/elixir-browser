@@ -591,7 +591,8 @@ defmodule Browser.Style do
     |> Enum.flat_map(&expand/1)
     |> Enum.filter(fn {p, v, _} ->
       (p in @props or String.starts_with?(p, "--")) and not negative_size?(p, v) and
-        not invalid_color?(p, v) and not percent_width?(p, v) and not invalid_integer?(p, v)
+        not invalid_color?(p, v) and not percent_width?(p, v) and not invalid_integer?(p, v) and
+        not invalid_position?(p, v)
     end)
   end
 
@@ -614,6 +615,17 @@ defmodule Browser.Style do
   end
 
   defp invalid_color?(_prop, _v), do: false
+
+  # a position with a word that is no keyword or length (`460px 0, px 0`) is dropped, so an earlier
+  # declaration still applies
+  defp invalid_position?("background-position", v) when is_binary(v) do
+    lower = v |> String.trim() |> String.downcase()
+
+    not (lower in ~w(inherit initial unset revert) or String.contains?(lower, "var(") or
+           Browser.Backgrounds.valid_position?(lower))
+  end
+
+  defp invalid_position?(_prop, _v), do: false
 
   # a border or rule width is no percentage: such a declaration is dropped
   defp percent_width?(prop, v) when is_binary(v) do

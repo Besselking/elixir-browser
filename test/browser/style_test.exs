@@ -786,6 +786,13 @@ defmodule Browser.StyleTest do
       assert bg(css, "background-size") == [{15.0, 12.0}]
     end
 
+    test "a background-position with a word that is no keyword or length is dropped" do
+      # (a script that set `"460px 0, px 0"` left the position as it was in a browser)
+      css = "p { background: url(a.png) 50% 0 repeat-x; background-position: 460px 0, px 0 }"
+      assert bg(css, "background-position") == [{{:pct, 0.5}, 0.0}]
+      assert bg("p { background-position: 5px 6px, 1vw 0 }", "background-position") != nil
+    end
+
     test "the background shorthand sets all five longhands and resets what it omits" do
       css = "p { background: #eee url(a.png) no-repeat center / 50px auto }"
       assert bg(css, "background-color") == {238, 238, 238}

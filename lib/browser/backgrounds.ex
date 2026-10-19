@@ -272,6 +272,25 @@ defmodule Browser.Backgrounds do
     end
   end
 
+  @doc """
+  False when a layer of a `background-position` value is empty or has a word that is neither a
+  position keyword nor a length (`px 0`): the declaration is not valid then, and a script that
+  sets it (`style.backgroundPosition = "5px 0, px 0"`) changes nothing.
+  """
+  def valid_position?(value) do
+    value
+    |> split_top()
+    |> Enum.all?(fn layer ->
+      case layer |> String.downcase() |> tokens() do
+        [] ->
+          false
+
+        toks ->
+          Enum.all?(toks, &(axis_keyword(&1) != nil or not Regex.match?(re(~r/\A[a-z-]+\z/), &1)))
+      end
+    end)
+  end
+
   def parse_position(value), do: value |> split_top() |> Enum.map(&position_layer/1)
 
   defp position_layer(layer), do: layer |> String.downcase() |> tokens() |> position_pair()
