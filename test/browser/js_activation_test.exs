@@ -249,21 +249,22 @@ defmodule Browser.JS.ActivationTest do
       Runtime.stop(pid)
     end
 
-    test "a click that does not bubble runs the activation behavior of its target only" do
+    test "a click that does not bubble runs the activation behavior of its target only; the second summary has none" do
       {pid, r} =
         start(~S"""
-        <body><a id=a href="#a"><span id=s>s</span></a><details id=d><summary>1</summary><summary id=t>2</summary></details>
+        <body><a id=a href="#a"><span id=s>s</span></a><a href="#b"><details id=d><summary>1</summary>
+        <summary id=t>2</summary></details></a>
         <script>
         document.getElementById("s").dispatchEvent(new MouseEvent("click"));
         console.log(location.hash === "");
+        // (the second summary has no activation behavior: the link has it)
         document.getElementById("t").click();
-        console.log(document.getElementById("d").open);
+        console.log(document.getElementById("d").open, location.hash);
         </script></body>
         """)
 
       assert errors(r) == []
-      assert logs(r) == ["true", "false"]
-      assert r.outbox == []
+      assert logs(r) == ["true", "false #b"]
       Runtime.stop(pid)
     end
 
@@ -375,6 +376,19 @@ defmodule Browser.JS.ActivationTest do
       assert logs(r) == [
                "change b | false,true,true | change a | true,false | click falsetrue | true,false"
              ]
+    end
+
+    test "a canceled click on a radio button of a group with no checked button unchecks it again" do
+      r =
+        run("<input type=radio name=g id=a><input type=radio name=g id=b>", ~S"""
+        var a = document.getElementById("a"), out = [];
+        a.addEventListener("click", function (e) { out.push(a.checked); e.preventDefault(); });
+        a.click();
+        out.push(a.checked, document.getElementById("b").checked);
+        console.log(out.join());
+        """)
+
+      assert logs(r) == ["true,false,false"]
     end
 
     test "the group of a radio button: the same name in the same form; a radio button with no name is alone" do
@@ -530,6 +544,24 @@ defmodule Browser.JS.ActivationTest do
 
       r = Runtime.eval(pid, "console.log(out.join(' | '))")
       assert logs(r) == ["MouseEvent,0,1 | PointerEvent,true,0,0,2,20,4"]
+
+      # (a script that dispatches an event of the browser again makes it not trusted)
+      r =
+        Runtime.eval(pid, ~S"""
+        var kept;
+        document.addEventListener("mouseup", function (e) { kept = e; });
+        """)
+
+      assert errors(r) == []
+      Runtime.dispatch(pid, :document, "mouseup", %{})
+
+      r =
+        Runtime.eval(
+          pid,
+          "var t = kept.isTrusted; document.body.dispatchEvent(kept); console.log(t, kept.isTrusted)"
+        )
+
+      assert logs(r) == ["true false"]
 
       reply = Runtime.dispatch(pid, {:control, 0}, "click")
       assert reply.outbox == []
