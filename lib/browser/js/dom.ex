@@ -7028,9 +7028,9 @@ defmodule Browser.JS.DOM do
     def_fn(p, "getElementsByClassName", fn this, args ->
       wanted = split_words(to_str(arg(args, 0)))
 
-      nodes_array(
-        Enum.filter(elements(this_nid(this)), fn e -> Enum.all?(wanted, &(&1 in classes(e))) end)
-      )
+      # (a string with no class name gives no element)
+      els = if wanted == [], do: [], else: elements(this_nid(this))
+      nodes_array(Enum.filter(els, fn e -> Enum.all?(wanted, &(&1 in classes(e))) end))
     end)
   end
 

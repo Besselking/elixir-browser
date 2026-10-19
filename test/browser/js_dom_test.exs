@@ -51,12 +51,14 @@ defmodule Browser.JS.DOMTest do
           document.querySelectorAll('[class~="c"]').length);
         d.className = "x\fy\r\nz";
         console.log(d.classList.length, d.matches(".y"), document.getElementsByClassName("z").length);
+        console.log(document.getElementsByClassName("").length,
+          document.getElementsByClassName(" \t").length, d.getElementsByClassName("").length);
         """,
-        "<div id=d class=\"a\tb\nc  d \"></div>"
+        "<div id=d class=\"a\tb\nc  d \"><p></p></div>"
       )
 
     assert errors(r) == []
-    assert logs(r) == ["4 true true", "1 1", "1 1", "3 true 1"]
+    assert logs(r) == ["4 true true", "1 1", "1 1", "3 true 1", "0 0 0"]
   end
 
   test "reading an unknown property of window is undefined, a named element is found" do
