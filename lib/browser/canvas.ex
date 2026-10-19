@@ -20,6 +20,8 @@ defmodule Browser.Canvas do
   earlier drawing (it removes the items that lie fully inside the rectangle).
   """
 
+  import Browser.Re, only: [re: 1, split_words: 1]
+
   alias Browser.Svg
 
   @max_pixels 16_000_000
@@ -691,7 +693,7 @@ defmodule Browser.Canvas do
   `%{size:, bold:, italic:, mono:, family:}`; the size is in px.
   """
   def parse_font(text) when is_binary(text) do
-    tokens = String.split(text)
+    tokens = split_words(text)
 
     {before, rest} = Enum.split_while(tokens, &(size_token(&1) == nil))
 
@@ -714,10 +716,11 @@ defmodule Browser.Canvas do
   end
 
   defp bold_token?(t),
-    do: t in ["bold", "bolder"] or (String.match?(t, ~r/^\d+$/) and String.to_integer(t) >= 600)
+    do:
+      t in ["bold", "bolder"] or (String.match?(t, re(~r/^\d+$/)) and String.to_integer(t) >= 600)
 
   defp size_token(token) do
-    case Regex.run(~r{^(\d*\.?\d+)(px|pt|em|rem|%|pc|in|cm|mm)(?:/.*)?$}, token) do
+    case Regex.run(re(~r{^(\d*\.?\d+)(px|pt|em|rem|%|pc|in|cm|mm)(?:/.*)?$}), token) do
       [_, n, unit] -> {to_f(n) * unit_px(unit), unit}
       _ -> nil
     end

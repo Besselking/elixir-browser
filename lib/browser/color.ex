@@ -10,6 +10,8 @@ defmodule Browser.Color do
   (gradient stops, shadows): `{r, g, b, a}` with `a` from 0 (clear) to 255.
   """
 
+  import Browser.Re, only: [re: 1]
+
   @named %{
     "black" => {0, 0, 0},
     "silver" => {192, 192, 192},
@@ -150,14 +152,29 @@ defmodule Browser.Color do
     s = str |> String.trim() |> String.downcase()
 
     cond do
-      s == "transparent" -> {:rgba, 0, 0, 0, 0.0}
-      s == "currentcolor" -> :current
-      String.starts_with?(s, "#") -> s |> binary_part(1, byte_size(s) - 1) |> hex()
-      m = Regex.run(~r/\A(rgba?|hsla?)\((.*)\)\z/s, s) -> func(Enum.at(m, 1), Enum.at(m, 2))
-      m = Regex.run(~r/\Alight-dark\((.*)\)\z/s, s) -> m |> Enum.at(1) |> first_arg() |> raw()
-      m = Regex.run(~r/\A(oklch|oklab)\((.*)\)\z/s, s) -> oklab_func(Enum.at(m, 1), Enum.at(m, 2))
-      m = Regex.run(~r/\Acolor-mix\((.*)\)\z/s, s) -> color_mix(Enum.at(m, 1))
-      true -> named(s)
+      s == "transparent" ->
+        {:rgba, 0, 0, 0, 0.0}
+
+      s == "currentcolor" ->
+        :current
+
+      String.starts_with?(s, "#") ->
+        s |> binary_part(1, byte_size(s) - 1) |> hex()
+
+      m = Regex.run(re(~r/\A(rgba?|hsla?)\((.*)\)\z/s), s) ->
+        func(Enum.at(m, 1), Enum.at(m, 2))
+
+      m = Regex.run(re(~r/\Alight-dark\((.*)\)\z/s), s) ->
+        m |> Enum.at(1) |> first_arg() |> raw()
+
+      m = Regex.run(re(~r/\A(oklch|oklab)\((.*)\)\z/s), s) ->
+        oklab_func(Enum.at(m, 1), Enum.at(m, 2))
+
+      m = Regex.run(re(~r/\Acolor-mix\((.*)\)\z/s), s) ->
+        color_mix(Enum.at(m, 1))
+
+      true ->
+        named(s)
     end
   end
 
@@ -262,7 +279,7 @@ defmodule Browser.Color do
 
   # "<color> [percent]" or "[percent] <color>" -> {color text, percent | nil}
   defp mix_part(text) do
-    case Regex.run(~r/\A\s*(?:([\d.]+)%\s*)?(.*?)(?:\s*([\d.]+)%)?\s*\z/s, text) do
+    case Regex.run(re(~r/\A\s*(?:([\d.]+)%\s*)?(.*?)(?:\s*([\d.]+)%)?\s*\z/s), text) do
       [_, pre, color, post] ->
         pct = if pre != "", do: pre, else: post
         {color, if(pct != "", do: pct |> leading_zero() |> Float.parse() |> elem(0))}
@@ -314,7 +331,7 @@ defmodule Browser.Color do
   # -- hex -----------------------------------------------------------------------
 
   defp hex(h) do
-    if Regex.match?(~r/\A[0-9a-f]+\z/, h) do
+    if Regex.match?(re(~r/\A[0-9a-f]+\z/), h) do
       case byte_size(h) do
         3 -> h |> String.graphemes() |> Enum.map(&(&1 <> &1)) |> Enum.join() |> hex()
         4 -> h |> String.graphemes() |> Enum.map(&(&1 <> &1)) |> Enum.join() |> hex()
@@ -364,7 +381,7 @@ defmodule Browser.Color do
   end
 
   defp hue(tok) do
-    case number(String.replace(tok, ~r/deg\z/, "")) do
+    case number(String.replace(tok, re(~r/deg\z/), "")) do
       {n, _} -> n
       nil -> nil
     end

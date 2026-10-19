@@ -16,6 +16,7 @@ defmodule Browser.Backgrounds do
   """
 
   alias Browser.{Color, Fetch}
+  import Browser.Re, only: [re: 1]
 
   # -- helpers ---------------------------------------------------------------------
 
@@ -43,14 +44,14 @@ defmodule Browser.Backgrounds do
 
   # whitespace-separated tokens, keeping function calls and quoted strings whole
   defp tokens(layer) do
-    ~r/[\w-]*\((?:[^()]|\([^()]*\))*\)|"[^"]*"|'[^']*'|\S+/
+    re(~r/[\w-]*\((?:[^()]|\([^()]*\))*\)|"[^"]*"|'[^']*'|\S+/)
     |> Regex.scan(layer)
     |> List.flatten()
   end
 
   # px for a CSS length; nil if it isn't one
   defp length_px(tok) do
-    case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))(px|em|rem|pt|cm|mm|in)?\z/, tok) do
+    case Regex.run(re(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))(px|em|rem|pt|cm|mm|in)?\z/), tok) do
       [_, n, unit] -> to_float(n) * unit_scale(unit)
       [_, n] -> if to_float(n) == 0.0, do: 0.0
       _ -> nil
@@ -67,14 +68,14 @@ defmodule Browser.Backgrounds do
 
   defp to_float(n) do
     n = if String.starts_with?(n, ["+", "-"]), do: n, else: "+" <> n
-    n = Regex.replace(~r/\A([+-])\./, n, "\\g{1}0.")
+    n = Regex.replace(re(~r/\A([+-])\./), n, "\\g{1}0.")
     n = if String.contains?(n, "."), do: n, else: n <> ".0"
     n |> String.trim_leading("+") |> String.to_float()
   end
 
   # a length or percentage: px float or {:pct, fraction}
   defp dimension(tok) do
-    case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/, tok) do
+    case Regex.run(re(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/), tok) do
       [_, n] -> {:pct, to_float(n) / 100}
       nil -> length_px(tok)
     end
@@ -87,10 +88,10 @@ defmodule Browser.Backgrounds do
   Data URLs and fragments are left alone.
   """
   def absolutize(css, base) do
-    Regex.replace(~r/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/i, css, fn _all,
-                                                                               dq,
-                                                                               sq,
-                                                                               bare ->
+    Regex.replace(re(~r/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/i), css, fn _all,
+                                                                                   dq,
+                                                                                   sq,
+                                                                                   bare ->
       url = Enum.find([dq, sq, bare], "", &(&1 != ""))
 
       cond do
@@ -116,14 +117,14 @@ defmodule Browser.Backgrounds do
       lower == "none" ->
         :none
 
-      m = Regex.run(~r/\Aurl\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)\z/i, s) ->
+      m = Regex.run(re(~r/\Aurl\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)\z/i), s) ->
         [_ | caps] = m
         {:url, Enum.find(caps, "", &(&1 != ""))}
 
-      m = Regex.run(~r/\A(repeating-)?linear-gradient\((.*)\)\z/is, s) ->
+      m = Regex.run(re(~r/\A(repeating-)?linear-gradient\((.*)\)\z/is), s) ->
         if Enum.at(m, 1) == "", do: linear(Enum.at(m, 2)), else: :none
 
-      m = Regex.run(~r/\A(repeating-)?radial-gradient\((.*)\)\z/is, s) ->
+      m = Regex.run(re(~r/\A(repeating-)?radial-gradient\((.*)\)\z/is), s) ->
         if Enum.at(m, 1) == "", do: radial(Enum.at(m, 2)), else: :none
 
       true ->
@@ -145,7 +146,7 @@ defmodule Browser.Backgrounds do
 
   defp direction(arg) do
     cond do
-      m = Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))(deg|turn|rad|grad)\z/i, arg) ->
+      m = Regex.run(re(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))(deg|turn|rad|grad)\z/i), arg) ->
         n = to_float(Enum.at(m, 1))
 
         {:angle,
@@ -156,7 +157,7 @@ defmodule Browser.Backgrounds do
            "grad" -> n * 0.9
          end}
 
-      m = Regex.run(~r/\Ato\s+(top|bottom|left|right)(?:\s+(top|bottom|left|right))?\z/i, arg) ->
+      m = Regex.run(re(~r/\Ato\s+(top|bottom|left|right)(?:\s+(top|bottom|left|right))?\z/i), arg) ->
         sides =
           m
           |> tl()
@@ -174,7 +175,7 @@ defmodule Browser.Backgrounds do
     [first | rest] = args = split_top(inner)
 
     {opts, stop_args} =
-      if Regex.match?(~r/\A(circle|ellipse|closest-|farthest-|at\s|\d)/i, first),
+      if Regex.match?(re(~r/\A(circle|ellipse|closest-|farthest-|at\s|\d)/i), first),
         do: {radial_opts(first), rest},
         else: {radial_opts(""), args}
 
@@ -183,7 +184,7 @@ defmodule Browser.Backgrounds do
 
   defp radial_opts(arg) do
     lower = String.downcase(arg)
-    [shape_size | at] = String.split(lower, ~r/\bat\b/, parts: 2)
+    [shape_size | at] = String.split(lower, re(~r/\bat\b/), parts: 2)
     toks = String.split(shape_size)
 
     size =
@@ -215,7 +216,9 @@ defmodule Browser.Backgrounds do
 
   defp stop(arg) do
     case Regex.run(
-           ~r/\A\s*(rgba?\([^)]*\)|hsla?\([^)]*\)|light-dark\(.*\)|#[0-9a-fA-F]+|[a-zA-Z]+)\s*(.*)\z/s,
+           re(
+             ~r/\A\s*(rgba?\([^)]*\)|hsla?\([^)]*\)|light-dark\(.*\)|#[0-9a-fA-F]+|[a-zA-Z]+)\s*(.*)\z/s
+           ),
            arg
          ) do
       [_, color, rest] ->
@@ -387,7 +390,7 @@ defmodule Browser.Backgrounds do
   defp join(layers, key), do: layers |> Enum.map(&Map.fetch!(&1, key)) |> Enum.join(", ")
 
   defp shorthand_layer(layer) do
-    toks = layer |> String.replace(~r"/(?![^(]*\))", " / ") |> tokens()
+    toks = layer |> String.replace(re(~r"/(?![^(]*\))"), " / ") |> tokens()
 
     {acc, _} =
       Enum.reduce(
@@ -419,7 +422,7 @@ defmodule Browser.Backgrounds do
   end
 
   # a length in `ch`, which the style turns into pixels before this module sees it
-  defp ch?(tok), do: Regex.match?(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)(?:ch|ex)\z/, tok)
+  defp ch?(tok), do: Regex.match?(re(~r/\A[+-]?(?:\d+\.?\d*|\.\d+)(?:ch|ex)\z/), tok)
 
   defp shorthand_token("/", {acc, x}), do: {%{acc | phase: :size}, x}
 
@@ -436,7 +439,7 @@ defmodule Browser.Backgrounds do
       lower in @repeat_words ->
         {%{acc | repeat: lower}, x}
 
-      Regex.match?(~r/\A(url|[\w-]*gradient)\(/i, tok) or lower == "none" ->
+      Regex.match?(re(~r/\A(url|[\w-]*gradient)\(/i), tok) or lower == "none" ->
         {%{acc | image: tok}, x}
 
       # after the slash only size values belong to the size; a colour can still follow

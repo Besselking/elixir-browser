@@ -9,6 +9,8 @@ defmodule Browser.JS.Lexer do
   with `{source, flags}`; anywhere else it is a division.
   """
 
+  import Browser.Re, only: [re: 1]
+
   @puncts ~w">>>= ... === !== **= <<= >>= >>> &&= ||= ??= => == != <= >= && || ?? ?. ++ -- += -= *= /= %= &= |= ^= ** << >>
              { } ( ) [ ] ; , < > + - * / % & | ^ ! ~ ? : = . @"
           |> Enum.sort_by(&(-byte_size(&1)))
@@ -30,15 +32,15 @@ defmodule Browser.JS.Lexer do
 
     try do
       tokens = lex(src, false, [])
-      # where each token starts and ends in the source, for `Function.prototype.toString`
-      total = byte_size(src)
-      offs = Enum.reverse([{0, 0} | Process.get(:lex_offs)])
 
-      Process.put(
-        :lex_table,
-        {src, List.to_tuple(for({a, _} <- offs, do: total - a)),
-         List.to_tuple(for({_, b} <- offs, do: total - b))}
-      )
+      # where each token starts and ends in the source, for `Function.prototype.toString`
+      # (a nested call for a template's `${ }` makes no table: the parser reads the table of
+      # the whole text, which the outer call makes)
+      if elem(saved, 2) == nil do
+        total = byte_size(src)
+        {starts, ends} = offs_table(Process.get(:lex_offs), total, [total], [total])
+        Process.put(:lex_table, {src, List.to_tuple(starts), List.to_tuple(ends)})
+      end
 
       {:ok, tokens}
     catch
@@ -51,11 +53,19 @@ defmodule Browser.JS.Lexer do
   end
 
   # pushes a token; `start_size` and the size of `rest` are the bytes of source left at its
-  # start and at its end
+  # start and at its end. The two sizes go on the list as two numbers, without a tuple.
   defp push(tok, start_size, rest, acc) do
-    Process.put(:lex_offs, [{start_size, byte_size(rest)} | Process.get(:lex_offs)])
+    Process.put(:lex_offs, [byte_size(rest), start_size | Process.get(:lex_offs)])
     lex(rest, false, [tok | acc])
   end
+
+  # The start and the end offset of each token, in the order of the tokens, and `total` (the
+  # end of the text) after the last token. The list of sizes has the last token first, so
+  # one pass that adds to the front of the two lists gives them in the order of the tokens.
+  defp offs_table([end_size, start_size | rest], total, starts, ends),
+    do: offs_table(rest, total, [total - start_size | starts], [total - end_size | ends])
+
+  defp offs_table([], _total, starts, ends), do: {starts, ends}
 
   defp lex("", _nl, acc), do: Enum.reverse([{:eof, nil, true} | acc])
 
@@ -161,7 +171,7 @@ defmodule Browser.JS.Lexer do
         :ok
     end
 
-    Process.put(:lex_offs, [{byte_size(rest) + 1, byte_size(rest)} | Process.get(:lex_offs)])
+    Process.put(:lex_offs, [byte_size(rest), byte_size(rest) + 1 | Process.get(:lex_offs)])
     lex(rest, false, acc)
   end
 
@@ -185,16 +195,20 @@ defmodule Browser.JS.Lexer do
     # a reserved word spelled with an escape is no keyword and no identifier either: the
     # parser has no use for this token, so it is a syntax error wherever it appears
     # (the strict mode reserved words with no part in the grammar are plain names in sloppy code)
+    # (an escape always takes more bytes of source than the character it gives, so the name
+    # is shorter than its source text exactly when it has an escape)
+    escaped = byte_size(s) - byte_size(rest) > byte_size(name)
+
     kind =
-      if escapable_word?(name) and escaped?(s, rest),
+      if escaped and escapable_word?(name),
         do: if(name in ~w(let await yield), do: :id, else: :eid),
         else: :id
 
-    if name == "await" and kind == :id and escaped?(s, rest),
+    if escaped and name == "await" and kind == :id,
       do: Process.put(:lex_esc_await, true)
 
     # an escaped `let` never starts a declaration: its mark says so
-    nl = if name == "let" and kind == :id and escaped?(s, rest), do: esc_mark(nl), else: nl
+    nl = if escaped and name == "let" and kind == :id, do: esc_mark(nl), else: nl
 
     push({kind, name, nl}, byte_size(s), rest, acc)
   end
@@ -338,9 +352,6 @@ defmodule Browser.JS.Lexer do
   defp skip_line(<<_, rest::binary>>), do: skip_line(rest)
   defp skip_line(""), do: ""
 
-  defp escaped?(s, rest),
-    do: String.contains?(binary_part(s, 0, byte_size(s) - byte_size(rest)), "\\")
-
   # white space and line terminators outside ASCII (Zs, BOM, U+2028, U+2029)
   defp space_cp?(c),
     do: c in [0xA0, 0x1680, 0x202F, 0x205F, 0x3000, 0xFEFF, 0x2028, 0x2029] or c in 0x2000..0x200A
@@ -352,23 +363,28 @@ defmodule Browser.JS.Lexer do
   defp id_escape?(cp), do: not space_cp?(cp) and cp not in [0x2E2F, 0x180E]
 
   # ZWNJ and ZWJ continue an identifier but cannot start one
-  defp zw_start!(<<cp::utf8, _::binary>>) when cp in [0x200C, 0x200D],
-    do: throw({:syntax, "invalid identifier start"})
+  # (both are E2 80 8C and E2 80 8D in UTF-8; the test of the first byte comes first, so a
+  # plain ASCII name needs no binary match)
+  defp zw_start!(name) do
+    if byte_size(name) >= 3 and :binary.first(name) == 0xE2 and
+         binary_part(name, 0, 3) in [<<0xE2, 0x80, 0x8C>>, <<0xE2, 0x80, 0x8D>>],
+       do: throw({:syntax, "invalid identifier start"})
 
-  defp zw_start!(_), do: :ok
+    :ok
+  end
 
   # Most names are plain ASCII: one count and one slice, without a list of bytes. A name that
   # goes on with an escape or a byte above 127 takes the general path from there.
   defp ident(s) do
     n = ascii_ident_len(s, 0)
+    size = byte_size(s)
+    # (binary_part and :binary.at make no match context, which a binary match does)
+    name = binary_part(s, 0, n)
+    rest = binary_part(s, n, size - n)
 
-    case s do
-      <<name::binary-size(^n), c, _::binary>> when c > 127 or c == ?\\ ->
-        ident(binary_part(s, n, byte_size(s) - n), [name])
-
-      <<name::binary-size(^n), rest::binary>> ->
-        {name, rest}
-    end
+    if n < size and (:binary.at(s, n) > 127 or :binary.at(s, n) == ?\\),
+      do: ident(rest, [name]),
+      else: {name, rest}
   end
 
   defp ascii_ident_len(<<c, rest::binary>>, n)
@@ -730,7 +746,7 @@ defmodule Browser.JS.Lexer do
   defp bad_template_escape?(<<?u, _::binary>>), do: true
   defp bad_template_escape?(_), do: false
 
-  defp hex?(s), do: s =~ ~r/\A[0-9a-fA-F]+\z/
+  defp hex?(s), do: s =~ re(~r/\A[0-9a-fA-F]+\z/)
 
   # the source of a `${ ... }` expression, up to its matching brace
   defp expr_source("}" <> rest, 0, acc),
@@ -780,6 +796,10 @@ defmodule Browser.JS.Lexer do
 
   defp expr_source(<<c::utf8, rest::binary>>, d, acc),
     do: expr_source(rest, d, [<<c::utf8>> | acc])
+
+  # a byte that is not UTF-8 (such as a lone surrogate) goes into the text as it is; the
+  # nested call then lexes it as it does outside a template
+  defp expr_source(<<c, rest::binary>>, d, acc), do: expr_source(rest, d, [<<c>> | acc])
 
   defp expr_source("", _d, _acc), do: throw({:syntax, "unterminated template expression"})
 

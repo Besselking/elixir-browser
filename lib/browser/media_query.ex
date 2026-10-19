@@ -12,6 +12,8 @@ defmodule Browser.MediaQuery do
   Unknown features make their query false, as the spec requires.
   """
 
+  import Browser.Re, only: [re: 1]
+
   @discrete %{
     "orientation" => :orientation,
     "prefers-color-scheme" => "light",
@@ -41,7 +43,7 @@ defmodule Browser.MediaQuery do
       [%{type: "all", negate: false, features: []}]
     else
       prelude
-      |> String.split(~r/,(?![^()]*\))/)
+      |> String.split(re(~r/,(?![^()]*\))/))
       |> Enum.flat_map(&parse_query/1)
     end
   end
@@ -50,7 +52,7 @@ defmodule Browser.MediaQuery do
   defp parse_query(q) do
     q
     |> String.trim()
-    |> String.split(~r/\)\s+or\s+\(/)
+    |> String.split(re(~r/\)\s+or\s+\(/))
     |> reglue()
     |> Enum.map(&parse_single/1)
   end
@@ -73,14 +75,14 @@ defmodule Browser.MediaQuery do
         _ -> {false, q}
       end
 
-    [head | rest] = String.split(q, ~r/\s+and\s+/)
+    [head | rest] = String.split(q, re(~r/\s+and\s+/))
 
     {type, feature_strs} =
       if String.starts_with?(head, "("), do: {"all", [head | rest]}, else: {head, rest}
 
     features = Enum.map(feature_strs, &parse_feature/1)
 
-    if Regex.match?(~r/\A[a-z-]+\z/, type) and Enum.all?(features, &(&1 != :invalid)),
+    if Regex.match?(re(~r/\A[a-z-]+\z/), type) and Enum.all?(features, &(&1 != :invalid)),
       do: %{type: type, negate: negate, features: List.flatten(features)},
       else: %{type: "not all", negate: false, features: []}
   end
@@ -100,16 +102,16 @@ defmodule Browser.MediaQuery do
         name = String.trim(name)
         value = value |> String.trim() |> value()
 
-        case Regex.run(~r/\A(?:-webkit-)?(min|max)-(.+)\z/, name, capture: :all_but_first) do
+        case Regex.run(re(~r/\A(?:-webkit-)?(min|max)-(.+)\z/), name, capture: :all_but_first) do
           ["min", base] -> [{base_name(name, base), :gte, value}]
           ["max", base] -> [{base_name(name, base), :lte, value}]
           nil -> [{name, :eq, value}]
         end
 
-      Regex.match?(~r/[<>=]/, inner) ->
+      Regex.match?(re(~r/[<>=]/), inner) ->
         range(inner)
 
-      Regex.match?(~r/\A[a-z-]+\z/, inner) ->
+      Regex.match?(re(~r/\A[a-z-]+\z/), inner) ->
         [{inner, :bool, nil}]
 
       true ->
@@ -121,7 +123,7 @@ defmodule Browser.MediaQuery do
   defp base_name(_, base), do: base
 
   defp range(inner) do
-    case ~r/(<=|>=|<|>|=)/
+    case re(~r/(<=|>=|<|>|=)/)
          |> Regex.split(inner, include_captures: true)
          |> Enum.map(&String.trim/1) do
       [a, op, b] ->
@@ -135,7 +137,7 @@ defmodule Browser.MediaQuery do
     end
   end
 
-  defp name?(s), do: Regex.match?(~r/\A[a-z-]+\z/, s)
+  defp name?(s), do: Regex.match?(re(~r/\A[a-z-]+\z/), s)
 
   defp flip("<"), do: ">"
   defp flip(">"), do: "<"
@@ -152,11 +154,11 @@ defmodule Browser.MediaQuery do
   # numbers (lengths -> px, ratios, resolutions -> dppx) or a keyword string
   defp value(raw) do
     cond do
-      m = Regex.run(~r/\A(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\z/, raw) ->
+      m = Regex.run(re(~r/\A(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\z/), raw) ->
         [_, a, b] = m
         num(a) / max(num(b), 1.0e-9)
 
-      m = Regex.run(~r/\A([+-]?[\d.]+)(px|em|rem|pt|cm|mm|in|dppx|x|dpi|dpcm)?\z/, raw) ->
+      m = Regex.run(re(~r/\A([+-]?[\d.]+)(px|em|rem|pt|cm|mm|in|dppx|x|dpi|dpcm)?\z/), raw) ->
         [_, n, unit] = pad(m)
         n = num(n)
 

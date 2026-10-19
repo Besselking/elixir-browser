@@ -29,13 +29,13 @@ defmodule Browser.CSS do
 
   alias Browser.MediaQuery
 
-  import Browser.Re, only: [re: 1]
+  import Browser.Re, only: [re: 1, split_words: 1]
 
   # -- stylesheet parsing --------------------------------------------------------
 
   def parse(css) when is_binary(css) do
     css
-    |> String.replace_invalid()
+    |> valid_text()
     |> strip_comments()
     |> strip_markup_comments()
     |> xml_entities()
@@ -58,11 +58,16 @@ defmodule Browser.CSS do
     end)
   end
 
+  # `String.replace_invalid/1` gives a valid text back as it is, and `String.valid?/1` costs a
+  # sixth of it
+  defp valid_text(text),
+    do: if(String.valid?(text), do: text, else: String.replace_invalid(text))
+
   # an XML comment (`<!-- text -->`) in a stylesheet of an XHTML page is no part of it; one that
   # holds rules is the old way to hide them from browsers that know no style, and stays
   defp strip_markup_comments(css) do
     if String.contains?(css, "<!--"),
-      do: Regex.replace(~r/<!--([^{}]*?)-->/s, css, ""),
+      do: Regex.replace(re(~r/<!--([^{}]*?)-->/s), css, ""),
       else: css
   end
 
@@ -89,7 +94,7 @@ defmodule Browser.CSS do
   @doc "Parses the contents of a declaration block / `style` attribute."
   def parse_declarations(body) when is_binary(body) do
     body
-    |> String.replace_invalid()
+    |> valid_text()
     |> strip_comments()
     |> split_top(?;)
     |> Enum.flat_map(fn piece ->
@@ -100,9 +105,10 @@ defmodule Browser.CSS do
         bad? = bad_string?(value)
         {value, important?} = split_important(String.trim(value))
 
-        if not bad? and valid_value?(prop, value) and not Regex.match?(~r/!\s*important/i, value),
-          do: [{prop, value, important?}],
-          else: []
+        if not bad? and valid_value?(prop, value) and
+             not Regex.match?(re(~r/!\s*important/i), value),
+           do: [{prop, value, important?}],
+           else: []
       else
         _ -> []
       end
@@ -115,7 +121,13 @@ defmodule Browser.CSS do
   defp bad_string?(<<?\\, _, r::binary>>), do: bad_string?(r)
 
   defp bad_string?(<<q, r::binary>>) when q in [?", ?'] do
-    case Regex.run(~r/\A(?:[^\\\n#{<<q>>}]|\\.)*(.?)/s, r) do
+    # (one regex for each quote, compiled one time: see `Browser.Re`)
+    string_re =
+      if q == ?",
+        do: re(~r/\A(?:[^\\\n"]|\\.)*(.?)/s),
+        else: re(~r/\A(?:[^\\\n']|\\.)*(.?)/s)
+
+    case Regex.run(string_re, r) do
       [_, "\n"] -> true
       [whole, _] -> bad_string?(binary_part(r, byte_size(whole), byte_size(r) - byte_size(whole)))
     end
@@ -123,7 +135,7 @@ defmodule Browser.CSS do
 
   defp bad_string?(<<_, r::binary>>), do: bad_string?(r)
 
-  defp var_reference?(piece), do: Regex.match?(~r/var\(/i, piece)
+  defp var_reference?(piece), do: Regex.match?(re(~r/var\(/i), piece)
 
   # custom property names are case-sensitive, everything else is not
   defp fold_prop(prop) do
@@ -135,7 +147,7 @@ defmodule Browser.CSS do
 
   # a declaration whose value is not allowed is dropped, so the one before it still applies
   defp valid_value?("tab-size", value),
-    do: Regex.match?(~r/\A(\d+\.?\d*|\.\d+)(px|em|rem|pt|ch|ex)?\z/, value)
+    do: Regex.match?(re(~r/\A(\d+\.?\d*|\.\d+)(px|em|rem|pt|ch|ex)?\z/), value)
 
   defp valid_value?(prop, value) do
     (not var_reference?(value) or var_references_valid?(value)) and
@@ -143,14 +155,14 @@ defmodule Browser.CSS do
   end
 
   defp split_important(value) do
-    case Regex.run(~r/\A(.*?)\s*!\s*important\s*\z/is, value, capture: :all_but_first) do
+    case Regex.run(re(~r/\A(.*?)\s*!\s*important\s*\z/is), value, capture: :all_but_first) do
       [v] -> {String.trim(v), true}
       nil -> {value, false}
     end
   end
 
   # a comment left open at the end of the input runs to the end
-  defp strip_comments(css), do: Regex.replace(~r{/\*(?:.*?\*/|.*\z)}s, css, " ")
+  defp strip_comments(css), do: Regex.replace(re(~r{/\*(?:.*?\*/|.*\z)}s), css, " ")
 
   # no closing bracket without its opener (strings and escapes aside)
   defp balanced?(value), do: balanced?(value, [])
@@ -224,7 +236,7 @@ defmodule Browser.CSS do
           {acc, rest}
         else
           {body, rest} = take_block(rest)
-          [_, name, prelude] = Regex.run(~r/\A@([\w-]+)\s*(.*)\z/s, head)
+          [_, name, prelude] = Regex.run(re(~r/\A@([\w-]+)\s*(.*)\z/s), head)
 
           inner =
             case String.downcase(name) do
@@ -299,7 +311,7 @@ defmodule Browser.CSS do
   def supports?(prelude) do
     prelude = String.trim(prelude)
 
-    case Regex.run(~r/\Anot\s*(.*)\z/is, prelude) do
+    case Regex.run(re(~r/\Anot\s*(.*)\z/is), prelude) do
       [_, rest] ->
         not supports?(rest)
 
@@ -320,13 +332,16 @@ defmodule Browser.CSS do
     inner = term |> binary_part(1, byte_size(term) - 2) |> String.trim()
 
     cond do
-      String.starts_with?(inner, "(") or Regex.match?(~r/\Anot[\s(]/i, inner) -> supports?(inner)
-      true -> supports_declaration(inner)
+      String.starts_with?(inner, "(") or Regex.match?(re(~r/\Anot[\s(]/i), inner) ->
+        supports?(inner)
+
+      true ->
+        supports_declaration(inner)
     end
   end
 
   defp supports_term(term) do
-    case Regex.run(~r/\Aselector\((.*)\)\z/is, term) do
+    case Regex.run(re(~r/\Aselector\((.*)\)\z/is), term) do
       [_, sel] -> selector_supported?(sel)
       nil -> false
     end
@@ -380,14 +395,14 @@ defmodule Browser.CSS do
 
   defp known_property?("-" <> rest = prop) do
     String.starts_with?(rest, ["webkit-", "moz-", "ms-", "o-"]) and
-      Regex.match?(~r/\A-[a-z]+-[a-z][\w-]*\z/, prop)
+      Regex.match?(re(~r/\A-[a-z]+-[a-z][\w-]*\z/), prop)
   end
 
   defp known_property?(prop), do: String.downcase(prop) in @properties
 
   # pseudo-elements we don't style are still understood
   defp selector_supported?(sel) do
-    sel = Regex.replace(~r/::[a-zA-Z-]+(\([^)]*\))?/, sel, "")
+    sel = Regex.replace(re(~r/::[a-zA-Z-]+(\([^)]*\))?/), sel, "")
     match?({:ok, _}, parse_selector(if String.trim(sel) == "", do: "*", else: sel))
   end
 
@@ -420,7 +435,7 @@ defmodule Browser.CSS do
 
   # `var(` needs a name (a valid custom property name) and no top-level `!` or `;` in its fallback
   defp var_references_valid?(value) do
-    Regex.scan(~r/var\(/i, value, return: :index)
+    Regex.scan(re(~r/var\(/i), value, return: :index)
     |> Enum.all?(fn [{pos, len}] ->
       rest = binary_part(value, pos + len, byte_size(value) - pos - len)
       {inner, _} = take_var(rest)
@@ -440,7 +455,7 @@ defmodule Browser.CSS do
 
   # `s` with everything inside brackets and strings removed
   defp flat_top(s),
-    do: Regex.replace(~r/\([^()]*\)|\[[^\[\]]*\]|\{[^{}]*\}|"[^"]*"|'[^']*'/, s, "")
+    do: Regex.replace(re(~r/\([^()]*\)|\[[^\[\]]*\]|\{[^{}]*\}|"[^"]*"|'[^']*'/), s, "")
 
   defp take_var(rest), do: take_var(rest, rest, 1, 0)
   defp take_var(<<>>, whole, _d, _n), do: {whole, ""}
@@ -455,7 +470,7 @@ defmodule Browser.CSS do
   defp split_keyword(s, _words) do
     masked = mask_groups(s)
 
-    case Regex.scan(~r/\s(and|or)\s/i, masked, return: :index) do
+    case Regex.scan(re(~r/\s(and|or)\s/i), masked, return: :index) do
       [] ->
         :none
 
@@ -545,7 +560,7 @@ defmodule Browser.CSS do
   # `a::before` -> {"a", :before}; a bare `::after` styles the box of every element
   defp split_pseudo_element(str) do
     case Regex.run(
-           ~r/\A(.*?)(?:::(before|after|marker|placeholder|backdrop)|:(before|after))\z/su,
+           re(~r/\A(.*?)(?:::(before|after|marker|placeholder|backdrop)|:(before|after))\z/su),
            str
          ) do
       # a backdrop is a box of its own (see `Browser.Modal`) that only these rules match
@@ -561,6 +576,20 @@ defmodule Browser.CSS do
 
   # an identifier: name characters and escapes (`\[`, `\:`, `\31 `), as in Tailwind's `.w-\[10px\]`
   @ident ~S"(?:[\w\-\x{80}-\x{10FFFF}]|\\(?:[0-9a-fA-F]{1,6}\s?|[^\n0-9a-fA-F]))+"
+
+  # The regexes of `tokenize/2` that hold `@ident`. A `~r` with an interpolation is compiled
+  # again on each call (60 K times for the sheets of the Speedometer pages), and `re/1` takes no
+  # interpolation: so each one is compiled one time and kept, under the key `re/1` uses.
+  @id_source "\\A#(?!\\d|-\\d)(" <> @ident <> ")"
+  @class_source "\\A\\.(?!\\d|-\\d)(" <> @ident <> ")"
+  @tag_source "\\A(" <> @ident <> ")"
+
+  defp ident_re(source) do
+    case :persistent_term.get({Browser.Re, source, ~c"u"}, nil) do
+      nil -> Browser.Re.keep({Browser.Re, source, ~c"u"}, Regex.compile!(source, "u"))
+      compiled -> compiled
+    end
+  end
 
   @doc false
   def unescape(ident) do
@@ -585,27 +614,29 @@ defmodule Browser.CSS do
 
   defp tokenize(s, acc) do
     cond do
-      m = Regex.run(~r/\A\s*([>+~])\s*/u, s) ->
+      m = Regex.run(re(~r/\A\s*([>+~])\s*/u), s) ->
         [whole, c] = m
         tokenize(drop(s, whole), [{:comb, comb(c)} | acc])
 
-      m = Regex.run(~r/\A\s+/u, s) ->
+      m = Regex.run(re(~r/\A\s+/u), s) ->
         tokenize(drop(s, hd(m)), [{:comb, :descendant} | acc])
 
       String.starts_with?(s, "*") ->
         tokenize(binary_part(s, 1, byte_size(s) - 1), [:any | acc])
 
-      m = Regex.run(~r/\A#(?!\d|-\d)(#{@ident})/u, s) ->
+      m = Regex.run(ident_re(@id_source), s) ->
         [whole, id] = m
         tokenize(drop(s, whole), [{:id, unescape(id)} | acc])
 
-      m = Regex.run(~r/\A\.(?!\d|-\d)(#{@ident})/u, s) ->
+      m = Regex.run(ident_re(@class_source), s) ->
         [whole, cls] = m
         tokenize(drop(s, whole), [{:class, unescape(cls)} | acc])
 
       m =
           Regex.run(
-            ~r/\A\[\s*\|?([\w\-:]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]+))\s*([iIsS])?)?\s*\]/u,
+            re(
+              ~r/\A\[\s*\|?([\w\-:]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]+))\s*([iIsS])?)?\s*\]/u
+            ),
             s
           ) ->
         [whole, name | rest] = m
@@ -614,7 +645,7 @@ defmodule Browser.CSS do
       String.starts_with?(s, "::") ->
         :error
 
-      m = Regex.run(~r/\A:has\(/u, s) ->
+      m = Regex.run(re(~r/\A:has\(/u), s) ->
         [whole] = m
 
         with {inner, rest} <- balanced(drop(s, whole)),
@@ -624,7 +655,7 @@ defmodule Browser.CSS do
           _ -> :error
         end
 
-      m = Regex.run(~r/\A:host\(/u, s) ->
+      m = Regex.run(re(~r/\A:host\(/u), s) ->
         [whole] = m
 
         with {inner, rest} <- balanced(drop(s, whole)),
@@ -634,7 +665,7 @@ defmodule Browser.CSS do
           _ -> :error
         end
 
-      m = Regex.run(~r/\A:(not|is|where|matches|-webkit-any|-moz-any)\(/u, s) ->
+      m = Regex.run(re(~r/\A:(not|is|where|matches|-webkit-any|-moz-any)\(/u), s) ->
         [whole, name] = m
 
         with {inner, rest} <- balanced(drop(s, whole)),
@@ -652,7 +683,7 @@ defmodule Browser.CSS do
           _ -> :error
         end
 
-      m = Regex.run(~r/\A:(nth-child|nth-last-child|nth-of-type|nth-last-of-type)\(/u, s) ->
+      m = Regex.run(re(~r/\A:(nth-child|nth-last-child|nth-of-type|nth-last-of-type)\(/u), s) ->
         [whole, name] = m
 
         kind =
@@ -674,7 +705,7 @@ defmodule Browser.CSS do
           _ -> :error
         end
 
-      m = Regex.run(~r/\A:(lang|dir)\(/u, s) ->
+      m = Regex.run(re(~r/\A:(lang|dir)\(/u), s) ->
         [whole, name] = m
 
         with {inner, rest} <- balanced(drop(s, whole)),
@@ -684,7 +715,7 @@ defmodule Browser.CSS do
           _ -> :error
         end
 
-      m = Regex.run(~r/\A:([a-z-]+)(?![\w\-(])/u, s) ->
+      m = Regex.run(re(~r/\A:([a-z-]+)(?![\w\-(])/u), s) ->
         [whole, name] = m
 
         case pseudo_class(name) do
@@ -692,7 +723,7 @@ defmodule Browser.CSS do
           p -> tokenize(drop(s, whole), [{:pseudo, p} | acc])
         end
 
-      m = Regex.run(~r/\A(#{@ident})/u, s) ->
+      m = Regex.run(ident_re(@tag_source), s) ->
         [whole, tag] = m
         tokenize(drop(s, whole), [{:tag, tag |> unescape() |> String.downcase()} | acc])
 
@@ -703,7 +734,7 @@ defmodule Browser.CSS do
 
   # `2n+1 of .a, b > c` -> {"2n+1", ".a, b > c"}; the `of` part is only for the child kinds
   defp split_of(inner, kind) do
-    case Regex.run(~r/\A(.*?)\s+of(?=[\s\[.#:*]|[\w\-])\s*(.*)\z/su, inner) do
+    case Regex.run(re(~r/\A(.*?)\s+of(?=[\s\[.#:*]|[\w\-])\s*(.*)\z/su), inner) do
       [_, arg, sels] when kind not in [:of_type, :last_of_type] and sels != "" ->
         {String.trim(arg), sels}
 
@@ -750,12 +781,12 @@ defmodule Browser.CSS do
         |> String.trim()
         |> String.trim("\"")
         |> String.trim("'")
-        |> String.replace(~r/\\(.)/, "\\1")
+        |> String.replace(re(~r/\\(.)/), "\\1")
         |> String.downcase()
       end)
 
     # an unquoted range is an identifier, which cannot start with a digit
-    valid? = fn r -> r != "" and (quoted?(inner, r) or not String.match?(r, ~r/\A-?\d/)) end
+    valid? = fn r -> r != "" and (quoted?(inner, r) or not String.match?(r, re(~r/\A-?\d/))) end
 
     if ranges != [] and Enum.all?(ranges, valid?),
       do: {:ok, {:lang, ranges}},
@@ -834,7 +865,7 @@ defmodule Browser.CSS do
       part = String.trim(part)
 
       {lead, body} =
-        case Regex.run(~r/\A([>+~])\s*(.*)\z/su, part) do
+        case Regex.run(re(~r/\A([>+~])\s*(.*)\z/su), part) do
           [_, c, rest] -> {comb(c), rest}
           nil -> {:descendant, part}
         end
@@ -853,7 +884,7 @@ defmodule Browser.CSS do
   # comma-separated compound selectors (no combinators) as used in :is()/:not()
   defp compound_list(inner) do
     inner
-    |> String.split(~r/,(?![^()]*\))/)
+    |> String.split(re(~r/,(?![^()]*\))/))
     |> Enum.reduce_while({:ok, []}, fn part, {:ok, acc} ->
       with {:ok, toks} <- tokenize(String.trim(part), []),
            true <- Enum.all?(toks, &(not match?({:comb, _}, &1))),
@@ -880,7 +911,7 @@ defmodule Browser.CSS do
       arg == "even" ->
         {2, 0}
 
-      m = Regex.run(~r/\A([+-]?\d*)n\s*(?:([+-])\s*(\d+))?\z/, arg) ->
+      m = Regex.run(re(~r/\A([+-]?\d*)n\s*(?:([+-])\s*(\d+))?\z/), arg) ->
         [_, coef | rest] = m
 
         a =
@@ -903,7 +934,7 @@ defmodule Browser.CSS do
 
         {a, b}
 
-      Regex.match?(~r/\A[+-]?\d+\z/, arg) ->
+      Regex.match?(re(~r/\A[+-]?\d+\z/), arg) ->
         {0, String.to_integer(String.trim_leading(arg, "+"))}
 
       true ->
@@ -1280,7 +1311,7 @@ defmodule Browser.CSS do
       tag: tag,
       attrs: attrs,
       id: attr_value(attrs, "id"),
-      classes: attrs |> attr_value("class") |> Kernel.||("") |> String.split(),
+      classes: attrs |> attr_value("class") |> Kernel.||("") |> split_words(),
       parent: parent,
       prev: prev,
       first?: i == 0,

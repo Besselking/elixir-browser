@@ -6,6 +6,8 @@ defmodule Browser.JS.Builtins do
   Natives are `fn this, args -> value end`. Strings count code points, not UTF-16 units.
   """
 
+  import Browser.Re, only: [re: 1]
+
   import Browser.JS.Interp, except: [get: 2, put: 3]
   import Browser.JS.Args
   alias Browser.JS.ArrayGeneric
@@ -2162,7 +2164,7 @@ defmodule Browser.JS.Builtins do
   defp list_label(open, close, items), do: open <> " " <> Enum.join(items, ", ") <> " " <> close
 
   defp key_label(k),
-    do: if(Regex.match?(~r/\A[A-Za-z_$][\w$]*\z/, k), do: k, else: "'" <> k <> "'")
+    do: if(Regex.match?(re(~r/\A[A-Za-z_$][\w$]*\z/), k), do: k, else: "'" <> k <> "'")
 
   defp function_label(f) do
     case to_str(Interp.get(f, "name")) do

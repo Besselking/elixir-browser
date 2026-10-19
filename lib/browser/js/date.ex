@@ -4,6 +4,8 @@ defmodule Browser.JS.Date do
   object. Local time is UTC (the runtime has no time zones).
   """
 
+  import Browser.Re, only: [re: 1]
+
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.Interp
   alias Browser.JS.Obj
@@ -394,7 +396,9 @@ defmodule Browser.JS.Date do
 
   defp parse_legacy(s) do
     re =
-      ~r/\A(?:[A-Z][a-z]{2},? )?(?:([A-Z][a-z]{2}) (\d\d)|(\d\d) ([A-Z][a-z]{2})) (-?\d{4,6}) (\d\d):(\d\d):(\d\d) GMT(?:([+-])(\d\d)(\d\d))?(?: \(.*\))?\z/
+      re(
+        ~r/\A(?:[A-Z][a-z]{2},? )?(?:([A-Z][a-z]{2}) (\d\d)|(\d\d) ([A-Z][a-z]{2})) (-?\d{4,6}) (\d\d):(\d\d):(\d\d) GMT(?:([+-])(\d\d)(\d\d))?(?: \(.*\))?\z/
+      )
 
     case Regex.run(re, s) do
       nil ->
@@ -433,7 +437,9 @@ defmodule Browser.JS.Date do
 
   defp parse_iso(s) do
     re =
-      ~r/\A([+-]\d{6}|\d{4})(?:-(\d\d)(?:-(\d\d))?)?(?:T(\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,3})\d*)?)?(Z|[+-]\d\d:\d\d)?)?\z/
+      re(
+        ~r/\A([+-]\d{6}|\d{4})(?:-(\d\d)(?:-(\d\d))?)?(?:T(\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,3})\d*)?)?(Z|[+-]\d\d:\d\d)?)?\z/
+      )
 
     case Regex.run(re, s) do
       nil ->

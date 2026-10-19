@@ -7,6 +7,8 @@ defmodule Browser.JS.RegExp do
   other string index in the runtime.
   """
 
+  import Browser.Re, only: [re: 1]
+
   import Browser.JS.Interp, except: [get: 2, put: 3]
   alias Browser.JS.{Interp, Props, Str}
   require Browser.JS.Obj, as: Obj
@@ -234,7 +236,7 @@ defmodule Browser.JS.RegExp do
   # an identifier: ID_Start, `$` or `_`, then those and ID_Continue and ZWNJ/ZWJ
   defp valid_name?(name) do
     Regex.match?(
-      ~r/\A[\p{L}\p{Nl}$_][\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}$_\x{200C}\x{200D}]*\z/u,
+      re(~r/\A[\p{L}\p{Nl}$_][\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}$_\x{200C}\x{200D}]*\z/u),
       name
     )
   end
@@ -537,7 +539,7 @@ defmodule Browser.JS.RegExp do
       [key, value] when key in ["Script", "sc", "Script_Extensions", "scx"] ->
         # (a bare script name in PCRE is the script extensions: `sc:` is the plain script)
         prefix = if key in ["Script", "sc"], do: "sc:", else: "scx:"
-        if value =~ ~r/^[A-Za-z_]+$/, do: {:ok, {:pcre, prefix <> value}}, else: :error
+        if value =~ re(~r/^[A-Za-z_]+$/), do: {:ok, {:pcre, prefix <> value}}, else: :error
 
       _ ->
         :error

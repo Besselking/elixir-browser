@@ -34,6 +34,9 @@ defmodule Browser.JS.Str do
     end
   end
 
+  # Seven bytes at a time while they are all below 128 (seven bytes make a small integer, so
+  # the match makes no big number), then one byte at a time
+  defp scan(<<w::56, rest::binary>>) when (w &&& 0x80808080808080) == 0, do: scan(rest)
   defp scan(<<c, rest::binary>>) when c < 128, do: scan(rest)
   defp scan(""), do: true
   defp scan(_), do: false

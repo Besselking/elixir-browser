@@ -16,7 +16,7 @@ defmodule Browser.Layout do
 
   alias Browser.{Backgrounds, Shadows}
 
-  import Browser.Re, only: [re: 1]
+  import Browser.Re, only: [re: 1, split_words: 1, compiled: 2]
 
   # item types painted before (underneath) the text of the same page
   @behind_text [:rect, :shadow, :inset_shadow, :bgimage]
@@ -495,8 +495,8 @@ defmodule Browser.Layout do
 
   # zero-width format characters receive no letter-spacing
   defp spaced_length(text) do
-    if String.match?(text, ~r/[\x{200B}-\x{200D}\x{2060}\x{FEFF}]/u),
-      do: String.length(String.replace(text, ~r/[\x{200B}-\x{200D}\x{2060}\x{FEFF}]/u, "")),
+    if String.match?(text, re(~r/[\x{200B}-\x{200D}\x{2060}\x{FEFF}]/u)),
+      do: String.length(String.replace(text, re(~r/[\x{200B}-\x{200D}\x{2060}\x{FEFF}]/u), "")),
       else: String.length(text)
   end
 
@@ -2304,7 +2304,7 @@ defmodule Browser.Layout do
   end
 
   defp balance_text?(c),
-    do: "balance" in String.split(to_string(c["text-wrap-style"] || c["text-wrap"]))
+    do: "balance" in split_words(to_string(c["text-wrap-style"] || c["text-wrap"]))
 
   # `text-indent`: the first line of a block starts that far in, as if an inline box of that
   # width led it (`lead`); a percentage is of the block's own width. Nothing carries over from
@@ -2774,7 +2774,7 @@ defmodule Browser.Layout do
     type
     |> String.slice(1..-2//1)
     |> then(
-      &Regex.replace(~r/\\([0-9a-fA-F]{1,6}) ?/, &1, fn _, h ->
+      &Regex.replace(re(~r/\\([0-9a-fA-F]{1,6}) ?/), &1, fn _, h ->
         <<String.to_integer(h, 16)::utf8>>
       end)
     )
@@ -3232,7 +3232,7 @@ defmodule Browser.Layout do
         rest
         |> String.trim_trailing(<<q>>)
         |> then(
-          &Regex.replace(~r/\\([0-9a-fA-F]{1,6})\s?|\\(.)/su, &1, fn
+          &Regex.replace(re(~r/\\([0-9a-fA-F]{1,6})\s?|\\(.)/su), &1, fn
             _, hex, "" -> <<String.to_integer(hex, 16)::utf8>>
             _, _, ch -> ch
           end)
@@ -3252,7 +3252,7 @@ defmodule Browser.Layout do
         %{style | tab: if(n == trunc(n), do: trunc(n), else: n)}
 
       _ ->
-        case Regex.run(~r/\A(\d+\.?\d*|\.\d+)(px|em|rem|pt|ch|ex)\z/, text) do
+        case Regex.run(re(~r/\A(\d+\.?\d*|\.\d+)(px|em|rem|pt|ch|ex)\z/), text) do
           [_, num, unit] ->
             n = if String.starts_with?(num, "."), do: "0" <> num, else: num
             n = n |> Float.parse() |> elem(0)
@@ -3307,7 +3307,7 @@ defmodule Browser.Layout do
 
   # (white space is collapsed before `full-width` turns the spaces that are left into wide ones)
   defp collapse_for(t, tt, %{ws: :normal}) when is_list(tt) do
-    if :full_width in tt, do: Regex.replace(~r/[ \t\n\r\f]+/, t, " "), else: t
+    if :full_width in tt, do: Regex.replace(re(~r/[ \t\n\r\f]+/), t, " "), else: t
   end
 
   defp collapse_for(t, _tt, _style), do: t
@@ -3317,8 +3317,8 @@ defmodule Browser.Layout do
 
   defp transform_text(t, :upper, {_acc, lang}) do
     upper =
-      if String.match?(t, ~r/[\x{10D0}-\x{10FF}]/u),
-        do: Regex.replace(~r/[^\x{10D0}-\x{10FF}]+/u, t, &String.upcase/1),
+      if String.match?(t, re(~r/[\x{10D0}-\x{10FF}]/u)),
+        do: Regex.replace(re(~r/[^\x{10D0}-\x{10FF}]+/u), t, &String.upcase/1),
         else: String.upcase(t)
 
     # (Greek capitals lose their accents but keep the diaeresis)
@@ -3349,24 +3349,30 @@ defmodule Browser.Layout do
     {head, tail} =
       if word_begun?(acc),
         do:
-          case(Regex.run(~r/\A\S*/u, t),
+          case(Regex.run(re(~r/\A\S*/u), t),
             do: ([h] -> {h, binary_part(t, byte_size(h), byte_size(t) - byte_size(h))})
           ),
         else: {"", t}
 
     (head <>
-       Regex.replace(~r/(^|\s)([\p{P}\p{S}]*)(\p{L})/u, tail, fn _, sp, p, ch ->
+       Regex.replace(re(~r/(^|\s)([\p{P}\p{S}]*)(\p{L})/u), tail, fn _, sp, p, ch ->
          sp <> p <> String.upcase(ch)
        end))
     |> then(
-      &if(lang == "nl", do: Regex.replace(~r/(^|\s)([\p{P}\p{S}]*)Ij/u, &1, "\\1\\2IJ"), else: &1)
+      &if(lang == "nl",
+        do: Regex.replace(re(~r/(^|\s)([\p{P}\p{S}]*)Ij/u), &1, "\\1\\2IJ"),
+        else: &1
+      )
     )
   end
 
   defp greek_unaccent(t) do
     t
     |> String.normalize(:nfd)
-    |> String.replace(~r/[\x{0300}\x{0301}\x{0304}\x{0306}\x{0313}\x{0314}\x{0342}\x{0345}]/u, "")
+    |> String.replace(
+      re(~r/[\x{0300}\x{0301}\x{0304}\x{0306}\x{0313}\x{0314}\x{0342}\x{0345}]/u),
+      ""
+    )
     |> String.normalize(:nfc)
   end
 
@@ -3377,7 +3383,7 @@ defmodule Browser.Layout do
   defp word_begun?([{:inline_close, _, _} | rest]), do: word_begun?(rest)
   defp word_begun?(_), do: false
 
-  defp letters?(text), do: String.match?(text, ~r/[\p{L}\p{N}]/u)
+  defp letters?(text), do: String.match?(text, re(~r/[\p{L}\p{N}]/u))
 
   defp letter_spacing(style, {:pct, f}), do: %{style | ls: f * style.size}
   defp letter_spacing(style, {:calc, px, f}), do: %{style | ls: px + f * style.size}
@@ -3405,7 +3411,7 @@ defmodule Browser.Layout do
 
   # `word-space-transform` turns the zero-width spaces and <wbr> into spaces
   defp word_space_transform(v) do
-    words = v |> to_string() |> String.split()
+    words = v |> to_string() |> split_words()
 
     cond do
       "ideographic-space" in words -> :ideo
@@ -3430,7 +3436,7 @@ defmodule Browser.Layout do
   # `text-transform` takes a case keyword and any of `full-width` and `full-size-kana`
   defp text_transform(value) do
     kinds =
-      for word <- value |> to_string() |> String.split(),
+      for word <- value |> to_string() |> split_words(),
           kind = text_transform_kind(word),
           do: kind
 
@@ -3461,7 +3467,7 @@ defmodule Browser.Layout do
   # `text-wrap` (or its `text-wrap-mode` longhand) switches line wrapping on or off
   # without touching how white space collapses
   defp text_wrap_mode(c) do
-    case to_string(c["text-wrap-mode"] || c["text-wrap"]) |> String.split() |> List.first() do
+    case to_string(c["text-wrap-mode"] || c["text-wrap"]) |> split_words() |> List.first() do
       mode when mode in ["wrap", "nowrap"] -> mode
       _ -> nil
     end
@@ -3622,29 +3628,21 @@ defmodule Browser.Layout do
   @wide "\\x{2E80}-\\x{303E}\\x{3041}-\\x{33FF}\\x{3400}-\\x{4DBF}\\x{4E00}-\\x{9FFF}\\x{F900}-\\x{FAFF}\\x{FE30}-\\x{FE4F}\\x{FF01}-\\x{FF9F}\\x{FFE0}-\\x{FFE6}\\x{20000}-\\x{3FFFD}"
   # (variation selectors, soft hyphens and direction marks are invisible between the two)
   @ignorable "\\x{FE00}-\\x{FE0F}\\x{E0100}-\\x{E01EF}\\x{AD}\\x{200E}\\x{200F}"
-  @wide_break Regex.compile!(
-                "([#{@wide}][#{@ignorable}]*)[ \\t\\n]*\\n[ \\t\\n]*(?=[#{@ignorable}]*[#{@wide}])",
-                "u"
-              )
+  # (the sources of these regexes are made here; `compiled/2` compiles each one time only)
+  @wide_break "([#{@wide}][#{@ignorable}]*)[ \\t\\n]*\\n[ \\t\\n]*(?=[#{@ignorable}]*[#{@wide}])"
   # (CJK punctuation, also the half- and fullwidth forms of it)
   @cjk_punct "\\x{3001}-\\x{303F}\\x{30FB}\\x{FF01}-\\x{FF0F}\\x{FF1A}-\\x{FF20}\\x{FF3B}-\\x{FF40}\\x{FF5B}-\\x{FF65}"
-  @punct_break Regex.compile!(
-                 "([#{@cjk_punct}])[ \\t\\n]*\\n[ \\t\\n]*|[ \\t\\n]*\\n[ \\t\\n]*(?=[#{@cjk_punct}])",
-                 "u"
-               )
+  @punct_break "([#{@cjk_punct}])[ \\t\\n]*\\n[ \\t\\n]*|[ \\t\\n]*\\n[ \\t\\n]*(?=[#{@cjk_punct}])"
   # (a segment break next to a zero-width space goes as well)
-  @zwsp_break Regex.compile!(
-                "\\x{200B}[ \\t\\n]*\\n[ \\t\\n]*|[ \\t\\n]*\\n[ \\t\\n]*(?=\\x{200B})",
-                "u"
-              )
+  @zwsp_break "\\x{200B}[ \\t\\n]*\\n[ \\t\\n]*|[ \\t\\n]*\\n[ \\t\\n]*(?=\\x{200B})"
 
   defp drop_wide_breaks(t) do
     if String.contains?(t, "\n") do
       t
-      |> then(&Regex.replace(@wide_break, &1, "\\1"))
-      |> then(&Regex.replace(@punct_break, &1, "\\1"))
+      |> then(&Regex.replace(compiled(@wide_break, ~c"u"), &1, "\\1"))
+      |> then(&Regex.replace(compiled(@punct_break, ~c"u"), &1, "\\1"))
       |> then(
-        &Regex.replace(@zwsp_break, &1, fn m ->
+        &Regex.replace(compiled(@zwsp_break, ~c"u"), &1, fn m ->
           if String.starts_with?(m, "\u200B"), do: "\u200B", else: ""
         end)
       )
@@ -3656,7 +3654,7 @@ defmodule Browser.Layout do
   # a line may break between an ideograph (or kana) and the character next to it, except before
   # punctuation that cannot start a line and after an opening bracket; the pieces of a word
   # follow each other without a space
-  @wide_re Regex.compile!("[#{@wide}]", "u")
+  @wide_re "[#{@wide}]"
   @no_start "-.,;:!?)]}%\u00B7\u2019\u201D\u2026\u2010\u2013\u3001\u3002\u3005\u3009\u300B\u300D\u300F\u3011\u3015\u3017\u3019\u301C\u30FB\u30FC\u3041\u3043\u3045\u3047\u3049\u3063\u3083\u3085\u3087\u308E\u3095\u3096\u309D\u309E\u30A1\u30A3\u30A5\u30A7\u30A9\u30C3\u30E3\u30E5\u30E7\u30EE\u30F5\u30F6\u30FD\u30FE\uFF01\uFF09\uFF0C\uFF0E\uFF1A\uFF1B\uFF1F\uFF3D\uFF5D\uFF5E\uFF60\u200D\u3000"
   @no_end "([{\u2018\u201C\u3008\u300A\u300C\u300E\u3010\u3014\u3016\u3018\uFF08\uFF3B\uFF5B\uFF5F\u200D"
 
@@ -3667,7 +3665,8 @@ defmodule Browser.Layout do
         {:word, t, st, g} -> {t, st, g}
       end
 
-    if not ascii?(text) and String.length(text) > 1 and Regex.match?(@wide_re, text) do
+    if not ascii?(text) and String.length(text) > 1 and
+         Regex.match?(compiled(@wide_re, ~c"u"), text) do
       text
       |> String.graphemes()
       |> Enum.reduce([], fn
@@ -3709,7 +3708,9 @@ defmodule Browser.Layout do
     a = if String.ends_with?(cur, "\u200D"), do: "\u200D", else: a
 
     # (`keep-all` leaves only the break after an ideographic space and a CJK comma or full stop)
-    (Regex.match?(@wide_re, a) or Regex.match?(@wide_re, g)) and
+    wide_re = compiled(@wide_re, ~c"u")
+
+    (Regex.match?(wide_re, a) or Regex.match?(wide_re, g)) and
       (not keep_all? or a in ["\u3000", "\u3001", "\u3002", "\uFF0C", "\uFF0E"]) and
       not String.contains?(@no_start, g) and not String.contains?(@no_end, a)
   end
@@ -6093,7 +6094,7 @@ defmodule Browser.Layout do
 
   # `inset(0)` with no rounded corners
   defp plain_inset?(v) when is_binary(v),
-    do: Regex.match?(~r/\Ainset\(\s*0(?:px)?(?:\s+0(?:px)?){0,3}\s*\)\z/, String.trim(v))
+    do: Regex.match?(re(~r/\Ainset\(\s*0(?:px)?(?:\s+0(?:px)?){0,3}\s*\)\z/), String.trim(v))
 
   defp plain_inset?(_), do: false
 
@@ -6435,7 +6436,7 @@ defmodule Browser.Layout do
     from_transform =
       case c["transform"] do
         t when is_binary(t) ->
-          Regex.scan(~r/translate(x|y|3d)?\(([^)]*(?:\([^)]*\)[^)]*)*)\)/, t)
+          Regex.scan(re(~r/translate(x|y|3d)?\(([^)]*(?:\([^)]*\)[^)]*)*)\)/), t)
           |> Enum.reduce({nil, nil}, fn [_, axis, args], {x, y} ->
             parts = args |> String.split(",") |> Enum.map(&translate_value(&1, fs))
 
@@ -6456,7 +6457,7 @@ defmodule Browser.Layout do
   end
 
   defp translate_pair(value, fs) when is_binary(value) do
-    case Regex.scan(~r/[\w.%-]*\((?:[^()]|\([^()]*\))*\)|\S+/, value) |> List.flatten() do
+    case Regex.scan(re(~r/[\w.%-]*\((?:[^()]|\([^()]*\))*\)|\S+/), value) |> List.flatten() do
       [x] -> {translate_value(x, fs), nil}
       [x, y | _] -> {translate_value(x, fs), translate_value(y, fs)}
       _ -> {nil, nil}
@@ -10021,7 +10022,7 @@ defmodule Browser.Layout do
 
   # wrapping: a new line when the next item no longer fits
   # `flex-wrap` is `nowrap | wrap | wrap-reverse | balance`, or `balance` with `wrap-reverse`
-  defp wrap_words(v) when is_binary(v), do: String.split(v)
+  defp wrap_words(v) when is_binary(v), do: split_words(v)
   defp wrap_words(_), do: []
 
   defp wraps?(v), do: Enum.any?(wrap_words(v), &(&1 in ["wrap", "wrap-reverse", "balance"]))
@@ -13180,7 +13181,7 @@ defmodule Browser.Layout do
     keys = [:x, :w, :text, :glue, :hang]
 
     Map.drop(prev, keys) == Map.drop(item, keys) and prev.x + prev.w == item.x and
-      not String.match?(prev.text <> item.text, ~r/\s|[\x{2000}-\x{200A}\x{3000}]/u) and
+      not String.match?(prev.text <> item.text, re(~r/\s|[\x{2000}-\x{200A}\x{3000}]/u)) and
       not Map.has_key?(prev, :hang) and not Map.has_key?(prev, :wc)
   end
 

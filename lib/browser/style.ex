@@ -11,7 +11,7 @@ defmodule Browser.Style do
 
   alias Browser.{CSS, MediaQuery, SheetCache}
 
-  import Browser.Re, only: [re: 1]
+  import Browser.Re, only: [re: 1, split_words: 1]
 
   @props ~w(display visibility overflow-x overflow-y position top left right bottom
             contain contain-intrinsic-size contain-intrinsic-width contain-intrinsic-height
@@ -1217,10 +1217,9 @@ defmodule Browser.Style do
   defp table_ancestor(%{parent: parent}), do: table_ancestor(parent)
   defp table_ancestor(_), do: nil
 
-  @viewport_unit ~r/\d(vw|vh|vmin|vmax|dvw|dvh|svw|svh|lvw|lvh)\b/i
-
   @doc "Tells if the CSS text `css` has a length in viewport units."
-  def viewport_unit?(css), do: Regex.match?(@viewport_unit, css)
+  def viewport_unit?(css),
+    do: Regex.match?(re(~r/\d(vw|vh|vmin|vmax|dvw|dvh|svw|svh|lvw|lvh)\b/i), css)
 
   # the same `style` attribute is on many elements of a page (and on one of them every time the
   # page is styled again), so its parse is kept for the run
@@ -2163,7 +2162,7 @@ defmodule Browser.Style do
   # (zero when it is not given). Only the height of a block and a width asked for from the
   # content are known here.
   defp size_containment(base, resolved, env) do
-    contain = String.split(Map.get(resolved, "contain", ""))
+    contain = split_words(Map.get(resolved, "contain", ""))
 
     if "size" in contain or "strict" in contain do
       {iw, ih} = intrinsic_size(resolved, env)
@@ -2211,7 +2210,7 @@ defmodule Browser.Style do
   # `none`, and the `auto` of `auto 10px` (the size last rendered), count for nothing
   defp intrinsic_lengths(value, env) do
     value
-    |> String.split()
+    |> split_words()
     |> Enum.reject(&(&1 in ["auto", "none"]))
     |> Enum.map(&(length(&1, env) || 0.0))
   end
@@ -2649,7 +2648,7 @@ defmodule Browser.Style do
   defp typed(prop, v, env, _pc) when prop in @radii do
     parsed =
       v
-      |> String.split()
+      |> split_words()
       |> Enum.map(fn tok ->
         case Regex.run(re(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))%\z/), tok) do
           [_, n] -> {:pct, to_float(n) / 100}
@@ -2814,10 +2813,14 @@ defmodule Browser.Style do
   # `em` in a background's position or size is the element's font size
   # em and ch lengths of a background position or size, as pixels
   defp font_units_to_px(v, env) do
-    units = [{"ch", env.fs * Map.get(env, :ch, 0.6)}, {"ex", env.fs * Map.get(env, :ex, 0.5)}]
+    # (one regex for each unit, compiled one time: see `Browser.Re`)
+    units = [
+      {re(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))ch\b/i), env.fs * Map.get(env, :ch, 0.6)},
+      {re(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))ex\b/i), env.fs * Map.get(env, :ex, 0.5)}
+    ]
 
-    Enum.reduce(units, ems_to_px(v, env.fs), fn {unit, size}, acc ->
-      Regex.replace(~r/(?<![\w.])([+-]?(?:\d+\.?\d*|\.\d+))#{unit}\b/i, acc, fn _, n ->
+    Enum.reduce(units, ems_to_px(v, env.fs), fn {unit_re, size}, acc ->
+      Regex.replace(unit_re, acc, fn _, n ->
         {f, _} = Float.parse(if String.starts_with?(n, "."), do: "0" <> n, else: n)
         "#{Float.round(f * size, 3)}px"
       end)

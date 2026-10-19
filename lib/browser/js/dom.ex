@@ -16,6 +16,7 @@ defmodule Browser.JS.DOM do
 
   import Kernel, except: [node: 1]
   import Browser.JS.Interp, except: [get: 2, put: 3]
+  import Browser.Re, only: [re: 1, split_words: 1]
   alias Browser.JS.Interp
   alias Browser.JS.Str
 
@@ -417,26 +418,35 @@ defmodule Browser.JS.DOM do
   # it then reads as an empty, detached node
   defp node(nid) do
     case st().nodes do
-      %{^nid => n} ->
-        n
-
-      _ ->
-        %{
-          id: nid,
-          kind: :text,
-          tag: nil,
-          attrs: [],
-          internal: [],
-          props: %{},
-          kids: [],
-          parent: nil,
-          text: "",
-          content: nil,
-          shost: nil,
-          shadow: nil,
-          doc: nil
-        }
+      %{^nid => n} -> n
+      _ -> missing_node(nid)
     end
+  end
+
+  # `node/1` in the node table `nodes`
+  defp node_in(nodes, nid) do
+    case nodes do
+      %{^nid => n} -> n
+      _ -> missing_node(nid)
+    end
+  end
+
+  defp missing_node(nid) do
+    %{
+      id: nid,
+      kind: :text,
+      tag: nil,
+      attrs: [],
+      internal: [],
+      props: %{},
+      kids: [],
+      parent: nil,
+      text: "",
+      content: nil,
+      shost: nil,
+      shadow: nil,
+      doc: nil
+    }
   end
 
   # The elements by `id` attribute: name => node ids (any element of any tree, attached or not).
@@ -579,7 +589,7 @@ defmodule Browser.JS.DOM do
       {_, v} when is_binary(v) ->
         case n do
           %{cls: {^v, _}} -> n
-          _ -> Map.put(n, :cls, {v, String.split(v)})
+          _ -> Map.put(n, :cls, {v, split_words(v)})
         end
 
       _ ->
@@ -594,7 +604,7 @@ defmodule Browser.JS.DOM do
       {_, v} ->
         case n do
           %{cls: {^v, tokens}} -> tokens
-          _ -> String.split(v)
+          _ -> split_words(v)
         end
 
       nil ->
@@ -602,64 +612,85 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  defp put_node(n) do
+  defp put_node(n), do: put_st(put_node_in(st(), n))
+
+  # `put_node/1` on a state that the caller holds
+  defp put_node_in(s, n) do
     n = with_classes(n)
-    s = st()
-
-    s =
-      if n.doc == s.main or n.doc == nil,
-        do: %{s | dirty: true},
-        else: %{s | fdirty: MapSet.put(s.fdirty, n.doc)}
-
+    s = changed(s, n.doc)
     s = reindex_all(s, n.id, Map.get(s.nodes, n.id), n)
-    put_st(%{s | nodes: Map.put(s.nodes, n.id, n), rev: s.rev + 1})
+    %{s | nodes: Map.put(s.nodes, n.id, n), rev: s.rev + 1}
+  end
+
+  # the state after a change of the tree of document `doc` (the layout must see it again)
+  defp changed(s, doc) do
+    if doc == s.main or doc == nil,
+      do: %{s | dirty: true},
+      else: %{s | fdirty: MapSet.put(s.fdirty, doc)}
   end
 
   defp update_node(nid, fun), do: put_node(fun.(node(nid)))
 
   defp new_node(fields) do
-    s = st()
-    id = s.next
+    {id, s} = add_node(st(), fields)
+    put_st(s)
+    id
+  end
 
-    n =
-      Map.merge(
-        %{
-          id: id,
-          kind: :element,
-          tag: nil,
-          attrs: [],
-          internal: [],
-          props: %{},
-          kids: [],
-          parent: nil,
-          text: "",
-          # a `<template>`'s content: the fragment that holds what is inside it
-          content: nil,
-          # a shadow root (a fragment) knows its host, a host its shadow root
-          shost: nil,
-          shadow: nil,
-          # the document the node belongs to (a document node's is itself)
-          doc: s.doc
-        },
-        fields
-      )
+  # `new_node/1` on a state that the caller holds: gives the new id and the state. A fragment
+  # of many nodes (`build_in/3`) is made with one read and one write of the process state.
+  defp add_node(s, fields), do: put_new(s, Map.merge(blank_node(s.next, s.doc), fields))
+
+  # a new node with id `id` in document `doc`, with the fields that `new_node/1` gives when it is
+  # not told otherwise
+  defp blank_node(id, doc) do
+    %{
+      id: id,
+      kind: :element,
+      tag: nil,
+      attrs: [],
+      internal: [],
+      props: %{},
+      kids: [],
+      parent: nil,
+      text: "",
+      # a `<template>`'s content: the fragment that holds what is inside it
+      content: nil,
+      # a shadow root (a fragment) knows its host, a host its shadow root
+      shost: nil,
+      shadow: nil,
+      # the document the node belongs to (a document node's is itself)
+      doc: doc
+    }
+  end
+
+  # The state when the new node `n` takes its id: the indexes and the `<iframe>`s have it, and
+  # `next` and `rev` go up. Gives `n` with the tokens of its `class`. The caller puts `n` in the
+  # node table.
+  defp index_node(s, n) do
+    id = n.id
 
     # (the checks that frames need are only made once the page has an <iframe>; `iframes` has
     # each `<iframe>` element, see `frames_in/1`)
-    s =
+    iframes =
       if n.tag == "iframe" do
         Process.put(:dom_has_iframe, true)
-        %{s | iframes: Map.put(s.iframes, id, true)}
+        Map.put(s.iframes, id, true)
       else
-        s
+        s.iframes
       end
 
     n = with_classes(n)
 
-    s = reindex_all(s, id, nil, n)
-    put_st(%{s | next: id + 1, nodes: Map.put(s.nodes, id, n), rev: s.rev + 1})
-
-    id
+    {n,
+     %{
+       s
+       | next: id + 1,
+         ids: reindex(s.ids, id, nil, n),
+         aidx: reindex_attrs(s.aidx, id, nil, n),
+         iframes: iframes,
+         rev: s.rev + 1
+     }}
   end
 
   @doc "True when the script changed the tree since the last `clean/0`."
@@ -842,7 +873,7 @@ defmodule Browser.JS.DOM do
     put_st(Map.merge(s, %{realms: realms, meta: meta, frames: Map.put(s.frames, iframe, doc)}))
 
     in_realm(doc, fn ->
-      kids = Enum.map(raw, &build(&1, doc))
+      kids = build_all(raw, doc)
       update_node_quiet(doc, &%{&1 | kids: kids})
     end)
 
@@ -1116,19 +1147,21 @@ defmodule Browser.JS.DOM do
     doc = new_node(%{kind: :document})
     s = st()
     put_st(%{s | doc: doc, main: doc})
-    kids = Enum.map(raw, &build(&1, doc))
+    kids = build_all(raw, doc)
     update_node_quiet(doc, &%{&1 | kids: kids, doc: doc})
     clean()
     doc
   end
 
-  defp update_node_quiet(nid, fun) do
-    s = st()
-    old = node(nid)
+  defp update_node_quiet(nid, fun), do: put_st(quiet_in(st(), nid, fun))
+
+  # `update_node_quiet/2` on a state that the caller holds
+  defp quiet_in(s, nid, fun) do
+    old = node_in(s.nodes, nid)
     n = with_classes(fun.(old))
 
     s = reindex_all(s, nid, old, n)
-    put_st(%{s | nodes: Map.put(s.nodes, nid, n), rev: s.rev + 1})
+    %{s | nodes: Map.put(s.nodes, nid, n), rev: s.rev + 1}
   end
 
   # what the browser itself puts on elements; any other name starting with `@` is the page's
@@ -1136,25 +1169,55 @@ defmodule Browser.JS.DOM do
   @internal_attrs ~w(@cid @nid @znid @z @computed @content @marker @placeholder @src @summary @canvas
                      @sized @float @flex_sized @definite @ed @edhost @t)
 
-  defp build({:text, t}, parent), do: new_node(%{kind: :text, text: t, parent: parent})
-  defp build({:comment, t}, parent), do: new_node(%{kind: :comment, text: t, parent: parent})
+  # The nodes of the parsed trees `raws`, with `parent` as their parent: gives their ids. All
+  # the nodes are made on one state (`build_in/3`), which is read and written one time. The ids,
+  # the indexes and the counts are the same as when each node is made with `new_node/1`.
+  defp build_all(raws, parent) do
+    {ids, s} = build_list(st(), raws, parent)
+    put_st(s)
+    ids
+  end
 
-  defp build({:element, tag, attrs, kids}, parent) do
+  defp build_list(s, raws, parent),
+    do: Enum.map_reduce(raws, s, fn raw, s -> build_in(s, raw, parent) end)
+
+  defp build_in(s, {:text, t}, parent),
+    do: put_new(s, %{blank_node(s.next, s.doc) | kind: :text, text: t, parent: parent})
+
+  defp build_in(s, {:comment, t}, parent),
+    do: put_new(s, %{blank_node(s.next, s.doc) | kind: :comment, text: t, parent: parent})
+
+  defp build_in(s, {:element, tag, attrs, kids}, parent) do
     {internal, visible} = Enum.split_with(attrs, fn {k, _} -> k in @internal_attrs end)
-    nid = new_node(%{tag: tag, attrs: visible, internal: internal, parent: parent})
-    kid_ids = Enum.map(kids, &build(&1, nid))
+
+    n = %{
+      blank_node(s.next, s.doc)
+      | tag: tag,
+        attrs: visible,
+        internal: internal,
+        parent: parent
+    }
 
     if tag == "template" do
+      {nid, s} = put_new(s, n)
+      {kid_ids, s} = build_list(s, kids, nid)
       # what is inside a template is its content: a fragment of its own, not part of the page
-      frag = new_node(%{kind: :fragment})
-      for k <- kid_ids, do: update_node_quiet(k, &%{&1 | parent: frag})
-      update_node_quiet(frag, &%{&1 | kids: kid_ids})
-      update_node_quiet(nid, &%{&1 | content: frag})
+      {frag, s} = add_node(s, %{kind: :fragment})
+      s = :lists.foldl(fn k, s -> quiet_in(s, k, &%{&1 | parent: frag}) end, s, kid_ids)
+      s = quiet_in(s, frag, &%{&1 | kids: kid_ids})
+      {nid, quiet_in(s, nid, &%{&1 | content: frag})}
     else
-      update_node_quiet(nid, &%{&1 | kids: kid_ids})
+      # (the element goes in the node table one time, with its kids: `rev` counts the write
+      # of the kids as `quiet_in/3` does)
+      {n, s} = index_node(s, n)
+      {kid_ids, s} = build_list(s, kids, n.id)
+      {n.id, %{s | nodes: Map.put(s.nodes, n.id, %{n | kids: kid_ids}), rev: s.rev + 1}}
     end
+  end
 
-    nid
+  defp put_new(s, n) do
+    {n, s} = index_node(s, n)
+    {n.id, %{s | nodes: Map.put(s.nodes, n.id, n)}}
   end
 
   # the fragment that holds a template's content (made when a script created the template)
@@ -1597,7 +1660,7 @@ defmodule Browser.JS.DOM do
 
     case n.kind do
       :text ->
-        [if(pre?, do: n.text, else: Regex.replace(~r/[ \t\n\r\f]+/, n.text, " "))]
+        [if(pre?, do: n.text, else: Regex.replace(re(~r/[ \t\n\r\f]+/), n.text, " "))]
 
       :element when n.tag in ~w(script style template) ->
         []
@@ -2239,8 +2302,7 @@ defmodule Browser.JS.DOM do
         throw_error("HierarchyRequestError", "The new child element contains the parent.")
 
       node(child).kind == :fragment ->
-        kids = node(child).kids
-        Enum.each(kids, &insert(parent, &1, ref))
+        insert_all(parent, node(child).kids, ref)
 
       true ->
         detach(child)
@@ -2262,13 +2324,92 @@ defmodule Browser.JS.DOM do
   end
 
   defp set_children(nid, kid_ids) do
-    for k <- node(nid).kids do
-      frames_leaving(k)
-      update_node(k, &%{&1 | parent: nil})
+    s = st()
+
+    if frame_below?(s, nid) do
+      for k <- node(nid).kids do
+        frames_leaving(k)
+        update_node(k, &%{&1 | parent: nil})
+      end
+    else
+      # (with no `<iframe>` below `nid`, `frames_leaving/1` has nothing to do: one pass)
+      kids = node_in(s.nodes, nid).kids
+      put_st(:lists.foldl(&put_node_in(&2, %{node_in(&2.nodes, &1) | parent: nil}), s, kids))
     end
 
     update_node(nid, &%{&1 | kids: []})
-    for k <- kid_ids, do: insert(nid, k, nil)
+    insert_all(nid, kid_ids, nil)
+  end
+
+  # Puts the nodes `ids` into `parent` before `ref` (nil: at the end), as `insert/3` of each
+  # node in turn. When `ids` are all the kids of a fragment (as `innerHTML` and
+  # `insertAdjacentHTML` make), and the moves can not load a frame, upgrade a custom element
+  # or move a node into another document, `move_kids/4` makes all the moves in one pass.
+  # Then a long list does not read and write the state for each node, and the list of the
+  # kids of `parent` is not copied again for each node.
+  defp insert_all(parent, ids, ref) do
+    case move_from(st(), parent, ids, ref) do
+      nil -> Enum.each(ids, &insert(parent, &1, ref))
+      frag -> move_kids(frag, parent, ids, ref)
+    end
+  end
+
+  # The fragment whose kids are `ids`, when `insert_all/3` can move them in one pass; else nil.
+  # For each node, `insert/3` then does not throw (the fragment is not `parent` and not above
+  # it), `adopt/2` has nothing to do (the node has the document of `parent`), and `connect/1`
+  # has nothing to do (no `<iframe>` is below the fragment, and no custom element can be
+  # upgraded or connected).
+  defp move_from(_s, _parent, [], _ref), do: nil
+
+  defp move_from(s, parent, [k | _] = ids, ref) do
+    nodes = s.nodes
+
+    with %{^k => %{parent: frag}} when frag != nil <- nodes,
+         %{^frag => %{kind: :fragment, kids: ^ids}, ^parent => %{doc: doc}} <- nodes,
+         true <- ref == nil or not match?(%{^ref => %{parent: ^frag}}, nodes),
+         true <- Enum.all?(ids, fn k -> match?(%{^k => %{doc: ^doc}}, nodes) end),
+         false <- frag == parent or frag in ancestors(parent),
+         false <- frame_below?(s, frag),
+         true <- s.ce == %{} or not connected?(parent) do
+      frag
+    else
+      _ -> nil
+    end
+  end
+
+  # True when an `<iframe>` is below `nid` (see `below?/2`). A page has few of them.
+  defp frame_below?(s, nid),
+    do: map_size(s.iframes) > 0 and Enum.any?(Map.keys(s.iframes), &below?(&1, nid))
+
+  # The moves of `insert_all/3` in one pass. The result is the same as `insert/3` of each node:
+  # the node leaves the fragment and goes into `parent`, with the same count of writes (the
+  # fragment, the node two times and `parent`: `rev`). Its attributes do not change, and it
+  # has a parent before and after, so the indexes do not change.
+  defp move_kids(frag, parent, ids, ref) do
+    s = st()
+    p = with_classes(Map.fetch!(s.nodes, parent))
+    f = Map.fetch!(s.nodes, frag)
+
+    kids =
+      case ref && Enum.find_index(p.kids, &(&1 == ref)) do
+        nil ->
+          p.kids ++ ids
+
+        i ->
+          {before, rest} = Enum.split(p.kids, i)
+          before ++ ids ++ rest
+      end
+
+    nodes =
+      :lists.foldl(
+        fn k, nodes -> %{nodes | k => %{Map.fetch!(nodes, k) | parent: parent}} end,
+        s.nodes,
+        ids
+      )
+
+    nodes = %{nodes | frag => %{f | kids: []}, parent => %{p | kids: kids}}
+    s = %{s | nodes: nodes, rev: s.rev + 4 * length(ids)}
+    put_st(s |> changed(f.doc) |> changed(p.doc))
   end
 
   defp set_text(nid, text) do
@@ -2306,10 +2447,18 @@ defmodule Browser.JS.DOM do
     copy
   end
 
+  # The nodes of `html` as the kids of a new fragment: gives their ids. The nodes are made with
+  # the fragment as their parent, in one pass (`build_list/3`). The result is the same as
+  # `insert/3` of each new node into the fragment: two writes for each node (`rev`), and
+  # nothing else to do for a fragment that is not in a document.
   defp parse_fragment(html) do
     frag = new_node(%{kind: :fragment})
-    for raw <- Browser.HTML.parse(html, comments: true), do: insert(frag, build(raw, nil), nil)
-    node(frag).kids
+    raws = Browser.HTML.parse(html, comments: true)
+    {ids, s} = build_list(st(), raws, frag)
+    f = Map.fetch!(s.nodes, frag)
+    s = %{s | nodes: Map.put(s.nodes, frag, %{f | kids: ids}), rev: s.rev + 2 * length(ids)}
+    put_st(if ids == [], do: s, else: changed(s, f.doc))
+    ids
   end
 
   defp set_attr(nid, name, value) do
@@ -3052,7 +3201,7 @@ defmodule Browser.JS.DOM do
       p ->
         ref = elem(siblings(nid), 1) |> List.first()
         detach(nid)
-        for k <- new_ids, do: insert(p, k, ref)
+        insert_all(p, new_ids, ref)
     end
   end
 
@@ -3553,10 +3702,10 @@ defmodule Browser.JS.DOM do
   defp build_complex([{:compound, s} | rest], comb, acc),
     do: build_complex(rest, " ", [{comb, parse_compound(s)} | acc])
 
-  @compound_re ~r/(\*|[a-zA-Z][\w-]*)|#([\w-]+)|\.([\w-]+)|\[([^\]]*)\]|:([\w-]+)(\((?:[^()]|\([^()]*\))*\))?/
-
   defp parse_compound(s) do
-    @compound_re
+    re(
+      ~r/(\*|[a-zA-Z][\w-]*)|#([\w-]+)|\.([\w-]+)|\[([^\]]*)\]|:([\w-]+)(\((?:[^()]|\([^()]*\))*\))?/
+    )
     |> Regex.scan(s)
     |> Enum.map(fn
       [_, tag] when tag != "" -> {:tag, Str.downcase(tag)}
@@ -3571,7 +3720,9 @@ defmodule Browser.JS.DOM do
 
   defp parse_attr(s) do
     case Regex.run(
-           ~r/^\s*([\w:-]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]*))\s*(i)?)?\s*$/,
+           re(
+             ~r/^\s*([\w:-]+)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]*))\s*(i)?)?\s*$/
+           ),
            s
          ) do
       nil ->
@@ -3741,7 +3892,7 @@ defmodule Browser.JS.DOM do
   defp nth_match(n, arg, from_end?, same_type?) do
     {anb, of_sel} =
       memo({:nth, arg}, fn ->
-        case String.split(arg || "", ~r/\s+of\s+/, parts: 2) do
+        case String.split(arg || "", re(~r/\s+of\s+/), parts: 2) do
           [f, sel] -> {parse_anb(f), parse_selectors(sel)}
           [f] -> {parse_anb(f), nil}
         end
@@ -3804,7 +3955,7 @@ defmodule Browser.JS.DOM do
   end
 
   defp parse_anb(f) do
-    f = f |> Str.downcase() |> String.replace(~r/\s+/, "")
+    f = f |> Str.downcase() |> String.replace(re(~r/\s+/), "")
 
     case f do
       "odd" ->
@@ -3814,7 +3965,7 @@ defmodule Browser.JS.DOM do
         {2, 0}
 
       _ ->
-        case Regex.run(~r/^([+-]?\d*)n([+-]\d+)?$/, f) do
+        case Regex.run(re(~r/^([+-]?\d*)n([+-]\d+)?$/), f) do
           [_, a] ->
             {anb_coef(a), 0}
 
@@ -3836,7 +3987,7 @@ defmodule Browser.JS.DOM do
 
   defp attr_match(nil, _v, _), do: true
   defp attr_match("=", v, val), do: v == val
-  defp attr_match("~=", v, val), do: val in String.split(v)
+  defp attr_match("~=", v, val), do: val in split_words(v)
   defp attr_match("|=", v, val), do: v == val or String.starts_with?(v, val <> "-")
   defp attr_match("^=", v, val), do: val != "" and String.starts_with?(v, val)
   defp attr_match("$=", v, val), do: val != "" and String.ends_with?(v, val)
@@ -4188,10 +4339,16 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # (scripts read `location` again and again, and `URI.parse/1` runs two regexes that load their
+  # patterns again on each call: so the parts of each URL are kept)
   defp url_parts do
-    uri = URI.parse(st().url)
-    path = if uri.path in [nil, ""], do: "/", else: uri.path
-    %{uri: uri, path: path, query: uri.query, fragment: uri.fragment}
+    url = st().url
+
+    memo({:url_parts, url}, fn ->
+      uri = URI.parse(url)
+      path = if uri.path in [nil, ""], do: "/", else: uri.path
+      %{uri: uri, path: path, query: uri.query, fragment: uri.fragment}
+    end)
   end
 
   defp location_get(key) do
@@ -6360,7 +6517,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "getElementsByClassName", fn this, args ->
-      wanted = String.split(to_str(arg(args, 0)))
+      wanted = split_words(to_str(arg(args, 0)))
 
       nodes_array(
         Enum.filter(elements(this_nid(this)), fn e -> Enum.all?(wanted, &(&1 in classes(e))) end)
@@ -6649,19 +6806,18 @@ defmodule Browser.JS.DOM do
 
     case position do
       "beforebegin" ->
-        if n.parent, do: Enum.each(ids, &insert(n.parent, &1, nid))
+        if n.parent, do: insert_all(n.parent, ids, nid)
 
       "afterbegin" ->
-        first = List.first(n.kids)
-        Enum.each(ids, &insert(nid, &1, first))
+        insert_all(nid, ids, List.first(n.kids))
 
       "beforeend" ->
-        Enum.each(ids, &insert(nid, &1, nil))
+        insert_all(nid, ids, nil)
 
       "afterend" ->
         if n.parent do
           ref = elem(siblings(nid), 1) |> List.first()
-          Enum.each(ids, &insert(n.parent, &1, ref))
+          insert_all(n.parent, ids, ref)
         end
 
       _ ->
@@ -6694,7 +6850,7 @@ defmodule Browser.JS.DOM do
     kids =
       buf
       |> Browser.HTML.parse_document()
-      |> Enum.map(&build(&1, doc))
+      |> build_all(doc)
 
     for k <- node(doc).kids, do: update_node(k, &%{&1 | parent: nil})
     update_node(doc, &%{&1 | kids: []})

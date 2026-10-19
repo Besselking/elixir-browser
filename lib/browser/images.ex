@@ -8,6 +8,8 @@ defmodule Browser.Images do
   can decode (PNG, JPEG, GIF, BMP, or WebP when wx reads it), converting other formats with macOS's `sips`.
   """
 
+  import Browser.Re, only: [re: 1]
+
   alias Browser.Fetch
 
   @max_bytes 12 * 1024 * 1024
@@ -79,9 +81,9 @@ defmodule Browser.Images do
   defp first_candidate(srcset) do
     srcset
     |> String.trim()
-    |> String.split(~r/,\s+/, parts: 2)
+    |> String.split(re(~r/,\s+/), parts: 2)
     |> hd()
-    |> String.split(~r/\s+/, parts: 2)
+    |> String.split(re(~r/\s+/), parts: 2)
     |> hd()
   end
 
@@ -128,7 +130,7 @@ defmodule Browser.Images do
     case String.split(rest, ",", parts: 2) do
       [meta, data] ->
         if String.ends_with?(String.downcase(meta), ";base64") do
-          case Base.decode64(String.replace(URI.decode(data), ~r/\s/, ""), padding: false) do
+          case Base.decode64(String.replace(URI.decode(data), re(~r/\s/), ""), padding: false) do
             {:ok, bytes} -> {:ok, bytes}
             :error -> {:error, "bad base64"}
           end

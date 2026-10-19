@@ -8,6 +8,8 @@ defmodule Browser.JS.RegExpSyntax do
   `{:re_error, message}` where a pattern is not allowed.
   """
 
+  import Browser.Re, only: [re: 1]
+
   @syntax_chars ~c"^$\\.*+?()[]{}|/"
 
   @doc "Validates `source`; `u?` is true for the `u` flag (and `v`)."
@@ -443,7 +445,7 @@ defmodule Browser.JS.RegExpSyntax do
   end
 
   defp unicode_escape(<<h::binary-size(4), rest::binary>>, ctx) do
-    if Regex.match?(~r/^[0-9a-fA-F]{4}$/, h),
+    if Regex.match?(re(~r/^[0-9a-fA-F]{4}$/), h),
       do: rest,
       else: if(ctx.u, do: fail("Invalid Unicode escape"), else: h <> rest)
   end
@@ -454,7 +456,7 @@ defmodule Browser.JS.RegExpSyntax do
   defp property("{" <> rest) do
     case String.split(rest, "}", parts: 2) do
       [body, after_brace] ->
-        if Regex.match?(~r/^[A-Za-z0-9_]+(=[A-Za-z0-9_]+)?$/, body),
+        if Regex.match?(re(~r/^[A-Za-z0-9_]+(=[A-Za-z0-9_]+)?$/), body),
           do: after_brace,
           else: fail("Invalid property name")
 

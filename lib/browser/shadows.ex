@@ -9,6 +9,7 @@ defmodule Browser.Shadows do
   """
 
   alias Browser.{Backgrounds, Color}
+  import Browser.Re, only: [re: 1]
 
   @type shadow :: %{
           dx: float,
@@ -71,10 +72,10 @@ defmodule Browser.Shadows do
   end
 
   defp tokens(layer),
-    do: ~r/[\w-]*\((?:[^()]|\([^()]*\))*\)|\S+/ |> Regex.scan(layer) |> List.flatten()
+    do: re(~r/[\w-]*\((?:[^()]|\([^()]*\))*\)|\S+/) |> Regex.scan(layer) |> List.flatten()
 
   defp length_px(tok, fs) do
-    case Regex.run(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))(px|em|rem|pt|cm|mm|in)?\z/, tok) do
+    case Regex.run(re(~r/\A([+-]?(?:\d+\.?\d*|\.\d+))(px|em|rem|pt|cm|mm|in)?\z/), tok) do
       [_, n, unit] -> number(n) * scale(unit, fs)
       [_, n] -> if number(n) == 0.0, do: 0.0
       _ -> nil
@@ -91,7 +92,7 @@ defmodule Browser.Shadows do
 
   defp number(n) do
     n = if String.starts_with?(n, ["+", "-"]), do: n, else: "+" <> n
-    n = Regex.replace(~r/\A([+-])\./, n, "\\g{1}0.")
+    n = Regex.replace(re(~r/\A([+-])\./), n, "\\g{1}0.")
     n = if String.contains?(n, "."), do: n, else: n <> ".0"
     n |> String.trim_leading("+") |> String.to_float()
   end

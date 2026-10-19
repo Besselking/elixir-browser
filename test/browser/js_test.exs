@@ -725,6 +725,66 @@ defmodule Browser.JSTest do
       end
     end
 
+    # The lexer finds an escape from the sizes of the name and of its source text.
+    test "a keyword with an escape, and a name at the end of the text" do
+      assert tokens(~S"\u{69}f i\u{0066} \u0069\u0066 if") ==
+               [{:eid, "if"}, {:eid, "if"}, {:eid, "if"}, {:id, "if"}]
+
+      assert tokens(~S"\u{6C}et l\u0065t let") == [{:id, "let"}, {:id, "let"}, {:id, "let"}]
+      assert tokens("a\u00e9") == [{:id, "a\u00e9"}]
+      assert tokens("abc") == [{:id, "abc"}]
+      assert tokens(~S"a\u{10000}") == [{:id, "a\u{10000}"}]
+
+      # an escaped `await` is marked for the parser, a plain one is not
+      for {src, mark} <- [{~S"\u0061wait", true}, {~S"aw\u{61}it", true}, {"await", nil}] do
+        Process.delete(:lex_esc_await)
+        assert tokens(src) == [{:id, "await"}]
+        assert Process.get(:lex_esc_await) == mark
+      end
+
+      # an escaped `let` carries its mark, a plain one does not
+      assert {:ok, [{:id, "let", esc}, _]} = Browser.JS.Lexer.tokenize(~S"l\u0065t")
+      assert {:ok, [{:id, "let", false}, _]} = Browser.JS.Lexer.tokenize("let")
+      assert esc != false
+    end
+
+    # ZWNJ (U+200C) and ZWJ (U+200D) go on in a name, but no name starts with them.
+    test "a name cannot start with ZWNJ or ZWJ, as a character or as an escape" do
+      for src <- ["\u200C", "\u200D", "\u200Cx", "\u200Dx", ~S"\u200C", ~S"\u{200D}x", "#\u200C"] do
+        assert {:error, _} = Browser.JS.Lexer.tokenize(src), inspect(src)
+      end
+
+      assert tokens("a\u200C a\u200Db") == [{:id, "a\u200C"}, {:id, "a\u200Db"}]
+      # (other characters that start with the same bytes are a name start)
+      assert tokens("\u2118x") == [{:id, "\u2118x"}]
+    end
+
+    # A template's `${ }` is lexed by a nested call: the table of token offsets is the one of
+    # the whole text, so the text of a function is right before, in and after a template.
+    # (a function inside a `${ }` has no text of its own: its tokens are not in the table)
+    test "the text of a function next to templates with nested substitutions" do
+      assert js(
+               "var t = `a${ `b${ 1 + 1 }c` }d`; function f ( ) { return `${ `${ 2 }` }` } " <>
+                 "f.toString() + '|' + t"
+             ) == "function f ( ) { return `${ `${ 2 }` }` }|ab2cd"
+
+      assert js("`${ `${ 1 }` }`; var h = function ( ) { }; h.toString()") == "function ( ) { }"
+    end
+
+    # A byte that is not UTF-8 in a `${ }` is part of its text, as it is outside a template
+    # (it was a FunctionClauseError).
+    test "a byte that is not UTF-8 in a template substitution is no crash" do
+      for src <- [<<"`${", 0xFF, "}`">>, <<"`${", 0xE2, 0x80, "}`">>] do
+        assert {:ok, [{:tmpl, ["", {:expr, [{:id, _, _}, _]} | _], _}, _]} =
+                 Browser.JS.Lexer.tokenize(src)
+      end
+
+      assert {:error, _} = Browser.JS.Lexer.tokenize(<<"`${a", 0xFF>>)
+
+      assert js(~S|try { eval("`${" + String.fromCharCode(0xD800) + "}`") } catch (e) { e.name }|) ==
+               js(~S|try { eval(String.fromCharCode(0xD800)) } catch (e) { e.name }|)
+    end
+
     # A run of printable ASCII characters goes into a string as one piece.
     test "a string with quotes, escapes and line terminators" do
       assert tokens(~S|'abc' "a'b" 'a"b' 'a\'b' "a\"b"|) ==

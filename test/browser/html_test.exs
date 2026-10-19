@@ -80,6 +80,23 @@ defmodule Browser.HTMLTest do
     assert [{:element, "script", _, _}, {:text, "x"}] = nodes
   end
 
+  # each raw text element ends only at its own close tag, in any case
+  test "a script ends at its own close tag only, and so does a style" do
+    assert [{:element, "script", _, [{:text, "a = '</style>'"}]}, {:text, "x"}] =
+             HTML.parse("<script>a = '</style>'</script>x")
+
+    assert [{:element, "script", _, [{:text, "b"}]}, {:text, "y"}] =
+             HTML.parse("<script>b</SCRIPT >y")
+
+    assert [{:element, "style", _, _}, {:text, "z"}] =
+             HTML.parse("<style>/* </script> */ p { color: red }</Style\n>z")
+
+    [{:element, "style", _, style_kids}, _] =
+      HTML.parse("<style>/* </script> */ p { color: red }</Style\n>z")
+
+    assert inspect(style_kids) =~ "</script>"
+  end
+
   test "stray close tags are ignored" do
     assert [{:text, "a"}, {:text, "b"}] = HTML.parse("a</div>b")
   end

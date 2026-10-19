@@ -25,6 +25,25 @@ defmodule Browser.JSStrTest do
     s |> Str.units() |> Enum.drop(from) |> Enum.take(count) |> Str.from_units()
   end
 
+  # `ascii?/1` takes seven bytes at a time, then one at a time: a byte above 127 at any place
+  # must be seen, in a short string and in a long one (which is kept for the next call)
+  test "ascii? sees a byte above 127 at every place" do
+    for len <- Enum.concat(0..22, [63, 64, 65, 70, 71, 72]),
+        pos <- -1..(len - 1)//1,
+        b <- [0x80, 0xC3, 0xFF] do
+      s =
+        for i <- 0..(len - 1)//1,
+            into: <<>>,
+            do: if(i == pos, do: <<b>>, else: <<?a + rem(i, 26)>>)
+
+      assert Str.ascii?(s) == (pos == -1), inspect({len, pos, b})
+    end
+
+    # 0x7F is the last ASCII byte
+    assert Str.ascii?(String.duplicate("\x7F", 15))
+    assert Str.ascii?("")
+  end
+
   test "length, byte offsets and slices of long strings agree with the code unit list" do
     for seed <- 1..6 do
       s = random_string(seed, 700 * seed)
