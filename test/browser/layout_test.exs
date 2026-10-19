@@ -8598,8 +8598,8 @@ defmodule Browser.LayoutNestedBoxesTest do
       assert %{h: 22} = box.(5)
       # (the margins are outside the line's height)
       assert %{y: 15, h: 290} = box.(6)
-      # (the word is measured by the one layout of its item and by the measure of its width)
-      assert measured == 2
+      # (the one layout of its item measures the word one time)
+      assert measured == 1
     end
 
     test "a column item with no height of its own is laid out one time" do
@@ -8616,8 +8616,8 @@ defmodule Browser.LayoutNestedBoxesTest do
 
       assert %{h: 22} = Enum.find(items, &(&1.type == :rect and &1.color == {16, 0, 0}))
       assert %{h: 50} = Enum.find(items, &(&1.type == :rect and &1.color == {32, 0, 0}))
-      # (one measure is the layout of the item, one is for the widths)
-      assert measured == 2
+      # (the one layout of the item measures the word one time)
+      assert measured == 1
     end
   end
 
