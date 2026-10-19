@@ -4,7 +4,10 @@ defmodule Browser.JS.GC do
 
   It only runs between timers (`Browser.JS.Builtins.run_next_timer/2`), when no script is on
   the stack, so everything alive is reachable from the process dictionary: the global scope,
-  prototypes, timers, microtasks, modules, the DOM's bookkeeping and so on.
+  prototypes, timers, microtasks, modules, the DOM's bookkeeping and so on. A sync `await`
+  (a top-level `await`, `Browser.JS.Promise.await/1`) runs timers inside the script, and
+  the terms of that script on the Elixir stack are not roots. So the collector does not run
+  after these timers (`hold/1`).
 
   The walk is conservative where it does not know the form of a term: it follows every
   `{:obj, id}` and every integer that is a heap id, in any tuple, list, map and in the
@@ -92,7 +95,26 @@ defmodule Browser.JS.GC do
 
       at ->
         tune_young_heap()
-        if Browser.JS.Interp.heap_size() > at, do: collect(), else: :ok
+
+        # (a script is on the stack, see `hold/1`)
+        if Browser.JS.Interp.heap_size() > at and :erlang.get(:js_gc_hold) != true,
+          do: collect(),
+          else: :ok
+    end
+  end
+
+  @doc """
+  Runs `fun` with the collector held: `maybe_collect/0` does not collect until `fun`
+  returns. A timer that a sync `await` runs (`Browser.JS.Promise.await/1`) runs inside a
+  script, and what that script holds on the Elixir stack is not a root.
+  """
+  def hold(fun) do
+    old = Process.put(:js_gc_hold, true)
+
+    try do
+      fun.()
+    after
+      if old != true, do: Process.delete(:js_gc_hold)
     end
   end
 

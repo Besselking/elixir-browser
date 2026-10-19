@@ -205,7 +205,9 @@ defmodule Browser.JS.Promise do
         throw({:js_error, e})
 
       %{state: :pending} ->
-        if Browser.JS.Builtins.run_next_timer(fn _ -> :ok end),
+        # (the timer runs inside the script, so the collector must not run after it, see
+        # `Browser.JS.GC.hold/1`)
+        if Browser.JS.GC.hold(fn -> Browser.JS.Builtins.run_next_timer(fn _ -> :ok end) end),
           do: settle_loop(p),
           else: throw_error("Error", "await: the promise never settles")
     end

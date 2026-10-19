@@ -521,6 +521,35 @@ defmodule Browser.JSGCTest do
     |> Task.await(30_000)
   end
 
+  # A top-level `await` waits for its promise inside the script: the timers run in the
+  # script (`Browser.JS.Promise.await/1`). What the script holds on the Elixir stack then
+  # (here the first element of an array literal that is not built yet) is not a root, so
+  # the timers that run there do not collect. The timers after the script do.
+  test "a timer that a top-level await runs does not collect" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      Process.put(:js_gc_at, 0)
+
+      {:ok, p} =
+        Parser.parse(
+          """
+          globalThis.out = [{ k: 'tmp' }, await new Promise(function (r) { setTimeout(r, 1) })][0].k;
+          setTimeout(function () { out += '!' }, 1);
+          """,
+          module: true
+        )
+
+      Interp.run_program(p, true)
+      assert Process.get(:js_freed) == 0
+      Builtins.run_timers(fn v -> throw({:uncaught, v}) end)
+      assert Process.get(:js_freed) > 0
+      {:ok, q} = Parser.parse("out")
+      assert Interp.run_program(q) == "tmp!"
+    end)
+    |> Task.await(30_000)
+  end
+
   test "does nothing unless enabled" do
     Task.async(fn ->
       Interp.init(1000)
