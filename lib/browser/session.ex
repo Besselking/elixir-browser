@@ -1906,8 +1906,10 @@ defmodule Browser.Session do
         changed = changed_controls(before, state.page.form_state)
 
         # a script that cancels the click undoes the change: `input` and `change` do not fire
+        # (nor for a radio button that was checked already: it did not change)
         case js_event(state, {:control, cid}, "click") do
           {state, true} -> undo_toggle(state, before, changed)
+          {state, false} when changed == [] -> state
           {state, false} -> js_notify(state, cid, ["input", "change"])
         end
 
@@ -1922,7 +1924,8 @@ defmodule Browser.Session do
         do: cid
   end
 
-  # the controls in `cids` get the state they had in `before`
+  # The controls in `cids` get the state they had in `before`. The scripts get it too: the click
+  # gave them the changed state, and a tree that they changed in the click has that state.
   defp undo_toggle(%{page: %{form_state: now}} = state, before, cids) do
     restored =
       Enum.reduce(cids, now, fn cid, fs ->
@@ -1932,10 +1935,17 @@ defmodule Browser.Session do
         end
       end)
 
-    state |> set_form_state(restored) |> relayout()
+    state |> set_form_state(restored) |> js_controls() |> relayout()
   end
 
   defp undo_toggle(state, _before, _cids), do: state
+
+  defp js_controls(%{js: nil} = state), do: state
+
+  defp js_controls(state) do
+    reply = Browser.JS.Runtime.snapshot(js(state), controls_snapshot(state))
+    apply_js(state, reply)
+  end
 
   defp step_option(state, control, delta) do
     state.page.form_state
