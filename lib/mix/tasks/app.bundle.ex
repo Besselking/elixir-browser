@@ -209,8 +209,11 @@ defmodule Mix.Tasks.App.Bundle do
     export LANG
     # the heap blocks of the VM come from one super carrier that gives freed memory back to the
     # system: without it the segment caches keep up to 1.5 GB of freed heap blocks of the
-    # script process (Speedometer: peak RSS -24 %, run time about +1 %)
-    export ERL_FLAGS="+MMscs 2048 +MMscrpm false ${ERL_FLAGS:-}"
+    # script process (Speedometer: peak RSS -24 %, run time about +1 %). A heap block of up to
+    # 256 MB goes into a multiblock carrier: the young heap of the script process (about
+    # 120 MB) then stays mapped from one minor collection to the next, and the system does not
+    # fill each page again (Speedometer: run time -13 %, the same peak RSS)
+    export ERL_FLAGS="+MMscs 2048 +MMscrpm false +MHsbct 262144 +MHlmbcs 1048576 ${ERL_FLAGS:-}"
     exec "$DIR/bin/browser" start
     """)
 

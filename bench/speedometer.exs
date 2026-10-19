@@ -4,6 +4,8 @@
 # (`python3 bench/serve.py DIR 8765`), not with `python3 -m http.server`: the listen backlog of
 # that server is 5, and a burst of connections then adds 1 s to a page change.
 # SUITES is a comma separated list of suite names.
+# The app bundle starts the VM with memory flags (see the README). To measure as the app runs,
+# set the same flags: ERL_FLAGS="+MMscs 2048 +MMscrpm false +MHsbct 262144 +MHlmbcs 1048576".
 # Prints console lines, the time until the run ends and a `MRED` line with the exact
 # reductions of the whole VM and of the run phase.
 alias Browser.{Fetch, Page}
