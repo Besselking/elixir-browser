@@ -1230,6 +1230,73 @@ defmodule Browser.JS.DOM do
     {n.id, %{s | nodes: Map.put(s.nodes, n.id, n)}}
   end
 
+  # `build_list/3` for a parsed tree with no `<template>` (`innerHTML` of a list). The result
+  # is the same: the same ids, nodes, indexes and counts. But the large state map and the
+  # large node table are not written for each node. The fields that change are kept in a
+  # small tuple, the new nodes go into a list, and at the end one merge puts them into the
+  # node table. This makes less garbage for each node.
+  defp build_list_fast(s, raws, parent) do
+    acc = {s.next, s.rev, s.ids, s.aidx, s.iframes, s.doc, []}
+    {ids, {next, rev, ids_idx, aidx, iframes, _doc, new}} = fast_list(raws, parent, acc)
+
+    s = %{
+      s
+      | next: next,
+        rev: rev,
+        ids: ids_idx,
+        aidx: aidx,
+        iframes: iframes,
+        nodes: :maps.merge(s.nodes, :maps.from_list(new))
+    }
+
+    {ids, s}
+  end
+
+  defp fast_list(raws, parent, acc), do: Enum.map_reduce(raws, acc, &fast_node(&1, parent, &2))
+
+  defp fast_node({:text, t}, parent, {next, rev, ids, aidx, ifr, doc, new}) do
+    n = %{blank_node(next, doc) | kind: :text, text: t, parent: parent}
+    {next, {next + 1, rev + 1, ids, aidx, ifr, doc, [{next, n} | new]}}
+  end
+
+  defp fast_node({:comment, t}, parent, {next, rev, ids, aidx, ifr, doc, new}) do
+    n = %{blank_node(next, doc) | kind: :comment, text: t, parent: parent}
+    {next, {next + 1, rev + 1, ids, aidx, ifr, doc, [{next, n} | new]}}
+  end
+
+  defp fast_node({:element, tag, attrs, kids}, parent, {id, rev, ids, aidx, ifr, doc, new}) do
+    # (the names of `@internal_attrs` start with `@`; most elements have none)
+    {internal, visible} =
+      if Enum.any?(attrs, &match?({"@" <> _, _}, &1)),
+        do: Enum.split_with(attrs, fn {k, _} -> k in @internal_attrs end),
+        else: {[], attrs}
+
+    n = %{blank_node(id, doc) | tag: tag, attrs: visible, internal: internal, parent: parent}
+
+    # (as `index_node/2`)
+    ifr =
+      if tag == "iframe" do
+        Process.put(:dom_has_iframe, true)
+        Map.put(ifr, id, true)
+      else
+        ifr
+      end
+
+    n = with_classes(n)
+    ids = reindex(ids, id, nil, n)
+    aidx = reindex_attrs(aidx, id, nil, n)
+
+    {kid_ids, {next, rev, ids, aidx, ifr, doc, new}} =
+      fast_list(kids, id, {id + 1, rev + 1, ids, aidx, ifr, doc, new})
+
+    {id, {next, rev + 1, ids, aidx, ifr, doc, [{id, %{n | kids: kid_ids}} | new]}}
+  end
+
+  defp has_template?(raws) when is_list(raws), do: Enum.any?(raws, &has_template?/1)
+  defp has_template?({:element, "template", _, _}), do: true
+  defp has_template?({:element, _, _, kids}), do: has_template?(kids)
+  defp has_template?(_), do: false
+
   # the fragment that holds a template's content (made when a script created the template)
   defp template_content(nid) do
     case node(nid).content do
@@ -2120,14 +2187,21 @@ defmodule Browser.JS.DOM do
     Enum.any?(ancestors(nid), fn a -> node(a).kind == :element and node(a).tag == "template" end)
   end
 
-  defp elements(nid), do: walk_elements(node(nid).kids, []) |> :lists.reverse()
+  defp elements(nid), do: elements_tagged(nid, nil)
 
-  defp walk_elements([], acc), do: acc
+  # The elements below `nid` in document order, with the tag `tag` (nil: all). The node table
+  # is read one time for the walk.
+  defp elements_tagged(nid, tag) do
+    nodes = st().nodes
+    walk_in(nodes, node_in(nodes, nid).kids, tag, []) |> :lists.reverse()
+  end
 
-  defp walk_elements([k | rest], acc) do
-    n = node(k)
-    acc = if n.kind == :element, do: [k | acc], else: acc
-    walk_elements(rest, walk_elements(n.kids, acc))
+  defp walk_in(_nodes, [], _tag, acc), do: acc
+
+  defp walk_in(nodes, [k | rest], tag, acc) do
+    n = node_in(nodes, k)
+    acc = if n.kind == :element and (tag == nil or n.tag == tag), do: [k | acc], else: acc
+    walk_in(nodes, rest, tag, walk_in(nodes, n.kids, tag, acc))
   end
 
   # the first element below `nid` in document order that `pred` accepts, without building the
@@ -2434,11 +2508,11 @@ defmodule Browser.JS.DOM do
           before ++ ids ++ rest
       end
 
+    # (one merge writes the large table one time, in place of a write for each node)
     nodes =
-      :lists.foldl(
-        fn k, nodes -> %{nodes | k => %{Map.fetch!(nodes, k) | parent: parent}} end,
+      :maps.merge(
         s.nodes,
-        ids
+        :maps.from_list(for k <- ids, do: {k, %{Map.fetch!(s.nodes, k) | parent: parent}})
       )
 
     nodes = %{nodes | frag => %{f | kids: []}, parent => %{p | kids: kids}}
@@ -2488,7 +2562,12 @@ defmodule Browser.JS.DOM do
   defp parse_fragment(html) do
     frag = new_node(%{kind: :fragment})
     raws = Browser.HTML.parse(html, comments: true)
-    {ids, s} = build_list(st(), raws, frag)
+
+    {ids, s} =
+      if has_template?(raws),
+        do: build_list(st(), raws, frag),
+        else: build_list_fast(st(), raws, frag)
+
     f = Map.fetch!(s.nodes, frag)
     s = %{s | nodes: Map.put(s.nodes, frag, %{f | kids: ids}), rev: s.rev + 2 * length(ids)}
     put_st(if ids == [], do: s, else: changed(s, f.doc))
@@ -2559,16 +2638,7 @@ defmodule Browser.JS.DOM do
         w
 
       _ ->
-        proto =
-          case node(nid).kind do
-            :text -> proto({:dom, :text})
-            :comment -> proto({:dom, :text})
-            :document -> proto({:dom, :document})
-            :fragment -> proto({:dom, :node})
-            :element -> proto({:dom, {:tag, node(nid).tag}}) || proto({:dom, :element})
-          end
-
-        w = new_host(__MODULE__, nid, proto)
+        w = new_host(__MODULE__, nid, wrapper_proto(node(nid)))
         put_st(%{st() | wrappers: Map.put(st().wrappers, nid, w)})
         w
     end
@@ -2590,7 +2660,37 @@ defmodule Browser.JS.DOM do
 
   defp arg(args, i), do: Enum.at(args, i, :undefined)
   defp float(n), do: n * 1.0
-  defp nodes_array(ids), do: new_array(Enum.map(ids, &wrap/1))
+  defp nodes_array(ids), do: new_array(wrap_all(ids))
+
+  # `wrap/1` of each node of `ids`: the state is read and written one time for the list
+  defp wrap_all(ids) do
+    s = st()
+
+    {ws, wrappers} =
+      Enum.map_reduce(ids, s.wrappers, fn nid, wrappers ->
+        case wrappers do
+          %{^nid => w} ->
+            {w, wrappers}
+
+          _ ->
+            w = new_host(__MODULE__, nid, wrapper_proto(node_in(s.nodes, nid)))
+            {w, Map.put(wrappers, nid, w)}
+        end
+      end)
+
+    if wrappers != s.wrappers, do: put_st(%{st() | wrappers: wrappers})
+    ws
+  end
+
+  defp wrapper_proto(n) do
+    case n.kind do
+      :text -> proto({:dom, :text})
+      :comment -> proto({:dom, :text})
+      :document -> proto({:dom, :document})
+      :fragment -> proto({:dom, :node})
+      :element -> proto({:dom, {:tag, n.tag}}) || proto({:dom, :element})
+    end
+  end
 
   # ── host protocol: reads ───────────────────────────────────
 
@@ -2617,7 +2717,36 @@ defmodule Browser.JS.DOM do
 
   defp realm_free?(_data, _key), do: false
 
+  # `realm_free?/2` for the node `n` that the caller has read already
+  defp realm_free_node?(%{kind: kind}, key) when key in @realm_free_reads,
+    do: kind != :document
+
+  defp realm_free_node?(%{kind: :element, tag: "canvas"}, key) when key in ["width", "height"],
+    do: true
+
+  defp realm_free_node?(_n, _key), do: false
+
   @doc false
+  # A read of a node is the most frequent read (jQuery reads `nodeType` and its data key of
+  # each element of a list). The node is read from the table one time, and the realm changes
+  # only when the node is in the document of an other realm (`in_realm/2` does nothing for
+  # the running document and for a document that is not a realm).
+  def host_get(nid, key, self) when is_integer(nid) do
+    s = st()
+
+    case s.nodes do
+      %{^nid => n} ->
+        doc = n.doc
+
+        if doc == s.doc or not is_map_key(s.realms, doc) or realm_free_node?(n, key),
+          do: node_get(n, key, self),
+          else: in_realm(doc, fn -> hget(nid, key, self) end)
+
+      _ ->
+        hget(nid, key, self)
+    end
+  end
+
   def host_get(data, key, self) do
     if map_size(st().realms) == 0 or realm_free?(data, key) do
       hget(data, key, self)
@@ -6903,7 +7032,8 @@ defmodule Browser.JS.DOM do
 
     def_fn(p, "getElementsByTagName", fn this, args ->
       tag = Str.downcase(to_str(arg(args, 0)))
-      nodes_array(Enum.filter(elements(this_nid(this)), &(tag == "*" or node(&1).tag == tag)))
+
+      nodes_array(elements_tagged(this_nid(this), if(tag == "*", do: nil, else: tag)))
     end)
 
     def_fn(p, "getElementsByClassName", fn this, args ->
