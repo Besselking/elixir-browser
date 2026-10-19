@@ -2556,9 +2556,10 @@ defmodule Browser.JS.DOM do
   end
 
   # The nodes of `html` as the kids of a new fragment: gives their ids. The nodes are made with
-  # the fragment as their parent, in one pass (`build_list/3`). The result is the same as
-  # `insert/3` of each new node into the fragment: two writes for each node (`rev`), and
-  # nothing else to do for a fragment that is not in a document.
+  # the fragment as their parent, in one pass (`build_list_fast/3`, or `build_list/3` when the
+  # HTML has a `<template>`). The result is the same as `insert/3` of each new node into the
+  # fragment: two writes for each node (`rev`), and nothing else to do for a fragment that is
+  # not in a document.
   defp parse_fragment(html) do
     frag = new_node(%{kind: :fragment})
     raws = Browser.HTML.parse(html, comments: true)
@@ -2705,26 +2706,13 @@ defmodule Browser.JS.DOM do
                        data length isConnected ownerDocument textContent tagName localName id
                        className classList style dataset value checked)
 
-  defp realm_free?(nid, key) when is_integer(nid) and key in @realm_free_reads,
-    do: node(nid).kind != :document
+  # True when the read `key` of the node `n` does not use the state of a realm
+  defp realm_free?(%{kind: kind}, key) when key in @realm_free_reads, do: kind != :document
 
-  defp realm_free?(nid, key) when is_integer(nid) and key in ["width", "height"] do
-    case node(nid) do
-      %{kind: :element, tag: "canvas"} -> true
-      _ -> false
-    end
-  end
-
-  defp realm_free?(_data, _key), do: false
-
-  # `realm_free?/2` for the node `n` that the caller has read already
-  defp realm_free_node?(%{kind: kind}, key) when key in @realm_free_reads,
-    do: kind != :document
-
-  defp realm_free_node?(%{kind: :element, tag: "canvas"}, key) when key in ["width", "height"],
+  defp realm_free?(%{kind: :element, tag: "canvas"}, key) when key in ["width", "height"],
     do: true
 
-  defp realm_free_node?(_n, _key), do: false
+  defp realm_free?(_n, _key), do: false
 
   @doc false
   # A read of a node is the most frequent read (jQuery reads `nodeType` and its data key of
@@ -2738,7 +2726,7 @@ defmodule Browser.JS.DOM do
       %{^nid => n} ->
         doc = n.doc
 
-        if doc == s.doc or not is_map_key(s.realms, doc) or realm_free_node?(n, key),
+        if doc == s.doc or not is_map_key(s.realms, doc) or realm_free?(n, key),
           do: node_get(n, key, self),
           else: in_realm(doc, fn -> hget(nid, key, self) end)
 
@@ -2747,8 +2735,9 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # (the other host objects: a list of classes, a style, the window, ...)
   def host_get(data, key, self) do
-    if map_size(st().realms) == 0 or realm_free?(data, key) do
+    if map_size(st().realms) == 0 do
       hget(data, key, self)
     else
       {doc, data} = split_realm(data)
