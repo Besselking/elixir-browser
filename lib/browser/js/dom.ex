@@ -3158,8 +3158,7 @@ defmodule Browser.JS.DOM do
         :ok
 
       "checked" ->
-        update_node(nid, &%{&1 | props: Map.put(&1.props, "checked", truthy(v))})
-        :ok
+        set_checked(nid, truthy(v))
 
       "open" ->
         cond do
@@ -3447,6 +3446,20 @@ defmodule Browser.JS.DOM do
   end
 
   # a pointer event also says where it is in the page and in the element it went to
+  # (an event of a script says where it is when its constructor was given a position)
+  defp pointer_coords(event, target, %{event: _}) do
+    if truthy(Interp.get(event, "__pos")) do
+      init = %{
+        "clientX" => Interp.get(event, "clientX"),
+        "clientY" => Interp.get(event, "clientY")
+      }
+
+      pointer_coords(event, target, init)
+    end
+
+    :ok
+  end
+
   defp pointer_coords(event, target, init) do
     with cx when is_number(cx) <- Map.get(init, "clientX"),
          cy when is_number(cy) <- Map.get(init, "clientY"),
@@ -3464,26 +3477,13 @@ defmodule Browser.JS.DOM do
     :ok
   end
 
+  # `init` may also hold `:event` (an event object of a script, which is dispatched itself),
+  # `:trusted` (false for an event that a script caused, as `click()`), `:class` (the event
+  # interface, else the one of the type) and `:activate` (true for a click that a script
+  # caused: it runs the activation behavior, see `activation_target/2`)
   defp do_dispatch(target, type, init) do
     bubbles = Map.get(init, :bubbles, true)
-    cancelable = Map.get(init, :cancelable, true)
-
-    event =
-      new_object(
-        [
-          {"type", type},
-          {"target", target_obj(target)},
-          {"currentTarget", :null},
-          {"defaultPrevented", false},
-          {"bubbles", bubbles},
-          {"cancelable", cancelable},
-          {"eventPhase", 0.0},
-          {"isTrusted", true},
-          {"timeStamp", Browser.JS.Builtins.perf_now()}
-        ] ++
-          for({k, v} <- init, is_binary(k), do: {k, v}),
-        proto({:dom, :event})
-      )
+    event = event_for(target, type, init, bubbles)
 
     pointer_coords(event, target, init)
 
@@ -3495,21 +3495,116 @@ defmodule Browser.JS.DOM do
         nid -> tree_path(nid, Map.get(init, :composed, true)) ++ [window_key_of(nid)]
       end
 
+    # (the element whose activation behavior a click runs, and what it changed before)
+    act =
+      if type == "click" and Map.get(init, :activate, false), do: activation_target(path, bubbles)
+
+    pre = if act, do: pre_activation(act)
+
     # capture: from the outermost down to the target's parent
     outer_first = path |> tl() |> Enum.reverse()
 
-    result =
+    try do
       catch_stop(fn ->
         Enum.each(outer_first, &fire(&1, event, :capture))
         fire(hd(path), event, :at_target)
         if bubbles, do: Enum.each(tl(path), &fire(&1, event, :bubble))
       end)
+    after
+      put(event, "currentTarget", :null)
+      put(event, "eventPhase", 0.0)
 
-    _ = result
-    put(event, "currentTarget", :null)
-    put(event, "eventPhase", 0.0)
-    if truthy(Interp.get(event, "defaultPrevented")), do: :prevented, else: :ok
+      if Map.has_key?(init, :event) do
+        put_hidden(event, "__dispatching", false)
+        put_hidden(event, "__stop", false)
+        put_hidden(event, "__stop_immediate", false)
+      end
+    end
+
+    prevented? = truthy(Interp.get(event, "defaultPrevented"))
+
+    cond do
+      act == nil -> :ok
+      prevented? -> canceled_activation(act, pre)
+      true -> activation(act, target, pre)
+    end
+
+    if prevented?, do: :prevented, else: :ok
   end
+
+  # The event object: the one of the script (`init.event`), else a new one of the interface of
+  # the type, with the defaults of its members
+  defp event_for(target, _type, %{event: ev}, _bubbles) do
+    if truthy(Interp.get(ev, "__dispatching")) do
+      ctor = deref_global("DOMException")
+
+      throw(
+        {:js_error,
+         construct(ctor, ["The event is already being dispatched.", "InvalidStateError"], ctor)}
+      )
+    end
+
+    put_hidden(ev, "__dispatching", true)
+    put(ev, "target", target_obj(target))
+    put(ev, "currentTarget", :null)
+    put(ev, "eventPhase", 0.0)
+    ev
+  end
+
+  defp event_for(target, type, init, bubbles) do
+    class = Map.get(init, :class) || event_class(type)
+    trusted = Map.get(init, :trusted, true)
+
+    base = [
+      {"type", type},
+      {"target", target_obj(target)},
+      {"currentTarget", :null},
+      {"defaultPrevented", false},
+      {"bubbles", bubbles},
+      {"cancelable", Map.get(init, :cancelable, true)},
+      {"composed", Map.get(init, :composed, true)},
+      {"eventPhase", 0.0},
+      {"isTrusted", trusted},
+      {"timeStamp", Browser.JS.Builtins.perf_now()}
+    ]
+
+    members = event_members(class, &default_member(&1, init, target, type, trusted))
+    aliases = for {k, _} = a <- mouse_aliases(class, members), not Map.has_key?(init, k), do: a
+    pairs = base ++ members ++ aliases
+    keys = Enum.map(pairs, &elem(&1, 0))
+    extra = for {k, v} <- init, is_binary(k), k not in keys, do: {k, v}
+
+    new_object(pairs ++ extra, event_proto(class))
+  end
+
+  # a member the browser sets on an event it fires when `init` does not give it: the window
+  # (`view`) and the click count of a press, release or click (`detail`)
+  defp default_member(k, init, target, type, trusted) do
+    case Map.fetch(init, k) do
+      {:ok, v} ->
+        v
+
+      :error ->
+        case k do
+          "view" ->
+            if is_tuple(target) and elem(target, 0) == :objt,
+              do: :undefined,
+              else: target_obj(window_of_target(target))
+
+          "detail" when trusted and type in ["click", "mousedown", "mouseup"] ->
+            1.0
+
+          "detail" when trusted and type == "dblclick" ->
+            2.0
+
+          _ ->
+            :undefined
+        end
+    end
+  end
+
+  defp window_of_target(nid) when is_integer(nid), do: window_key_of(nid)
+  defp window_of_target(target), do: target
 
   # the node and its ancestors; a composed event goes on from a shadow root to its host
   defp tree_path(nid, composed) do
@@ -5517,6 +5612,228 @@ defmodule Browser.JS.DOM do
     ])
   end
 
+  # ── event interfaces ───────────────────────────────────────
+
+  @modifier_members [
+    {"ctrlKey", false},
+    {"shiftKey", false},
+    {"altKey", false},
+    {"metaKey", false}
+  ]
+
+  # The event interfaces: the name, the parent and the members of the init dictionary, with
+  # their default values. An event has the members of its interface and of each parent.
+  @event_classes [
+    {"Event", nil, []},
+    {"CustomEvent", "Event", [{"detail", :null}]},
+    {"SubmitEvent", "Event", [{"submitter", :null}]},
+    {"UIEvent", "Event", [{"view", :null}, {"detail", 0.0}]},
+    {"FocusEvent", "UIEvent", [{"relatedTarget", :null}]},
+    {"MouseEvent", "UIEvent",
+     [
+       {"screenX", 0.0},
+       {"screenY", 0.0},
+       {"clientX", 0.0},
+       {"clientY", 0.0},
+       {"button", 0.0},
+       {"buttons", 0.0},
+       {"relatedTarget", :null},
+       {"movementX", 0.0},
+       {"movementY", 0.0}
+     ] ++ @modifier_members},
+    {"PointerEvent", "MouseEvent",
+     [
+       {"pointerId", 0.0},
+       {"width", 1.0},
+       {"height", 1.0},
+       {"pressure", 0.0},
+       {"tangentialPressure", 0.0},
+       {"tiltX", 0.0},
+       {"tiltY", 0.0},
+       {"twist", 0.0},
+       {"pointerType", ""},
+       {"isPrimary", false}
+     ]},
+    {"WheelEvent", "MouseEvent",
+     [{"deltaX", 0.0}, {"deltaY", 0.0}, {"deltaZ", 0.0}, {"deltaMode", 0.0}]},
+    {"DragEvent", "MouseEvent", [{"dataTransfer", :null}]},
+    {"KeyboardEvent", "UIEvent",
+     [
+       {"key", ""},
+       {"code", ""},
+       {"location", 0.0},
+       {"repeat", false},
+       {"isComposing", false},
+       {"charCode", 0.0},
+       {"keyCode", 0.0}
+     ] ++ @modifier_members},
+    {"InputEvent", "UIEvent",
+     [{"data", :null}, {"isComposing", false}, {"inputType", ""}, {"dataTransfer", :null}]},
+    {"CompositionEvent", "UIEvent", [{"data", ""}]}
+  ]
+
+  # each interface with all its members (the parents' first) and its chain of names
+  @event_members (for {name, _, _} <- @event_classes, into: %{} do
+                    chain =
+                      Stream.unfold(name, fn
+                        nil -> nil
+                        n -> {n, elem(List.keyfind(@event_classes, n, 0), 1)}
+                      end)
+                      |> Enum.reverse()
+
+                    members =
+                      Enum.flat_map(chain, &elem(List.keyfind(@event_classes, &1, 0), 2))
+                      |> Enum.uniq_by(&elem(&1, 0))
+
+                    {name, %{chain: chain, members: members}}
+                  end)
+
+  # the interface of an event that the browser fires, by its type
+  @pointer_types ~w(click auxclick contextmenu pointerdown pointerup pointermove pointerover
+                    pointerout pointerenter pointerleave pointercancel gotpointercapture
+                    lostpointercapture)
+  @mouse_types ~w(mousedown mouseup mousemove mouseover mouseout mouseenter mouseleave dblclick)
+  @drag_types ~w(drag dragstart dragend dragenter dragleave dragover drop)
+
+  defp event_class(type) when type in @pointer_types, do: "PointerEvent"
+  defp event_class(type) when type in @mouse_types, do: "MouseEvent"
+  defp event_class(type) when type in @drag_types, do: "DragEvent"
+  defp event_class(type) when type in ~w(keydown keyup keypress), do: "KeyboardEvent"
+  defp event_class(type) when type in ~w(focus blur focusin focusout), do: "FocusEvent"
+  defp event_class(type) when type in ~w(input beforeinput), do: "InputEvent"
+
+  defp event_class(type) when type in ~w(compositionstart compositionupdate compositionend),
+    do: "CompositionEvent"
+
+  defp event_class("wheel"), do: "WheelEvent"
+  defp event_class("submit"), do: "SubmitEvent"
+  defp event_class(_type), do: "Event"
+
+  defp event_proto(class), do: proto({:dom, :event, class})
+
+  # the members of `class` that `given` (a member name -> value or :undefined) does not set
+  # get their defaults; a given value becomes the type of its default
+  defp event_members(class, given) do
+    for {k, default} <- @event_members[class].members do
+      v = given.(k)
+
+      cond do
+        v == :undefined -> {k, default}
+        is_float(default) -> {k, float(to_num(v))}
+        is_boolean(default) -> {k, truthy(v)}
+        is_binary(default) -> {k, to_str(v)}
+        true -> {k, v}
+      end
+    end
+  end
+
+  # a mouse event also has `x`, `y`, `pageX`, ... which come from `clientX` and `clientY`
+  defp mouse_aliases(class, members) do
+    if "MouseEvent" in @event_members[class].chain do
+      {_, cx} = List.keyfind(members, "clientX", 0)
+      {_, cy} = List.keyfind(members, "clientY", 0)
+
+      [
+        {"x", cx},
+        {"y", cy},
+        {"pageX", cx},
+        {"pageY", cy},
+        {"offsetX", 0.0},
+        {"offsetY", 0.0},
+        {"which", float(to_num(elem(List.keyfind(members, "button", 0), 1))) + 1.0}
+      ]
+    else
+      []
+    end
+  end
+
+  # true when `ev` has the prototype of `class` in its chain
+  defp event_of_class?({:obj, _} = ev, class) do
+    target = event_proto(class)
+
+    walk = fn walk, o ->
+      case Browser.JS.Props.get_prototype_of(o) do
+        {:obj, _} = p -> p == target or walk.(walk, p)
+        _ -> false
+      end
+    end
+
+    target != nil and walk.(walk, ev)
+  end
+
+  defp event_of_class?(_ev, _class), do: false
+
+  # the event constructors, each with its own prototype (`Event` <- `UIEvent` <- `MouseEvent`
+  # <- `PointerEvent`, ...)
+  defp install_event_classes(scope, event) do
+    for {name, parent, _} <- @event_classes do
+      p =
+        if name == "Event" do
+          event
+        else
+          p = new_object([], event_proto(parent))
+          Interp.put_tag(p, name)
+          p
+        end
+
+      put_proto({:dom, :event, name}, p)
+      ctor(scope, name, p, &construct_event(name, &1, &2))
+      install_event_methods(name, p)
+    end
+  end
+
+  defp install_event_methods(name, p) when name in ["MouseEvent", "KeyboardEvent"] do
+    def_fn(p, "getModifierState", fn this, args ->
+      case to_str(arg(args, 0)) do
+        "Control" -> truthy(Interp.get(this, "ctrlKey"))
+        "Shift" -> truthy(Interp.get(this, "shiftKey"))
+        "Alt" -> truthy(Interp.get(this, "altKey"))
+        "Meta" -> truthy(Interp.get(this, "metaKey"))
+        _ -> false
+      end
+    end)
+  end
+
+  defp install_event_methods(_name, _p), do: :ok
+
+  # `new MouseEvent(type, init)` and the others
+  defp construct_event(class, _this, args) do
+    init = arg(args, 1)
+    obj? = match?({:obj, _}, init)
+    given = fn k -> if obj?, do: Interp.get(init, k), else: :undefined end
+    members = event_members(class, given)
+    own = Enum.map(members, &elem(&1, 0))
+
+    ev =
+      new_object(
+        [
+          {"type", to_str(arg(args, 0))},
+          {"target", :null},
+          {"currentTarget", :null},
+          {"defaultPrevented", false},
+          {"bubbles", truthy(given.("bubbles"))},
+          {"cancelable", truthy(given.("cancelable"))},
+          {"composed", truthy(given.("composed"))},
+          {"eventPhase", 0.0},
+          {"isTrusted", false},
+          {"timeStamp", Browser.JS.Builtins.perf_now()}
+        ] ++ members ++ mouse_aliases(class, members),
+        event_proto(class)
+      )
+
+    if given.("clientX") != :undefined or given.("clientY") != :undefined,
+      do: put_hidden(ev, "__pos", true)
+
+    # (other keys of `init` are kept too, as before: some pages read them from the event)
+    if obj? do
+      for k <- own_keys(init),
+          k not in ["bubbles", "cancelable", "composed"] and k not in own,
+          do: put(ev, k, Interp.get(init, k))
+    end
+
+    ev
+  end
+
   # ── install ────────────────────────────────────────────────
 
   @doc "Defines the DOM prototypes and the `window`, `document`, ... globals."
@@ -5533,7 +5850,6 @@ defmodule Browser.JS.DOM do
     put_proto({:dom, :element}, element)
     put_proto({:dom, :text}, text)
     put_proto({:dom, :document}, document)
-    put_proto({:dom, :event}, event)
     put_proto({:dom, :classlist}, new_object([], object))
     put_proto({:dom, :style}, new_object([], object))
     put_proto({:dom, :dataset}, new_object([], object))
@@ -6318,23 +6634,25 @@ defmodule Browser.JS.DOM do
       :undefined
     end)
 
+    # The script's event itself goes to the listeners. A click that is a `MouseEvent` runs the
+    # activation behavior too, as a click of `click()` does.
     def_fn(p, "dispatchEvent", fn this, args ->
       ev = arg(args, 0)
 
+      unless match?({:obj, _}, ev),
+        do: throw_error("TypeError", "parameter 1 is not of type 'Event'.")
+
+      type = to_str(Interp.get(ev, "type"))
+
       init = %{
+        event: ev,
         bubbles: truthy(Interp.get(ev, "bubbles")),
         cancelable: truthy(Interp.get(ev, "cancelable")),
-        composed: truthy(Interp.get(ev, "composed"))
+        composed: truthy(Interp.get(ev, "composed")),
+        activate: type == "click" and event_of_class?(ev, "MouseEvent")
       }
 
-      extra =
-        for k <- own_keys(ev),
-            k not in ~w(type target currentTarget defaultPrevented bubbles cancelable eventPhase isTrusted timeStamp),
-            into: %{},
-            do: {k, Interp.get(ev, k)}
-
-      r = dispatch(listener_target(this), to_str(Interp.get(ev, "type")), Map.merge(extra, init))
-      r == :ok
+      dispatch(listener_target(this), type, init) == :ok
     end)
   end
 
@@ -6749,8 +7067,7 @@ defmodule Browser.JS.DOM do
     end)
 
     def_fn(p, "click", fn this, _ ->
-      nid = this_nid(this)
-      if dispatch(nid, "click", %{}) == :ok, do: activate(nid)
+      synthetic_click(this_nid(this))
       :undefined
     end)
 
@@ -6809,27 +7126,282 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  # what a click does when no script stopped it: a submit button submits its form
-  defp activate(nid) do
+  # ── activation behavior ────────────────────────────────────
+
+  # `el.click()`: a click event that a script caused (a `PointerEvent`, with no position and
+  # button 0) and the activation behavior. A disabled form control does nothing, and an
+  # element that is in its own `click()` already does not click again.
+  defp synthetic_click(nid) do
+    n = node(nid)
+    key = {:dom_clicking, nid}
+
+    cond do
+      n.kind == :element and n.tag in ~w(button input select textarea) and
+          get_attr(n, "disabled") != nil ->
+        :ok
+
+      Process.get(key) ->
+        :ok
+
+      true ->
+        Process.put(key, true)
+
+        try do
+          dispatch(nid, "click", %{
+            "detail" => 0.0,
+            "pointerId" => -1.0,
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            trusted: false,
+            activate: true
+          })
+        after
+          Process.delete(key)
+        end
+    end
+  end
+
+  # The element whose activation behavior a click runs: the target when it has one, else (for
+  # an event that bubbles) the nearest element on the path that has one.
+  defp activation_target([first | rest], bubbles) do
+    cond do
+      is_integer(first) and activation?(first) -> first
+      bubbles -> Enum.find(rest, &(is_integer(&1) and activation?(&1)))
+      true -> nil
+    end
+  end
+
+  @activation_inputs ~w(checkbox radio submit image reset button file color)
+
+  defp activation?(nid) do
     n = node(nid)
 
-    # (`a.click()` on a link with `download`: what a click of the user does, see `download/1`)
-    if download_link?(nid), do: download(nid)
+    n.kind == :element and
+      case n.tag do
+        t when t in ["a", "area"] -> get_attr(n, "href") != nil
+        "input" -> type_of(n) in @activation_inputs
+        t when t in ["button", "label"] -> true
+        "summary" -> details_of_summary(nid) != nil
+        _ -> false
+      end
+  end
 
-    if n.tag in ["button", "input"] and get_attr(n, "popovertarget") != nil and
-         get_attr(n, "disabled") == nil,
-       do: call_global("__popoverInvoke", [wrap(nid)])
+  # the `<details>` that `nid` is the summary of (its first `<summary>` child), or nil
+  defp details_of_summary(nid) do
+    with p when p != nil <- node(nid).parent,
+         %{kind: :element, tag: "details", kids: kids} <- node(p),
+         ^nid <- Enum.find(kids, &match?(%{kind: :element, tag: "summary"}, node(&1))) do
+      p
+    else
+      _ -> nil
+    end
+  end
 
-    submit? =
-      get_attr(n, "disabled") == nil and
-        ((n.tag == "button" and type_of(n) == "submit") or
-           (n.tag == "input" and type_of(n) in ["submit", "image"]))
+  # The legacy-pre-activation behavior: a checkbox changes its state, a radio button is
+  # checked, before the click event is dispatched. Gives what the canceled-activation behavior
+  # restores.
+  defp pre_activation(nid) do
+    n = node(nid)
 
-    with true <- submit?, form when form != nil <- form_of(nid) do
-      request_submit(form, nid)
+    if n.tag == "input" and get_attr(n, "disabled") == nil do
+      case type_of(n) do
+        "checkbox" ->
+          old = checked_of(n)
+          set_checked(nid, not old)
+          {:checkbox, old}
+
+        "radio" ->
+          old = checked_of(n)
+          prev = if not old, do: Enum.find(radio_group(nid), &checked_of(node(&1)))
+          set_checked(nid, true)
+          {:radio, old, prev}
+
+        _ ->
+          nil
+      end
+    end
+  end
+
+  # the legacy-canceled-activation behavior: a script canceled the click
+  defp canceled_activation(nid, {:checkbox, old}),
+    do: update_node(nid, &%{&1 | props: Map.put(&1.props, "checked", old)})
+
+  defp canceled_activation(nid, {:radio, false, prev}) do
+    update_node(nid, &%{&1 | props: Map.put(&1.props, "checked", false)})
+    if prev != nil and prev in radio_group(nid), do: set_checked(prev, true)
+  end
+
+  defp canceled_activation(_nid, _pre), do: :ok
+
+  # The activation behavior of `nid` (a click that no script canceled): a link is followed, a
+  # checkbox or radio button fires `input` and `change`, a button submits or resets its form or
+  # shows its popover, a label clicks its control, a summary opens or closes its details.
+  defp activation(nid, target, pre) do
+    n = node(nid)
+
+    case n.tag do
+      t when t in ["a", "area"] -> follow_hyperlink(nid)
+      "label" -> label_activation(nid, target)
+      "summary" -> toggle_details(details_of_summary(nid))
+      _ when n.tag in ["button", "input"] -> control_activation(nid, n, pre)
+      _ -> :ok
     end
 
     :ok
+  end
+
+  defp control_activation(nid, n, pre) do
+    type = type_of(n)
+
+    cond do
+      get_attr(n, "disabled") != nil ->
+        :ok
+
+      n.tag == "input" and type in ["checkbox", "radio"] ->
+        # (a radio button that was checked already did not change)
+        if connected?(nid) and not match?({:radio, true, _}, pre) do
+          dispatch(nid, "input", %{
+            bubbles: true,
+            cancelable: false,
+            composed: true,
+            class: "Event"
+          })
+
+          dispatch(nid, "change", %{bubbles: true, cancelable: false, composed: false})
+        end
+
+      true ->
+        if get_attr(n, "popovertarget") != nil, do: call_global("__popoverInvoke", [wrap(nid)])
+
+        case {type, form_of(nid)} do
+          {_, nil} -> :ok
+          {t, form} when t in ["submit", "image"] -> request_submit(form, nid)
+          {"reset", form} -> reset_form_node(form)
+          _ -> :ok
+        end
+    end
+  end
+
+  # `form.reset()`: the `reset` event, then the controls go back to their markup's values
+  defp reset_form_node(form) do
+    if dispatch(form, "reset", %{bubbles: true, cancelable: true}) != :prevented,
+      do: reset_controls(form)
+  end
+
+  # A link that a script clicked: a `download` link saves, any other goes to its address (a
+  # fragment of this page stays in the document, see `navigate_to/2`). A `javascript:`
+  # address and a link that opens a new window (`target="_blank"`) do nothing: a click that
+  # the user did not make cannot open a window.
+  defp follow_hyperlink(nid) do
+    n = node(nid)
+    href = get_attr(n, "href")
+    target = Str.downcase(get_attr(n, "target") || "")
+
+    cond do
+      not connected?(nid) -> :ok
+      download(nid) -> :ok
+      target not in ["", "_self", "_top", "_parent"] -> :ok
+      href |> String.trim_leading() |> Str.downcase() |> String.starts_with?("javascript:") -> :ok
+      follow_link_in(nid, href) == :frame -> :ok
+      true -> in_realm(n.doc, fn -> navigate_to(resolve_url(href)) end)
+    end
+  end
+
+  # A click on a label is a click on its control, unless it was on the control itself or on
+  # interactive content in the label.
+  defp label_activation(label, target) do
+    control = labeled_control(label)
+
+    on_interactive? =
+      is_integer(target) and
+        Enum.any?(
+          Enum.take_while([target | ancestors(target)], &(&1 != label)),
+          &(&1 == control or interactive?(node(&1)))
+        )
+
+    if control != nil and not on_interactive?, do: synthetic_click(control)
+  end
+
+  defp labelable?(%{kind: :element, tag: "input"} = n), do: type_of(n) != "hidden"
+
+  defp labelable?(%{kind: :element, tag: t}),
+    do: t in ~w(button meter output progress select textarea)
+
+  defp labelable?(_n), do: false
+
+  defp interactive?(%{kind: :element} = n) do
+    case n.tag do
+      "a" -> get_attr(n, "href") != nil
+      t when t in ["audio", "video"] -> get_attr(n, "controls") != nil
+      "img" -> get_attr(n, "usemap") != nil
+      t when t in ~w(button details embed iframe label select textarea) -> true
+      "input" -> type_of(n) != "hidden"
+      _ -> false
+    end
+  end
+
+  defp interactive?(_n), do: false
+
+  # the control of a label: the element its `for` names, else the first labelable element in it
+  defp labeled_control(label) do
+    case get_attr(node(label), "for") do
+      nil ->
+        find_element(label, &labelable?/1)
+
+      id ->
+        root = List.last([label | ancestors(label)])
+
+        case element_by_id(root, id) do
+          nil -> nil
+          c -> if labelable?(node(c)), do: c
+        end
+    end
+  end
+
+  defp toggle_details(nil), do: :ok
+
+  defp toggle_details(details) do
+    open = not open_of(node(details))
+    update_node(details, &%{&1 | props: Map.put(&1.props, "open", open)})
+  end
+
+  # A checkbox's or radio button's checked state. A radio button that is checked unchecks the
+  # others of its group.
+  defp set_checked(nid, checked) do
+    update_node(nid, &%{&1 | props: Map.put(&1.props, "checked", checked)})
+
+    if checked and type_of(node(nid)) == "radio" do
+      for other <- radio_group(nid),
+          checked_of(node(other)),
+          do: update_node(other, &%{&1 | props: Map.put(&1.props, "checked", false)})
+    end
+
+    :ok
+  end
+
+  # The other radio buttons of the group of `nid`: the same name, the same form (or none) and
+  # the same tree.
+  defp radio_group(nid) do
+    n = node(nid)
+
+    case get_attr(n, "name") do
+      name when name in [nil, ""] ->
+        []
+
+      name ->
+        form = form_of(nid)
+        root = List.last([nid | ancestors(nid)])
+
+        for el <- elements(root),
+            el != nid,
+            o = node(el),
+            o.tag == "input",
+            type_of(o) == "radio",
+            get_attr(o, "name") == name,
+            form_of(el) == form,
+            do: el
+    end
   end
 
   defp adjacent(nid, position, ids) do
@@ -6952,12 +7524,25 @@ defmodule Browser.JS.DOM do
 
     def_fn(p, "createDocumentFragment", fn _this, _ -> wrap(new_node(%{kind: :fragment})) end)
 
-    def_fn(p, "createEvent", fn _this, _ ->
-      ev = deref_global("Event")
-      construct(ev, [""], ev)
+    def_fn(p, "createEvent", fn _this, args ->
+      construct_event(create_event_class(Str.downcase(to_str(arg(args, 0)))), :undefined, [""])
     end)
 
     def_fn(p, "hasFocus", fn _this, _ -> true end)
+  end
+
+  # the interface that `document.createEvent(name)` makes (an unknown name makes an `Event`)
+  defp create_event_class(name) do
+    case name do
+      n when n in ["uievent", "uievents"] -> "UIEvent"
+      n when n in ["mouseevent", "mouseevents"] -> "MouseEvent"
+      "customevent" -> "CustomEvent"
+      "keyboardevent" -> "KeyboardEvent"
+      "focusevent" -> "FocusEvent"
+      "compositionevent" -> "CompositionEvent"
+      "dragevent" -> "DragEvent"
+      _ -> "Event"
+    end
   end
 
   defp install_event(p) do
@@ -7491,41 +8076,7 @@ defmodule Browser.JS.DOM do
     ctor(scope, "Text", text, fn _, _ -> :undefined end)
     ctor(scope, "Document", document, fn _, _ -> :undefined end)
 
-    make_event = fn _this, args ->
-      init = arg(args, 1)
-
-      opt = fn k ->
-        if match?({:obj, _}, init), do: truthy(Interp.get(init, k)), else: false
-      end
-
-      ev =
-        new_object(
-          [
-            {"type", to_str(arg(args, 0))},
-            {"target", :null},
-            {"currentTarget", :null},
-            {"defaultPrevented", false},
-            {"bubbles", opt.("bubbles")},
-            {"cancelable", opt.("cancelable")},
-            {"eventPhase", 0.0},
-            {"isTrusted", false},
-            {"timeStamp", Browser.JS.Builtins.perf_now()}
-          ],
-          event
-        )
-
-      if match?({:obj, _}, init) do
-        for k <- own_keys(init),
-            k not in ["bubbles", "cancelable"],
-            do: put(ev, k, Interp.get(init, k))
-      end
-
-      ev
-    end
-
-    for name <- ~w(Event CustomEvent MouseEvent KeyboardEvent InputEvent SubmitEvent FocusEvent) do
-      ctor(scope, name, event, make_event)
-    end
+    install_event_classes(scope, event)
 
     url_proto = new_object()
 

@@ -1893,20 +1893,49 @@ defmodule Browser.Session do
   # -- changing controls -----------------------------------------------------
 
   defp toggle(state, cid) do
+    before = state.page.form_state
+
     state =
-      state.page.form_state
+      before
       |> then(&Forms.toggle(&1, state.page.forms.controls, cid))
       |> then(&set_form_state(state, &1))
       |> relayout()
 
     case control(state, cid) do
       %{type: type} when type in ["checkbox", "radio"] ->
-        js_notify(state, cid, ["click", "input", "change"])
+        changed = changed_controls(before, state.page.form_state)
+
+        # a script that cancels the click undoes the change: `input` and `change` do not fire
+        case js_event(state, {:control, cid}, "click") do
+          {state, true} -> undo_toggle(state, before, changed)
+          {state, false} -> js_notify(state, cid, ["input", "change"])
+        end
 
       _ ->
         state
     end
   end
+
+  defp changed_controls(before, now) do
+    for cid <- Enum.uniq(Map.keys(before) ++ Map.keys(now)),
+        Map.get(before, cid) != Map.get(now, cid),
+        do: cid
+  end
+
+  # the controls in `cids` get the state they had in `before`
+  defp undo_toggle(%{page: %{form_state: now}} = state, before, cids) do
+    restored =
+      Enum.reduce(cids, now, fn cid, fs ->
+        case Map.fetch(before, cid) do
+          {:ok, v} -> Map.put(fs, cid, v)
+          :error -> Map.delete(fs, cid)
+        end
+      end)
+
+    state |> set_form_state(restored) |> relayout()
+  end
+
+  defp undo_toggle(state, _before, _cids), do: state
 
   defp step_option(state, control, delta) do
     state.page.form_state
@@ -2301,7 +2330,9 @@ defmodule Browser.Session do
         nid -> {:numbered, nid}
       end
 
-    Enum.reduce(types, state, fn type, state -> state |> js_event(target, type) |> elem(0) end)
+    Enum.reduce(types, state, fn type, state ->
+      state |> js_event(target, type, pointer_init(state, x, y, type)) |> elem(0)
+    end)
   end
 
   defp js_pointer_event(%{js: nil} = state, _x, _y, _type), do: {state, false}
@@ -2313,7 +2344,27 @@ defmodule Browser.Session do
         nid -> {:numbered, nid}
       end
 
-    js_event(state, target, type)
+    js_event(state, target, type, pointer_init(state, x, y, type))
+  end
+
+  # The members of a press, release or click of the left mouse button at page position `x`
+  # and window position `y`: the position in the window, the button, the buttons that are
+  # down after it, and the click count.
+  @doc false
+  def pointer_init(state, x, y, type) do
+    count =
+      case state do
+        %{click: {_, _, _, n}} -> n
+        _ -> 1
+      end
+
+    %{
+      "clientX" => (x - Map.get(state, :scroll_x, 0)) * 1.0,
+      "clientY" => y * 1.0,
+      "button" => 0.0,
+      "buttons" => if(type == "mousedown", do: 1.0, else: 0.0),
+      "detail" => count * 1.0
+    }
   end
 
   defp stop_js(state) do

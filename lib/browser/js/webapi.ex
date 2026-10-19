@@ -912,14 +912,17 @@ defmodule Browser.JS.WebAPI do
     def("escape", function (s) { return encodeURIComponent(s).replace(/[!'()*]/g, function (c) { return "%" + c.charCodeAt(0).toString(16).toUpperCase(); }); });
     def("unescape", function (s) { return decodeURIComponent(s); });
 
-    function evClass(name, fields) {
+    // (UIEvent, MouseEvent, PointerEvent, WheelEvent, DragEvent, KeyboardEvent, FocusEvent,
+    // InputEvent and CompositionEvent are native, see `Browser.JS.DOM`)
+    function evClass(name, fields, parent) {
+      var P = parent || Event;
       var F = function (type, init) {
-        var e = new Event(type, init); init = init || {};
+        var e = new P(type, init); init = init || {};
         Object.setPrototypeOf(e, F.prototype);
         fields.forEach(function (f) { e[f] = init[f] === undefined ? null : init[f]; });
         return e;
       };
-      F.prototype = Object.create(Event.prototype);
+      F.prototype = Object.create(P.prototype);
       F.prototype.constructor = F;
       def(name, F);
     }
@@ -929,12 +932,7 @@ defmodule Browser.JS.WebAPI do
     evClass("PromiseRejectionEvent", ["promise", "reason"]);
     evClass("PopStateEvent", ["state"]);
     evClass("HashChangeEvent", ["oldURL", "newURL"]);
-    evClass("PointerEvent", ["pointerId", "pointerType", "clientX", "clientY", "button", "buttons"]);
-    evClass("TouchEvent", ["touches", "targetTouches", "changedTouches"]);
-    evClass("UIEvent", ["view", "detail"]);
-    evClass("WheelEvent", ["deltaX", "deltaY", "deltaZ", "deltaMode", "clientX", "clientY", "screenX", "screenY", "button", "buttons", "ctrlKey", "shiftKey", "altKey", "metaKey"]);
-    evClass("DragEvent", ["dataTransfer", "clientX", "clientY"]);
-    evClass("CompositionEvent", ["data"]);
+    evClass("TouchEvent", ["touches", "targetTouches", "changedTouches"], UIEvent);
     evClass("ClipboardEvent", ["clipboardData"]);
     evClass("ProgressEvent", ["lengthComputable", "loaded", "total"]);
     evClass("TransitionEvent", ["propertyName", "elapsedTime", "pseudoElement"]);
