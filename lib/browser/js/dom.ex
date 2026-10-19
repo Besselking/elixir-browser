@@ -3505,6 +3505,8 @@ defmodule Browser.JS.DOM do
 
     # capture: from the outermost down to the target's parent
     outer_first = path |> tl() |> Enum.reverse()
+    # (for `composedPath()` while the event is in dispatch)
+    Process.put({:dom_event_path, event}, path)
 
     try do
       catch_stop(fn ->
@@ -3517,6 +3519,7 @@ defmodule Browser.JS.DOM do
       put(event, "currentTarget", :null)
       put(event, "eventPhase", 0.0)
       put_hidden(event, "__dispatching", false)
+      Process.delete({:dom_event_path, event})
 
       if truthy(Interp.get(event, "__stop")) do
         put_hidden(event, "__stop", false)
@@ -7576,7 +7579,14 @@ defmodule Browser.JS.DOM do
       :undefined
     end)
 
-    def_fn(p, "composedPath", fn _this, _ -> new_array([]) end)
+    # the path of the event while it is in dispatch (with the nodes of closed shadow trees
+    # too), else empty
+    def_fn(p, "composedPath", fn this, _ ->
+      case Process.get({:dom_event_path, this}) do
+        nil -> new_array([])
+        path -> new_array(Enum.map(path, &target_obj/1))
+      end
+    end)
 
     # the old way to fill in an event made by `document.createEvent` (type, bubbles, cancelable,
     # then the extra arguments of each kind)

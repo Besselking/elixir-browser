@@ -90,6 +90,26 @@ defmodule Browser.JS.ActivationTest do
       assert logs(r) == ["b false b 2 | body b | true | b null 0"]
     end
 
+    test "composedPath() gives the path while the event is in dispatch, else nothing" do
+      r =
+        run("<div id=o><span id=i></span></div>", ~S"""
+        var i = document.getElementById("i"), e = new Event("x", { bubbles: true }), out = [];
+        var path = [];
+        for (var n = i; n; n = n.parentNode) path.push(n);
+        path.push(window);
+        document.getElementById("o").addEventListener("x", function (ev) {
+          var p = ev.composedPath();
+          out.push(p[0].id + " " + p[1].id + " " + (p.length === path.length) +
+            " " + p.every(function (t, k) { return t === path[k]; }));
+        });
+        i.dispatchEvent(e);
+        out.push(e.composedPath().length);
+        console.log(out.join(" | "));
+        """)
+
+      assert logs(r) == ["i o true true | 0"]
+    end
+
     test "a dispatch of an event in dispatch throws; an event stopped before its dispatch reaches no listener" do
       r =
         run("<div id=a></div><div id=b></div>", ~S"""
