@@ -281,6 +281,31 @@ defmodule Browser.JS.DOMApisTest do
     assert logs == ["5944 0 "]
   end
 
+  test "getElementsByTagName gives the elements below the node in document order" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const r = document.getElementById("r");
+        const names = (l) => Array.from(l, (e) => e.id || e.tagName).join();
+        const host = document.getElementById("h");
+        host.attachShadow({ mode: "open" }).innerHTML = "<p id=s1></p><b id=s2></b>";
+        const f = document.createDocumentFragment();
+        f.append(document.createElement("p"), "t", document.createElement("b"));
+        f.firstChild.innerHTML = "<b id=f1></b>";
+        console.log(names(r.getElementsByTagName("p")), names(r.getElementsByTagName("B")),
+          names(r.getElementsByTagName("*")), r.getElementsByTagName("i").length,
+          names(document.getElementsByTagName("b")), names(host.shadowRoot.getElementsByTagName("*")),
+          names(f.getElementsByTagName("b")), names(document.getElementById("a").getElementsByTagName("*")),
+          r.getElementsByTagName("p")[0] === document.getElementById("a"));
+        """,
+        ~S|<div id="r"><p id="a">x<b id="b"></b><span id="sp"><b id="b2"></b></span></p><!--c-->y| <>
+          ~S|<p id="c"><b id="d"></b></p><template><p id="t"></p></template><div id="h"></div></div>|
+      )
+
+    assert errors == []
+    assert logs == ["a,c b,b2,d a,b,sp,b2,c,d,TEMPLATE,h 0 b,b2,d s1,s2 f1,B b,sp,b2 true"]
+  end
+
   test "attributes that start with @ stay visible to scripts" do
     {logs, errors} =
       run(
