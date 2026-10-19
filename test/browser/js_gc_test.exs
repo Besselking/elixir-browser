@@ -3,6 +3,7 @@ defmodule Browser.JSGCTest do
 
   alias Browser.JS.{Builtins, GC, Interp, Parser}
   require Browser.JS.Elems, as: Elems
+  require Browser.JS.Obj, as: Obj
 
   # True in the check build (`JS_RESOLVE_CHECK=1`).
   @check Application.compile_env(:browser, :js_resolve_check, false)
@@ -71,7 +72,9 @@ defmodule Browser.JSGCTest do
       {:obj, stray} = Interp.new_object([{"x", 1.0}])
       {:obj, slot_obj} = Interp.new_object([{"y", 2.0}])
       info = elem(Interp.deref(kept), 1)
-      frame = Interp.alloc({nil, info, nil, stray, Interp.global(), {:obj, slot_obj}})
+      # (a slot can hold a bare id too: the walk reads the slots of a frame as any term)
+      {:obj, bare} = Interp.new_object([{"z", 3.0}])
+      frame = Interp.alloc({nil, info, nil, stray, Interp.global(), {:obj, slot_obj}, bare})
       Process.put(:gc_test_frame, frame)
 
       # The frame of `dead` stays after its call (a closure was made in it), but nothing holds it.
@@ -89,6 +92,7 @@ defmodule Browser.JSGCTest do
       assert Interp.call({:obj, inc_id}, :undefined, []) == 42.0
       assert :erlang.get(stray) == :undefined
       assert is_map(:erlang.get(slot_obj))
+      assert is_map(:erlang.get(bare))
     end)
     |> Task.await()
   end
@@ -325,6 +329,178 @@ defmodule Browser.JSGCTest do
     |> Task.await(30_000)
   end
 
+  # A JS value is never a bare heap id, so the walk reads an integer in a JS value as a
+  # number: an integer that equals the id of an object that nothing holds does not keep
+  # that object alive. Each case puts such an integer in one place: an element of a dense
+  # array, the value of an own property, the key and the value of a Map entry, the `seq` of
+  # a Map and the `len` of a sparse array. The dense array, the object and the Map are of
+  # the common forms, which the walk matches whole; the sparse array is not.
+  test "an integer in a JS value, a Map counter or a length keeps no object alive" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      dead = for _ <- 1..6, do: elem(Interp.new_object([{"d", 1.0}]), 1)
+      [d_elem, d_prop, d_key, d_val, d_seq, d_len] = dead
+
+      run = fn src ->
+        {:ok, p} = Parser.parse(src)
+        Interp.run_program(p)
+      end
+
+      arr = Interp.new_array([d_elem])
+      obj = Interp.new_object([{"x", d_prop}])
+      Process.put({:gc_test_keep, 1}, [arr, obj])
+
+      # (with the last entry, the Map has `d_seq` entries, so its next `seq` is `d_seq`)
+      run.("var m = new Map(); for (var i = 0; i < #{d_seq - 1}; i++) m.set('k' + i, i)")
+      {:ok, {:obj, mid} = m} = Interp.lookup_scoped(Interp.global(), "m")
+      Interp.call(Interp.get(m, "set"), m, [d_key, d_val])
+      run.("var a = []; a[#{d_len - 1}] = 'x'")
+      {:ok, {:obj, sid}} = Interp.lookup_scoped(Interp.global(), "a")
+
+      {:obj, aid} = arr
+      assert Elems.dense?(Interp.deref(aid))
+      assert map_size(Interp.deref(mid)) == 7 and Interp.deref(mid).seq == d_seq
+      refute Elems.dense?(Interp.deref(sid))
+      assert Interp.deref(sid).len == d_len
+
+      GC.collect()
+      for id <- dead, do: assert(:erlang.get(id) == :undefined, "kept: #{id}")
+      assert Interp.get(arr, 0.0) == d_elem
+      assert Interp.get(obj, "x") == d_prop
+      assert Interp.call(Interp.get(m, "get"), m, [d_key]) == d_val
+      assert run.("m.size + ':' + a.length") == "#{d_seq}:#{d_len}"
+    end)
+    |> Task.await(30_000)
+  end
+
+  # The forms of a record that the walk does not match whole keep the walk of each field,
+  # and the entries of a Map or a Set hold their keys and values as JS values. So an object
+  # that only one of these holds stays alive: the key and the value of a Map entry, a Set
+  # entry, the getter of an accessor in `vals`, the target and the `this` of a bound
+  # function and the target of a proxy.
+  test "keeps an object that only a Map, a Set, an accessor, a bound function or a proxy holds" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+
+      run = fn src ->
+        {:ok, p} = Parser.parse(src)
+        Interp.run_program(p)
+      end
+
+      run.("""
+      var held = [{ k: 'key' }, { k: 'value' }, { k: 'set' }, function () { return 'get' },
+        function () { return this.k }, { k: 'this' }, { k: 'target' }];
+      var m = new Map([[held[0], 1], ['v', held[1]]]);
+      var s = new Set([held[2]]);
+      var acc = {};
+      Object.defineProperty(acc, 'x', { get: held[3] });
+      var b = held[4].bind(held[5]);
+      var p = new Proxy(held[6], {});
+      """)
+
+      {:ok, {:obj, hid}} = Interp.lookup_scoped(Interp.global(), "held")
+      ids = for i <- 0..6, do: elem(Interp.get({:obj, hid}, i * 1.0), 1)
+      {:ok, {:obj, accid}} = Interp.lookup_scoped(Interp.global(), "acc")
+      assert Obj.fast?(Interp.deref(accid))
+      run.("held = null")
+
+      GC.collect()
+      assert :erlang.get(hid) == :undefined
+      for id <- ids, do: assert(is_map(:erlang.get(id)), "freed: #{id}")
+
+      assert run.("[[...m.keys()][0].k, m.get('v').k, [...s][0].k, acc.x, b(), p.k].join()") ==
+               "key,value,set,get,this,target"
+    end)
+    |> Task.await(30_000)
+  end
+
+  # The walk matches the common forms of a record whole: a plain object, a function, a
+  # dense array and a Map. Each clause must still walk each field that can hold a
+  # reference: the prototype, the own properties, the home object of a method (for
+  # `super`) and the environment of a native. Each object of `held` has only one such
+  # field that holds it, and the program reads each one after the collection.
+  test "keeps what each field of a record of a common form holds" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+
+      run = fn src ->
+        {:ok, p} = Parser.parse(src)
+        Interp.run_program(p)
+      end
+
+      run.("""
+      var held = [{ k: 'proto' }, { k: 'fn' }, { k: 'array' }, { k: 'map' }, { k: 'home' }];
+      var o = Object.create(held[0]);
+      var f = function () {}; f.x = held[1];
+      var a = [1, 2]; a.x = held[2];
+      var m = new Map(); m.x = held[3];
+      var sub = new (class extends Map { get k() { return 'map proto' } })();
+      var meth = { __proto__: held[4], m() { return super.k } }.m;
+      """)
+
+      {:ok, {:obj, hid}} = Interp.lookup_scoped(Interp.global(), "held")
+      ids = for i <- 0..4, do: elem(Interp.get({:obj, hid}, i * 1.0), 1)
+      # (a native whose Elixir fun holds the only reference to an object)
+      {:obj, nat} = Interp.new_object([{"k", "native"}])
+      Interp.declare(Interp.global(), "nat", Interp.native("nat", fn _, _ -> {:obj, nat} end))
+
+      # (each record is of a form that the walk matches whole: the four fields of a fast
+      # record and `n` more)
+      for {name, n} <- [
+            {"o", 0},
+            {"f", 1},
+            {"a", 1},
+            {"m", 3},
+            {"sub", 3},
+            {"meth", 1},
+            {"nat", 1}
+          ] do
+        {:ok, {:obj, id}} = Interp.lookup_scoped(Interp.global(), name)
+        r = Interp.deref(id)
+        assert Obj.fast?(r) and map_size(r) == 4 + n, "#{name}: #{inspect(Map.keys(r))}"
+      end
+
+      {:ok, {:obj, aid}} = Interp.lookup_scoped(Interp.global(), "a")
+      assert Elems.dense?(Interp.deref(aid))
+      run.("held = null")
+
+      GC.collect()
+      for id <- [nat | ids], do: assert(is_map(:erlang.get(id)), "freed: #{id}")
+
+      assert run.("[o.k, f.x.k, a.x.k, m.x.k, sub.k, meth(), nat().k].join()") ==
+               "proto,fn,array,map,map proto,home,native"
+    end)
+    |> Task.await(30_000)
+  end
+
+  # A reference reads its mark bit before it reads the entry, so the bitmap has a bit for
+  # each id below `:js_next`, also above the largest key. A reference to an id that has no
+  # entry does not stop the collection. Here the 70 newest objects are gone, so the id of
+  # the last one is in a word of the bitmap above the word of the largest key.
+  test "a reference to an id below the next heap id with no entry does not stop the walk" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      ids = for _ <- 1..130, do: elem(Interp.new_object(), 1)
+      for id <- Enum.take(ids, -70), do: :erlang.erase(id)
+      Process.put(:js_freed, Process.get(:js_freed) + 70)
+      last = List.last(ids)
+      Process.put({:gc_test_key, 1}, {:held, {:obj, last}})
+      keys = for {k, _} <- Process.get(), is_integer(k), k >= 0, do: k
+      assert div(last, 64) > div(Enum.max(keys), 64)
+
+      GC.collect()
+      assert :erlang.get(last) == :undefined
+
+      assert Interp.heap_size() ==
+               length(for {k, _} <- Process.get(), is_integer(k), k >= 0, do: k)
+    end)
+    |> Task.await(30_000)
+  end
+
   # The marks are a bitmap up to the largest heap key, not up to `:js_next`. An entry above
   # `:js_next` that a root holds stays, and so does what it holds.
   test "keeps a held entry with a key above the next heap id" do
@@ -341,6 +517,38 @@ defmodule Browser.JSGCTest do
       assert :erlang.get(top) == {:obj, inner}
       assert is_map(:erlang.get(inner))
       assert :erlang.get(top + 64) == :undefined
+    end)
+    |> Task.await(30_000)
+  end
+
+  # A top-level `await` waits for its promise inside the script: the timers run in the
+  # script (`Browser.JS.Promise.await/1`). What the script holds on the Elixir stack then
+  # (here the first element of an array literal that is not built yet) is not a root, so
+  # the timers that run there do not collect. The timers after the script do.
+  test "a timer that a top-level await runs does not collect" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      Process.put(:js_gc_at, 0)
+      # (nothing holds this object, and only a collect frees it: `free/1` frees only what
+      # the interpreter dropped, so a count of `:js_freed` also changes with no collect)
+      {:obj, stray} = Interp.new_object([{"x", 1.0}])
+
+      {:ok, p} =
+        Parser.parse(
+          """
+          globalThis.out = [{ k: 'tmp' }, await new Promise(function (r) { setTimeout(r, 1) })][0].k;
+          setTimeout(function () { out += '!' }, 1);
+          """,
+          module: true
+        )
+
+      Interp.run_program(p, true)
+      assert Process.get(stray) != nil
+      Builtins.run_timers(fn v -> throw({:uncaught, v}) end)
+      assert Process.get(stray) == nil
+      {:ok, q} = Parser.parse("out")
+      assert Interp.run_program(q) == "tmp!"
     end)
     |> Task.await(30_000)
   end

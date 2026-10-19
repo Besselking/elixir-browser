@@ -5,7 +5,8 @@ defmodule Browser.JS.Modules do
   A module record lives in the process dictionary (key `:js_modules`, by module key: a path or
   URL) and goes through the statuses `:new`, `:loading`, `:loaded`, `:linked`, `:evaluating`,
   then `:evaluated` or `:errored` (the error is thrown again by every later import). Its
-  syntax tree is kept apart, under a `:js_hoist` key, which the collector does not walk.
+  syntax tree is kept apart, under a `:js_hoist` key, which the collector does not walk, until
+  its body has run.
 
   Loading fetches and parses the whole graph first; linking resolves every import and
   re-export (a missing or ambiguous name is a SyntaxError, before anything runs); evaluating
@@ -33,7 +34,12 @@ defmodule Browser.JS.Modules do
   defp rec(key), do: Map.fetch!(recs(), key)
   defp put_rec(r), do: Process.put(:js_modules, Map.put(recs(), r.key, r))
   defp set(key, fields), do: put_rec(Map.merge(rec(key), Map.new(fields)))
-  defp stmts(key), do: Process.get({:js_hoist, {:module, key}})
+  defp stmts(key), do: Process.get({:js_hoist, rec(key).hoist})
+
+  # The syntax tree of a module is needed until its body has run. Then it goes: it is as
+  # large as the whole module, and each collection would copy it again for as long as the
+  # process lives.
+  defp drop_stmts(key), do: Process.delete({:js_hoist, rec(key).hoist})
 
   defp syntax_error(msg), do: Interp.throw_error("SyntaxError", msg)
 
@@ -48,7 +54,10 @@ defmodule Browser.JS.Modules do
   end
 
   defp new(key, base, {:program, stmts}) do
-    Process.put({:js_hoist, {:module, key}}, stmts)
+    # (the key is new for each record: the record of the same module in another frame has a
+    # tree of its own, which goes when that record has run)
+    hoist = {:module, key, :erlang.unique_integer([:positive])}
+    Process.put({:js_hoist, hoist}, stmts)
 
     info =
       Enum.reduce(
@@ -119,6 +128,7 @@ defmodule Browser.JS.Modules do
         dns: nil,
         bind: nil,
         key: key,
+        hoist: hoist,
         base: base,
         status: :new,
         error: nil,
@@ -211,6 +221,8 @@ defmodule Browser.JS.Modules do
       catch
         kind, e ->
           unfinished = for {k, %{status: s}} <- recs(), s in [:new, :loading], do: k
+          # (their trees go too: no record has their keys now, and each new try parses again)
+          Enum.each(unfinished, &drop_stmts/1)
           Process.put(:js_modules, Map.drop(recs(), unfinished))
           :erlang.raise(kind, e, __STACKTRACE__)
       end
@@ -396,7 +408,12 @@ defmodule Browser.JS.Modules do
             if rec(key).async_eval == false, do: Promise.resolve(cap, :undefined)
 
           {:error, e, stack} ->
-            for m <- stack, do: set(m, status: :evaluated, eval_error: {:error, e})
+            # (a module of the stack that did not run never runs now: its tree goes too)
+            for m <- stack do
+              set(m, status: :evaluated, eval_error: {:error, e})
+              drop_stmts(m)
+            end
+
             Promise.reject(cap, e)
         end
 
@@ -540,10 +557,14 @@ defmodule Browser.JS.Modules do
     :ok
   catch
     {:js_error, e} -> {:error, e}
+  after
+    drop_stmts(key)
   end
 
   defp exec_async(key) do
+    # (the run keeps the statements that it has still to run)
     p = Async.run_module(stmts(key), rec(key).scope)
+    drop_stmts(key)
 
     Promise.then(
       p,
@@ -610,6 +631,7 @@ defmodule Browser.JS.Modules do
   defp async_rejected(key, e) do
     if rec(key).status != :evaluated do
       set(key, eval_error: {:error, e}, status: :evaluated, async_eval: false)
+      drop_stmts(key)
       if cap = rec(key).cap, do: Promise.reject(cap, e)
       for m <- rec(key).parents, do: async_rejected(m, e)
     end

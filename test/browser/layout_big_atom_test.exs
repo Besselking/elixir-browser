@@ -10,9 +10,9 @@ defmodule Browser.LayoutBigAtomTest do
 
   defp measure(text, style), do: String.length(text) * div(round(style.size), 2)
 
-  defp layout(html) do
+  defp layout(html, opts \\ []) do
     page = Page.build(html, "about:test")
-    opts = [images: %{}, svg_defs: page.svg_defs, boxes: true]
+    opts = [images: %{}, svg_defs: page.svg_defs, boxes: true] ++ opts
     {items, _height} = Layout.layout(page.nodes, 600, &measure/2, 600, opts)
     items
   end
@@ -137,6 +137,60 @@ defmodule Browser.LayoutBigAtomTest do
 
       ~s(<div style="overflow:hidden;height:400px"><div>pre #{inline_block(inner)} post</div></div>)
     end)
+  end
+
+  # The shape of the editor of the TipTap page of Speedometer: a box that clips, a flex row, a
+  # flex column, a box that scrolls and a relatively positioned block of words that keep their
+  # spaces (each space is an item). `extra` comes before the words.
+  defp editor(extra, words, item_style) do
+    ~s(<div style="position:absolute;left:10px;top:10px;width:500px;height:300px;overflow:hidden">) <>
+      ~s(<div style="display:flex;height:400px">) <>
+      ~s(<div style="display:flex;flex-direction:column;flex:1 1 0%;#{item_style}">) <>
+      ~s(<div>toolbar</div><div style="overflow:auto;flex:1 1 0%">) <>
+      ~s(<div style="position:relative;white-space:break-spaces;height:3000px">) <>
+      extra <>
+      words <>
+      "</div>" <>
+      "</div></div></div></div>"
+  end
+
+  # (a flex item of 8 items or more is moved in one entry: with a negative `z-index`, what it
+  # paints behind the text still goes behind the text of the line, as for a small atom)
+  test "the backgrounds of flex items with a negative z-index in a big flex row paint behind its text" do
+    item =
+      &~s(<div style="z-index:-1;flex:none;width:100px;background:#ddd;border:1px solid">i#{&1} a b c d e f</div>)
+
+    same_small_and_big!(fn words ->
+      ~s(<div style="display:flex;align-items:flex-start">) <>
+        Enum.map_join(1..4, item) <>
+        ~s(<div style="flex:1;min-width:0;height:3000px">#{words}</div></div>)
+    end)
+  end
+
+  test "the items of a big editor in flex boxes are placed as those of a small one" do
+    extras = [
+      "",
+      ~s(<span style="position:relative;z-index:3;top:2px">raised</span> ),
+      ~s(<a href="#q" style="outline:2px solid blue">outlined</a> ),
+      ~s(<div style="position:sticky;top:0;background:yellow">sticky</div>),
+      ~s(<div style="position:absolute;top:5px;left:5px">absolute</div>),
+      ~s(<span style="display:inline-block;background:#eee;width:50px">inline</span> )
+    ]
+
+    # (a flex item with a `z-index` paints with the positioned boxes)
+    cases = Enum.map(extras, &{&1, ""}) ++ [{"", "z-index:2"}, {"", "z-index:-1"}]
+
+    for {extra, item_style} <- cases do
+      # (the spaces after the fifth word are only in the big one)
+      space? = &match?(%{type: :text, text: "\u00A0"}, &1)
+      # (the check mode also makes sure that the entries each atom keeps are its items)
+      small = layout(editor(extra, words(5), item_style), lazy: :check)
+      big = layout(editor(extra, words(300), item_style), lazy: :check)
+      assert length(small) < 200 and length(big) > 300
+
+      assert Layout.memo_norm(big |> Enum.reject(space?) |> first_words(5)) ==
+               Layout.memo_norm(Enum.reject(small, space?))
+    end
   end
 
   # (not only for big atoms: a clipping box works out where each item ends up before it makes

@@ -924,6 +924,16 @@ defmodule Browser.JS.DOM do
             aidx
           )
 
+    # (the global scope of the realm, for its entries in the code cache)
+    global =
+      case s.realms do
+        _ when s.doc == doc -> Process.get(:js_global)
+        %{^doc => %{fields: _, keys: %{js_global: g}}} -> g
+        _ -> nil
+      end
+
+    if is_integer(global), do: Browser.JS.Compile.drop_realm(global)
+
     realms = if s.doc == doc, do: s.realms, else: Map.delete(s.realms, doc)
     if s.doc == doc, do: Process.put(:dom_dead, doc)
 

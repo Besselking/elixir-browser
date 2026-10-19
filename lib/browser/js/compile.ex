@@ -251,6 +251,8 @@ defmodule Browser.JS.Compile do
       a nested function). The heap keeps that syntax also while a function of the parse
       is alive.
 
+  When a frame goes, the entries of the functions of its realm go too (`drop_realm/1`).
+
   A function object keeps its code. Thus the live code stays bounded by the live
   functions. Each parse of `new Function` code or of `eval` code makes new uids. Thus a
   loop that makes functions without end can not fill the memory.
@@ -370,7 +372,36 @@ defmodule Browser.JS.Compile do
     # reductions of a React suite, because it walks the syntax that the closures keep)
     budget(n + @entry_nodes)
     :erlang.put({:jsc, uid}, code)
+    add_to_realm(c, uid)
     code
+  end
+
+  # The process key `{:jsc_root, root}` holds the uids of the entries of the functions of
+  # one realm (`root` is the global scope of the realm, as the closure record gives it).
+  # The collector does not read it as a root (`Browser.JS.GC`): a uid holds integers that
+  # are not heap ids.
+  defp add_to_realm(%{root: root}, uid) when is_integer(root) do
+    case :erlang.get({:jsc_root, root}) do
+      :undefined -> :erlang.put({:jsc_root, root}, [uid])
+      uids -> :erlang.put({:jsc_root, root}, [uid | uids])
+    end
+  end
+
+  defp add_to_realm(_c, _uid), do: :ok
+
+  @doc """
+  Erases the entries of the functions of a realm that has gone (`root` is its global
+  scope). No script can make a new function object of that realm, so these entries only
+  keep memory: the compiled closures and the syntax that they hold, which each garbage
+  collection of the process copies again. A function of another realm with the same uid
+  compiles again, as after an erase of the cache. The count of the cache does not go
+  down, so the next erase of all the entries comes a little sooner.
+  """
+  def drop_realm(root) do
+    case :erlang.erase({:jsc_root, root}) do
+      :undefined -> :ok
+      uids -> Enum.each(uids, &:erlang.erase({:jsc, &1}))
+    end
   end
 
   defp sync_code(c), do: {body(c), maker(c.info)}
@@ -440,7 +471,7 @@ defmodule Browser.JS.Compile do
   """
   def erase_entries do
     for {k, _} <- :erlang.get(),
-        match?({:jsc, _}, k) or (is_integer(k) and k < 0),
+        match?({:jsc, _}, k) or match?({:jsc_root, _}, k) or (is_integer(k) and k < 0),
         do: :erlang.erase(k)
 
     :ok

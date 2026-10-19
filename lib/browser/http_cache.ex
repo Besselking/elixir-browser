@@ -28,7 +28,19 @@ defmodule Browser.HttpCache do
 
   defmodule Entry do
     @moduledoc false
-    defstruct [:url, :body, :etag, :last_modified, :expires_at, :used_at, :content_type]
+    # (`cache_control` and `expires`: the fields of the stored response, which a 304 without
+    # them does not change)
+    defstruct [
+      :url,
+      :body,
+      :etag,
+      :last_modified,
+      :expires_at,
+      :used_at,
+      :content_type,
+      :cache_control,
+      :expires
+    ]
   end
 
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
@@ -36,6 +48,14 @@ defmodule Browser.HttpCache do
   @impl true
   def init(_) do
     :ets.new(@table, [:set, :public, :named_table, read_concurrency: true])
+    # the loads in progress (`Browser.Fetch`), so that two loads of one address make one request
+    :ets.new(Browser.Fetch.inflight_table(), [
+      :set,
+      :public,
+      :named_table,
+      write_concurrency: true
+    ])
+
     {:ok, 0}
   end
 
@@ -150,7 +170,9 @@ defmodule Browser.HttpCache do
             last_modified: last_modified,
             expires_at: now() + (lifetime(headers, cc) || 0),
             used_at: now(),
-            content_type: header(headers, "content-type")
+            content_type: header(headers, "content-type"),
+            cache_control: header(headers, "cache-control"),
+            expires: header(headers, "expires")
           }
 
           :ets.insert(@table, {url, entry})
@@ -165,14 +187,31 @@ defmodule Browser.HttpCache do
   @doc "A 304 for a stale `entry`: keeps its body, takes the new lifetime and validators."
   def refresh(entry, headers, url) do
     if table?() do
+      # the stored response keeps the fields that the 304 does not send (RFC 9111, 4.3.4):
+      # a 304 without `Cache-Control` keeps the `no-cache` or `max-age` of the stored one, and
+      # a 304 without `Last-Modified` still gets the heuristic lifetime of the stored one
+      stored = [
+        {"last-modified", entry.last_modified},
+        {"cache-control", entry.cache_control},
+        {"expires", entry.expires}
+      ]
+
+      headers =
+        headers ++
+          for {name, value} <- stored,
+              value != nil and header(headers, name) == nil,
+              do: {String.to_charlist(name), String.to_charlist(value)}
+
       cc = cache_control(headers)
 
       entry = %{
         entry
         | etag: header(headers, "etag") || entry.etag,
-          last_modified: header(headers, "last-modified") || entry.last_modified,
+          last_modified: header(headers, "last-modified"),
           expires_at: now() + (lifetime(headers, cc) || 0),
-          used_at: now()
+          used_at: now(),
+          cache_control: header(headers, "cache-control"),
+          expires: header(headers, "expires")
       }
 
       if storable?(headers, cc, entry.body) do
@@ -217,6 +256,8 @@ defmodule Browser.HttpCache do
         etag: entry.etag,
         last_modified: entry.last_modified,
         content_type: entry.content_type,
+        cache_control: entry.cache_control,
+        expires: entry.expires,
         expires_at: System.os_time(:second) + (entry.expires_at - now())
       }
 
@@ -250,6 +291,9 @@ defmodule Browser.HttpCache do
         etag: r.etag,
         last_modified: r.last_modified,
         content_type: r.content_type,
+        # (a file of an older version has no such fields)
+        cache_control: Map.get(r, :cache_control),
+        expires: Map.get(r, :expires),
         expires_at: now() + (r.expires_at - System.os_time(:second)),
         used_at: now()
       }

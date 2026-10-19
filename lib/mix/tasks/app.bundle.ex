@@ -207,6 +207,10 @@ defmodule Mix.Tasks.App.Bundle do
     # text on the clipboard into question marks
     : "${LANG:=en_US.UTF-8}"
     export LANG
+    # the heap blocks of the VM come from one super carrier that gives freed memory back to the
+    # system: without it the segment caches keep up to 1.5 GB of freed heap blocks of the
+    # script process (Speedometer: peak RSS -24 %, run time about +1 %)
+    export ERL_FLAGS="+MMscs 2048 +MMscrpm false ${ERL_FLAGS:-}"
     exec "$DIR/bin/browser" start
     """)
 

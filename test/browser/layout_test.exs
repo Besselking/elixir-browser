@@ -4623,6 +4623,27 @@ defmodule Browser.LayoutTest do
     assert word_x(items, "P") == 8 + 64
   end
 
+  # (a flex item of 8 items or more is moved to its place in one entry, a smaller one item by
+  # item: the two must paint in the same layer)
+  test "a flex item with a z-index paints in its layer, with few items and with many" do
+    for n <- [2, 12], {z, layer, other} <- [{-1, :under, :over}, {2, :over, :under}] do
+      words = Enum.map_join(1..n, " ", &"u#{&1}")
+
+      html =
+        ~s(<div style="display:flex"><div style="z-index:#{z}">#{words}</div><div>flow</div></div>)
+
+      page = Browser.Page.build(html, "about:home")
+      opts = [images: %{}, svg_defs: page.svg_defs]
+      {items, _height} = Layout.layout(page.nodes, 400, &measure/2, 600, opts)
+      mine = Enum.filter(items, &match?(%{text: "u" <> _}, &1))
+      assert length(mine) == n
+      assert Enum.all?(mine, &(Map.get(&1, layer) == true and Map.get(&1, other) in [nil, false]))
+      # (what paints under the flow comes before it, and what paints over it after it)
+      at = fn text -> Enum.find_index(items, &match?(%{text: ^text}, &1)) end
+      assert at.("u1") < at.("flow") == (layer == :under)
+    end
+  end
+
   test "a relatively positioned box paints above a later absolute one only through tree order and z-index" do
     page =
       Browser.Page.build(
@@ -8139,6 +8160,9 @@ defmodule Browser.LayoutNestedBoxesTest do
   @ops [
     {:dy, 7},
     {:dy, -3},
+    {:move, 12, -4},
+    {:move, 0, 9},
+    {:atom, 5, 7, {0, nil, nil, nil}},
     {:rel, 40, 10, :over, 17},
     {:rel, -5, 2, :under, {3, 18}},
     {:clip, %{x: 5, y: 3, w: 200, h: 80}, nil},
@@ -8168,6 +8192,184 @@ defmodule Browser.LayoutNestedBoxesTest do
     end
   end
 
+  # an item of an atom for the walkers: a text or a rect, maybe with a paint order, an offset of
+  # an inline box (`rel`), a sticky box. (A fragment holds none of these: with `pzs` empty the
+  # item has none.)
+  defp walker_item([]) do
+    if :rand.uniform(4) == 1,
+      do: %{type: :rect, x: 0, y: Enum.random([0, 10, 40]), w: 5, h: 5},
+      else: %{type: :text, x: 0, y: Enum.random([0, 10, 10.0, 20, 20.5]), w: 5, h: 8, tn: 12}
+  end
+
+  defp walker_item(pzs) do
+    base =
+      if :rand.uniform(4) == 1,
+        do: %{type: :rect, x: 0, y: Enum.random([0, 10, 40]), w: 5, h: 5},
+        else: %{type: :text, x: 0, y: Enum.random([0, 10, 10.0, 20, 20.5, 30]), w: 5, h: 8}
+
+    base = Map.put(base, :h, Enum.random([8, 10, 10.0, 12]))
+
+    base =
+      if :rand.uniform(3) == 1, do: base, else: Map.put(base, :tn, Enum.random([12, 14, 14.0]))
+
+    base = if :rand.uniform(4) == 1, do: Map.put(base, :pz, Enum.random(pzs)), else: base
+
+    base =
+      if :rand.uniform(8) == 1,
+        do: Map.put(base, :rel, {3, Enum.random([2, 2.5]), 77}),
+        else: base
+
+    base = if :rand.uniform(6) == 1, do: Map.put(base, :over, true), else: base
+
+    if :rand.uniform(10) == 1,
+      do: Map.put(base, :stick, %{top: 0, y0: 0, h: 10, parent: nil}),
+      else: base
+  end
+
+  defp walker_op([]) do
+    Enum.random([
+      {:dy, Enum.random([7, -3, 2.5])},
+      {:move, Enum.random([0, 12]), Enum.random([9, -4, 0.5])},
+      {:clip, %{x: 5, y: 3, w: 200, h: 80}, nil},
+      {:xlim, 250},
+      {:atom, 5, Enum.random([7, 7.5]), {0, nil, nil, nil}}
+    ])
+  end
+
+  defp walker_op(pzs) do
+    fresh =
+      Map.new(Enum.take_random(pzs, 3), fn
+        {z, pz} -> {{z, pz}, {z, pz + 1000}}
+        pz -> {pz, pz + 1000}
+      end)
+
+    Enum.random([
+      {:dy, Enum.random([7, -3, 2.5])},
+      {:move, Enum.random([0, 12]), Enum.random([9, -4, 0.5])},
+      {:rel, 4, Enum.random([10, -10]), :over, Enum.random(pzs)},
+      {:clip, %{x: 5, y: 3, w: 200, h: 80}, nil},
+      {:xlim, 250},
+      {:atom, 5, Enum.random([7, 7.5]), {0, nil, nil, nil}},
+      {:atom, 2, Enum.random([0, 3]), {0, nil, nil, fresh}},
+      {:stick, %{top: 0, y0: 0, h: 10, parent: nil}, 0}
+    ])
+  end
+
+  # a list of items and entries (`{:frag, dy, entries, n}`, `{:wrap, op, entries, n}`) that
+  # nests `depth` levels deep (what a fragment holds has no paint order and is not sticky: see
+  # `holds_pz?/1`)
+  defp walker_entries(depth, pzs) do
+    for _ <- 1..Enum.random(0..5)//1 do
+      case if(depth > 0, do: :rand.uniform(3), else: 1) do
+        1 ->
+          walker_item(pzs)
+
+        2 ->
+          inner = walker_entries(depth - 1, [])
+          {:frag, Enum.random([0, 6, 1.5]), inner, Layout.atom_count(inner)}
+
+        3 ->
+          inner = walker_entries(depth - 1, pzs)
+          {:wrap, walker_op(pzs), inner, Layout.atom_count(inner)}
+      end
+    end
+  end
+
+  test "the readers of an atom's items find on its entries what they find on the items" do
+    :rand.seed(:exsss, {5, 6, 7})
+    pzs = [11, 12, 13, {2, 14}]
+
+    for _ <- 1..600 do
+      items = walker_entries(3, pzs)
+      {lazy, flat} = Layout.atom_readers(items, 99)
+      at = inspect(items, limit: :infinity)
+      assert lazy.baseline === flat.baseline, "baseline of #{at}"
+      assert lazy.tn === flat.tn, "line height of #{at}"
+      assert flat.pzs -- lazy.pzs == [], "paint orders of #{at}"
+    end
+  end
+
+  # what an item of an entry has that changes where it paints. Most items of an entry have the
+  # same (`keys`): then the entry can stay whole.
+  @paint_keys [
+    %{},
+    %{over: true},
+    %{under: true},
+    %{over: true, under: true},
+    %{over: false},
+    %{pz: 11},
+    %{pz: 12, over: true},
+    %{pz: {2, 14}, over: true},
+    %{pz: nil, over: true},
+    %{rel: {1, 2, 77}},
+    %{rel: {1, 2, 78}},
+    %{rel: {1, 2, 78}, pz: 11},
+    %{stick: %{top: 0, y0: 0, h: 10, parent: nil}},
+    %{stick: %{top: 0, y0: 0, h: 10, parent: :block}}
+  ]
+
+  defp paint_item(keys) do
+    keys = if :rand.uniform(8) == 1, do: Enum.random(@paint_keys), else: keys
+    item = %{type: Enum.random([:text, :rect]), x: 0, y: Enum.random([0, 10]), w: 5, h: 5}
+    Map.merge(item, keys)
+  end
+
+  defp paint_op do
+    fresh = %{11 => 1011, 12 => 1012, {2, 14} => {2, 1014}}
+
+    Enum.random([
+      {:dy, 7},
+      {:move, 12, -4},
+      {:rel, 4, 10, :over, Enum.random([11, 12, {2, 14}])},
+      {:rel, -5, 2, :under, Enum.random([11, {3, 18}])},
+      {:clip, %{x: 5, y: 3, w: 200, h: 80}, nil},
+      {:xlim, 250},
+      {:atom, 5, 7, {0, nil, nil, nil}},
+      {:atom, 2, 3, {0, nil, nil, fresh}},
+      {:stick, %{top: 0, y0: 0, h: 10, parent: Enum.random([nil, :block])}, 0}
+    ])
+  end
+
+  # a list of items and entries, `depth` levels deep, most of whose items have `keys`
+  defp paint_entries(depth, keys) do
+    for _ <- 1..Enum.random(0..5)//1 do
+      case if(depth > 0, do: :rand.uniform(3), else: 1) do
+        1 ->
+          paint_item(keys)
+
+        2 ->
+          inner = paint_entries(depth - 1, keys)
+          {:frag, Enum.random([0, 6]), inner, Layout.atom_count(inner)}
+
+        3 ->
+          inner = paint_entries(depth - 1, keys)
+          {:wrap, paint_op(), inner, Layout.atom_count(inner)}
+      end
+    end
+  end
+
+  test "an atom keeps whole only the entries whose items all paint in the same place" do
+    :rand.seed(:exsss, {8, 1, 5})
+
+    for _ <- 1..3000 do
+      items = paint_entries(3, Enum.random(@paint_keys))
+      {lazy, eager} = Layout.finalize_both(items, Enum.random([%{}, %{block: 400}]))
+      assert lazy === eager, "paint order of #{inspect(items, limit: :infinity)}"
+    end
+  end
+
+  test "an atom on its line keeps whole only the entries that paint nothing behind the text" do
+    :rand.seed(:exsss, {8, 2, 5})
+    fresh = %{11 => 1011, 12 => 1012, {2, 14} => {2, 1014}}
+
+    for _ <- 1..3000 do
+      items = paint_entries(3, Enum.random(@paint_keys))
+      op = {:atom, 6, 9, {Enum.random([0, 4]), nil, Enum.random([nil, 300]), fresh}}
+      {lazy, eager} = Layout.pending_both(items, op)
+      assert lazy === eager, "items of #{inspect(items, limit: :infinity)}"
+    end
+  end
+
   describe "sizing fold" do
     alias Browser.Page
 
@@ -8180,6 +8382,54 @@ defmodule Browser.LayoutNestedBoxesTest do
       {items, _} = Layout.layout(page.nodes, 400, &measure/2, 600, fold: :check, images: %{})
       rect = Enum.find(items, &(&1.type == :rect))
       {rect.w, Process.get(:layout_fold_hits), Process.get(:layout_fold_fallbacks)}
+    end
+
+    test "a line of one text item ends and wraps as the general clause does it" do
+      # (`fold_flush/2` and `fold_wrap_line/1` have a fast clause for this line; the two must
+      # give the same fold)
+      :rand.seed(:exsss, {3, 1, 4})
+      aligns = [:left, :right, :center, :justify, :rjustify, :rstart, :start, nil]
+
+      for align <- aligns,
+          alast <- [nil, :right, :center, :left],
+          nojust <- [false, true],
+          hang <- [0, 3],
+          text <- ["word", "word　"],
+          shift? <- [true, false],
+          side <- [:min, :mid, :max],
+          soft? <- [true, false] do
+        x = Enum.random(0..40)
+        indent = Enum.random(0..12)
+        it = %{type: :text, x: x, w: Enum.random(0..900), text: text, size: 16, vs: :baseline}
+        it = Map.merge(it, %{align: align, alast: alast, nojust: nojust, rr: 5})
+        it = if hang > 0, do: Map.put(it, :hang, hang), else: it
+
+        f = %{
+          line: [it],
+          marks: [],
+          active: [],
+          shift?: shift?,
+          side: side,
+          aligned: false,
+          width: Enum.random([1, 300, 800, 100_000]),
+          r: Enum.random([0, 7]),
+          indent: indent,
+          l: Enum.random([0, 6]),
+          x: x + it.w + Enum.random([0, 4]),
+          edges: Enum.random([%{}, %{5 => 120}, %{2 => 40}]),
+          lead: Enum.random([0, 9, 2.5]),
+          line_lead: 0,
+          empty: false,
+          pending: Enum.random([nil, %{size: 16}]),
+          after_space: false,
+          strut: false
+        }
+
+        {fast, general} = Layout.fold_flush_both(f, soft?)
+        assert fast == general, "line #{inspect(it)} soft? #{soft?} in #{inspect(f)}"
+        {fast, general} = Layout.fold_wrap_both(f)
+        assert fast == general, "wrap of line #{inspect(it)} in #{inspect(f)}"
+      end
     end
 
     test "a relative box that its offsets do not move is measured with no layout" do

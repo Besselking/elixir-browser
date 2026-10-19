@@ -376,6 +376,8 @@ defmodule Browser.Layout do
     Process.put(:layout_viewport, {0, 0, width, view_height})
     Process.put(:layout_metrics, opts[:metrics])
     Process.put(:layout_fold, Keyword.get_lazy(opts, :fold, &fold_mode_of_env/0))
+    # (`LAYOUT_LAZY=check`: an atom's entries make the items it had before, see `layout_atom/5`)
+    Process.put(:layout_lazy, Keyword.get_lazy(opts, :lazy, &lazy_mode_of_env/0))
     # the transform function lists this layout read (see `Browser.Transform.matrix/3`)
     Process.put(:layout_transforms, %{})
     {nodes, canvas} = propagate_background(nodes)
@@ -4145,6 +4147,158 @@ defmodule Browser.Layout do
     under ++ under_flow ++ flow ++ positioned
   end
 
+  # `finalize/1` that keeps an entry whole when all the items it holds paint in the same place:
+  # the same class (over the flow, under it or in it) and the same paint order. Such an entry
+  # (with the ops it waits for around it, see `wrap_ops/2`) takes the place of its items in the
+  # list, and in the sort of the positioned boxes, which is stable. So `atom_flat/1` of the
+  # result is `finalize/1` (`LAYOUT_LAZY=check` makes sure of it, see `layout_atom/5`). The
+  # entries are taken apart later, by whoever reads the items one by one; a box that clips them
+  # makes only the items it keeps (`drop_below/3`).
+  defp finalize_lazy(st) do
+    limits = if st.limits == %{}, do: nil, else: st.limits
+    {over, under_flow, flow} = sort_into_lazy(st.items, nil, limits, {[], [], []})
+    {over, under_flow, flow} = sort_into(st.rects, nil, limits, {over, under_flow, flow})
+
+    overlays = st.overlays |> Enum.reverse() |> Enum.concat()
+    overlays = if limits, do: Enum.map(overlays, &stick_limit(&1, limits)), else: overlays
+    {under, overlays} = Enum.split_with(overlays, &Map.get(&1, :under))
+
+    # (as `Enum.sort_by/2`, that also takes the entries out of their units)
+    positioned =
+      (overlays ++ over)
+      |> Enum.map(fn
+        {:unit, pz, entry} -> {pz_key(pz), entry}
+        item -> {pz_key(Map.get(item, :pz, 0)), item}
+      end)
+      |> List.keysort(0)
+      |> Enum.map(&elem(&1, 1))
+
+    under ++ under_flow ++ flow ++ positioned
+  end
+
+  # (an entry over the flow goes into `over` as `{:unit, its paint order, the entry}`)
+  defp sort_into_lazy([], _ctx, _limits, acc), do: acc
+
+  defp sort_into_lazy([{tag, d, items, _n} = entry | rest], ctx, limits, acc)
+       when tag in [:frag, :wrap] do
+    acc =
+      case ctx_summary(entry, ctx) do
+        {over?, under?, pz, _rel} ->
+          {over, under, flow} = acc
+          unit = wrap_ops(entry, ctx)
+
+          cond do
+            over? -> {[{:unit, if(pz == :none, do: 0, else: pz), unit} | over], under, flow}
+            under? -> {over, [unit | under], flow}
+            true -> {over, under, [unit | flow]}
+          end
+
+        _ ->
+          inner = if tag == :frag, do: add_dy(ctx, d), else: add_op(ctx, d)
+          sort_into_lazy(items, inner, limits, acc)
+      end
+
+    sort_into_lazy(rest, ctx, limits, acc)
+  end
+
+  defp sort_into_lazy([item | rest], ctx, limits, {over, under, flow}) do
+    item = if ctx, do: apply_ctx(item, ctx), else: item
+    item = if limits, do: stick_limit(item, limits), else: item
+
+    acc =
+      cond do
+        Map.get(item, :over) -> {[item | over], under, flow}
+        Map.get(item, :under) -> {over, [item | under], flow}
+        true -> {over, under, [item | flow]}
+      end
+
+    sort_into_lazy(rest, ctx, limits, acc)
+  end
+
+  # What all the items of an entry have that `finalize/1` reads, once the ops of the entry and
+  # of `ctx` are done: {over, under, paint order (`:none` when there is no key), the paint
+  # order of the inline box it moves with (`rel`)}. `:mixed` when two items differ, or one is
+  # sticky (`stick_limit/2` changes it at each run), and `:empty` when it holds none. This reads
+  # the items and makes no new ones. (Two items that the ops would make the same, but that
+  # differ before them, count as different.)
+  defp ctx_summary(entry, nil), do: entry_summary(entry)
+
+  defp ctx_summary(entry, {t, _}),
+    do: Enum.reduce(t, entry_summary(entry), &op_summary/2)
+
+  defp entry_summary({:frag, _, inner, _n}), do: list_summary(inner, :empty)
+  defp entry_summary({:wrap, op, inner, _n}), do: op_summary(op, list_summary(inner, :empty))
+  defp entry_summary(item), do: item_summary(item)
+
+  defp list_summary([], acc), do: acc
+
+  defp list_summary([{tag, _, _, _} = entry | rest], acc) when tag in [:frag, :wrap] do
+    case same_summary(acc, entry_summary(entry)) do
+      :mixed -> :mixed
+      acc -> list_summary(rest, acc)
+    end
+  end
+
+  defp list_summary([item | rest], {over?, under?, pz, rel} = acc)
+       when not is_map_key(item, :stick) do
+    # (most items of a long text have the same keys: they are read, and nothing is made)
+    same? =
+      Map.get(item, :over) not in [nil, false] == over? and
+        Map.get(item, :under) not in [nil, false] == under? and
+        Map.get(item, :pz, :none) === pz and
+        case item do
+          %{rel: {_, _, seq}} -> seq
+          _ -> nil
+        end === rel
+
+    if same?, do: list_summary(rest, acc), else: :mixed
+  end
+
+  defp list_summary([item | rest], acc) do
+    case same_summary(acc, item_summary(item)) do
+      :mixed -> :mixed
+      acc -> list_summary(rest, acc)
+    end
+  end
+
+  defp same_summary(:empty, s), do: s
+  defp same_summary(s, :empty), do: s
+  defp same_summary(s, s), do: s
+  defp same_summary(_, _), do: :mixed
+
+  defp item_summary(item) when is_map_key(item, :stick), do: :mixed
+
+  defp item_summary(item),
+    do:
+      {truthy?(Map.get(item, :over)), truthy?(Map.get(item, :under)), Map.get(item, :pz, :none),
+       item_rel(item)}
+
+  defp item_rel(%{rel: {_, _, seq}}), do: seq
+  defp item_rel(_item), do: nil
+
+  defp truthy?(value), do: value not in [nil, false]
+
+  # what an op does to the summary of the items it is done on (`apply_op/2`)
+  defp op_summary(_op, s) when s in [:mixed, :empty], do: s
+
+  defp op_summary({:rel, _, _, layer, pz}, {over?, under?, own, rel}),
+    do:
+      {over? or layer == :over, under? or layer == :under, if(own == :none, do: pz, else: own),
+       rel}
+
+  # (`atom_op/4`: a new paint order from `fresh`; an item that moves with an inline box goes
+  # over the rest with the paint order of that box)
+  defp op_summary({:atom, _, _, {_, _, _, _}}, {_over?, under?, _own, rel}) when rel != nil,
+    do: {true, under?, rel, nil}
+
+  defp op_summary({:atom, _, _, {_, _, _, fresh}}, {over?, under?, own, nil})
+       when fresh != nil and own not in [:none, nil] do
+    {over?, under?, fresh[own], nil}
+  end
+
+  defp op_summary({:stick, _, _}, _s), do: :mixed
+  defp op_summary(_op, s), do: s
+
   # Takes the items of a run apart (newest first, as `flat_into/3`) into what paints over the
   # flow, under it and in it, oldest first, in one pass.
   # (with the context `ctx` of the ops the entries around an item wait to do on it, see
@@ -4305,7 +4459,10 @@ defmodule Browser.Layout do
     st = %{st | clr: if(gap > 0, do: {y0, gap, st.y}, else: old)}
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
-    {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
+
+    {items, height, _base} =
+      layout_atom_flat(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
+
     # `clear` puts the float below the earlier floats on that side
     top = clear_top(st, Map.get(spec, :clear))
     top = if line_bottom, do: max(top, line_bottom), else: top
@@ -4458,7 +4615,7 @@ defmodule Browser.Layout do
     st = flush(st)
     avail = max(st.width - 2 * st.margin - st.left - st.right, 0)
     w = fit_width(st, sub, spec, avail)
-    {items, height, _} = layout_atom(st, sub, w, spec.key)
+    {items, height, _} = layout_atom_flat(st, sub, w, spec.key)
     x = st.margin + st.left
     moved = for it <- items, do: move(it, x, box.top)
 
@@ -4566,7 +4723,7 @@ defmodule Browser.Layout do
     # the baseline of an inline table is the one of its first row
     base =
       if Map.get(spec, :table?, false) or Map.get(spec, :cell?, false),
-        do: table_baseline(items, base),
+        do: table_baseline(atom_flat(items), base),
         else: base
 
     place_atom(st, %{
@@ -4694,7 +4851,7 @@ defmodule Browser.Layout do
     else
       # absolutely positioned boxes are placed against their containing block, not a column
       {abs, sub} = split_outer_abs(sub)
-      {items, height, _} = layout_atom(st, sub, colw)
+      {items, height, _} = layout_atom_flat(st, sub, colw)
       {laid, height} = split_columns(items, height, n, colw, cs)
       laid = [%{type: :box, x: 0, y: 0, w: avail, h: 0, rr: 0} | laid]
 
@@ -5035,21 +5192,60 @@ defmodule Browser.Layout do
   # `flat_items/2`): each item gets it when it is taken apart, in one update, and an item that a
   # clipping box drops is never made (`drop_below/3`). What paints behind the text is changed
   # at once, as the line does with every item of a smaller atom.
+  #
+  # An entry among the items (see `atom_flat/1`) that paints nothing behind the text stays whole:
+  # it goes into the new entry with the ops it waits for around it. Else it is taken apart, one
+  # level at a time.
   defp pending_atom_items(items, op, {others, rects, inline_rects}) do
     {mine, inline_rects, n} =
-      Enum.reduce(items, {[], inline_rects, 0}, fn sub, {mine, inline_rects, n} ->
-        # (as the line sorts them: `rel_moved/1` puts the moved ones over the rest)
-        if (sub.type not in @behind_text or Map.get(sub, :over)) || match?(%{rel: {_, _, _}}, sub),
-          do: {[sub | mine], inline_rects, n + 1},
-          else: {mine, [apply_op(sub, op) | inline_rects], n}
-      end)
+      Enum.reduce(items, {[], inline_rects, 0}, &pending_sort(&1, nil, op, &2))
 
     {wrap(mine, op, n) ++ others, rects, inline_rects}
   end
 
+  defp pending_sort({tag, d, inner, n} = entry, ctx, op, {mine, inline_rects, k} = acc)
+       when tag in [:frag, :wrap] do
+    if all_mine?(entry) do
+      {[wrap_ops(entry, ctx) | mine], inline_rects, k + n}
+    else
+      ctx = if tag == :frag, do: add_dy(ctx, d), else: add_op(ctx, d)
+      # (the entries of a run are newest first: they are taken from the end)
+      :lists.foldr(&pending_sort(&1, ctx, op, &2), acc, inner)
+    end
+  end
+
+  defp pending_sort(sub, ctx, op, {mine, inline_rects, n}) do
+    sub = if ctx, do: apply_ctx(sub, ctx), else: sub
+
+    if mine?(sub),
+      do: {[sub | mine], inline_rects, n + 1},
+      else: {mine, [apply_op(sub, op) | inline_rects], n}
+  end
+
+  # (as the line sorts them: `rel_moved/1` puts the moved ones over the rest)
+  defp mine?(sub),
+    do: (sub.type not in @behind_text or Map.get(sub, :over)) || match?(%{rel: {_, _, _}}, sub)
+
+  # whether `mine?/1` is true for every item an entry makes (a relative box puts all of its items
+  # over the rest; no other op changes what `mine?/1` reads)
+  defp all_mine?({:wrap, {:rel, _, _, :over, _}, _inner, _n}), do: true
+
+  defp all_mine?({tag, _, inner, _n}) when tag in [:frag, :wrap],
+    do: Enum.all?(inner, &all_mine?/1)
+
+  defp all_mine?(item), do: mine?(item)
+
+  # `entry` inside one entry for each op of the context `ctx` (innermost first)
+  defp wrap_ops(entry, nil), do: entry
+
+  defp wrap_ops(entry, {t, _}) do
+    n = entry_count(entry)
+    Enum.reduce(t, entry, &{:wrap, &1, [&2], n})
+  end
+
   # the atom with its items changed as `place_atom/2` would change them
   defp placed_atom(%{pending: pending, items: items} = atom),
-    do: %{atom | items: Enum.map(items, &pending_place(&1, pending))}
+    do: %{atom | items: Enum.map(atom_flat(items), &pending_place(&1, pending))}
 
   defp placed_atom(atom), do: atom
 
@@ -5292,11 +5488,13 @@ defmodule Browser.Layout do
     # (the items of an atom that holds many are changed when the line moves them to their place,
     # with the move: see `pending_atom_items/3`)
     atom =
-      if atom.w < @unbounded / 2 and length(atom.items) >= @pending_min do
+      if atom.w < @unbounded / 2 and entries_count(atom.items) >= @pending_min do
         xlim = if counts?, do: nil, else: atom.w
         pending = {max(extra, 0), List.first(st.blocks), xlim, fresh_pz(atom.items)}
         Map.put(atom, :pending, pending)
       else
+        atom = %{atom | items: atom_flat(atom.items)}
+
         atom =
           if extra > 0,
             do: %{atom | items: Enum.map(atom.items, &add_rr(&1, extra))},
@@ -5370,7 +5568,10 @@ defmodule Browser.Layout do
   # the new paint order of each one the items have (nil when they have none)
   defp fresh_pz(items) do
     order =
-      for(%{pz: pz} when pz != nil <- items, uniq: true, do: pz)
+      items
+      |> pzs_in()
+      |> :lists.reverse()
+      |> Enum.uniq()
       |> Enum.sort_by(&pz_key/1)
 
     if order != [] do
@@ -7049,7 +7250,7 @@ defmodule Browser.Layout do
   end
 
   defp renumber_memo({:atom, _, _, _, _, _, _}, {items, height, baseline}),
-    do: {renumber_pz(items), height, baseline}
+    do: {items |> atom_flat() |> renumber_pz(), height, baseline}
 
   defp renumber_memo(_key, value), do: value
 
@@ -7217,7 +7418,8 @@ defmodule Browser.Layout do
   # * `{:frag, dy, entries, n}`: the `n` items of a fragment placed again, `dy` lower than where
   #   they were placed;
   # * `{:wrap, op, entries, n}`: the `n` items a box holds, with what the box does to each of
-  #   them (`apply_op/2`: its clip, its relative offset, ...).
+  #   them (`apply_op/2`: its clip, its relative offset, ...). A flex container moves the items
+  #   of a flex item to its place with the op `{:move, dx, dy}`.
   #
   # A box that changes all the items it holds thus adds one entry, and does not make each item
   # again: with boxes nested `d` deep around `k` items, that is `d` entries and not `d * k` new
@@ -7259,9 +7461,10 @@ defmodule Browser.Layout do
   defp ctx_dys(nil), do: []
 
   defp ctx_dys({t, _}) do
-    for op <- t, elem(op, 0) in [:dy, :rel, :atom] do
+    for op <- t, elem(op, 0) in [:dy, :move, :rel, :atom] do
       case op do
         {:dy, dy} -> dy
+        {:move, _, dy} -> dy
         {:rel, _, dy, _, _} -> dy
         {:atom, _, dy, _} -> dy
       end
@@ -7271,6 +7474,57 @@ defmodule Browser.Layout do
   # the number of items in an entry of a run
   defp entry_count({tag, _, _, n}) when tag in [:frag, :wrap], do: n
   defp entry_count(_item), do: 1
+
+  defp entries_count(entries, k \\ 0)
+  defp entries_count([], k), do: k
+
+  defp entries_count([{tag, _, _, n} | rest], k) when tag in [:frag, :wrap],
+    do: entries_count(rest, k + n)
+
+  defp entries_count([_item | rest], k), do: entries_count(rest, k + 1)
+
+  # The items of an atom are a list oldest first, as `finalize/1` makes it. The flex moves
+  # (`moved_items/2`) put entries in it, and the items of each entry are newest first, as in a
+  # run. -> the items, oldest first, with all the entries taken apart.
+  defp atom_flat(items) do
+    if holds_entry?(items),
+      do: items |> :lists.reverse() |> flat_into(nil, []),
+      else: items
+  end
+
+  defp holds_entry?([]), do: false
+  defp holds_entry?([{tag, _, _, _} | _]) when tag in [:frag, :wrap], do: true
+  defp holds_entry?([_item | rest]), do: holds_entry?(rest)
+
+  # the paint orders that the items of `entries` have, or get from the ops around them, and
+  # maybe some more (see `fresh_pz/1`: one it does not find loses its place in the paint order,
+  # one more does no harm)
+  defp pzs_in(entries, acc \\ [])
+  defp pzs_in([], acc), do: acc
+  defp pzs_in([{:frag, _, _, _} | rest], acc), do: pzs_in(rest, acc)
+
+  defp pzs_in([{:wrap, {:rel, _, _, _, pz}, inner, _} | rest], acc),
+    do: pzs_in(rest, pzs_in(inner, [pz | acc]))
+
+  defp pzs_in([{:wrap, {:atom, _, _, {_, _, _, fresh}}, inner, _} | rest], acc)
+       when fresh != nil do
+    acc = inner |> pzs_in() |> Enum.reduce(acc, &[Map.get(fresh, &1, &1) | &2])
+    pzs_in(rest, acc)
+  end
+
+  defp pzs_in([{:wrap, _op, inner, _} | rest], acc), do: pzs_in(rest, pzs_in(inner, acc))
+
+  defp pzs_in([item | rest], acc) do
+    acc =
+      case item do
+        %{pz: pz, rel: {_, _, seq}} when pz != nil -> [seq, pz | acc]
+        %{rel: {_, _, seq}} -> [seq | acc]
+        %{pz: pz} when pz != nil -> [pz | acc]
+        _ -> acc
+      end
+
+    pzs_in(rest, acc)
+  end
 
   # the items with the ops of `ctx` done on them, oldest first, on top of `acc`
   defp flat_into([], _ctx, acc), do: acc
@@ -7301,12 +7555,13 @@ defmodule Browser.Layout do
       {t, nil}
     else
       place = Enum.reduce(t, %{x: 0, y: 0}, &place_op(&1, &2, %{}))
-      moves = for op <- t, elem(op, 0) in [:dy, :rel], do: op_move(op)
+      moves = for op <- t, elem(op, 0) in [:dy, :move, :rel], do: op_move(op)
       {t, {moves, Map.drop(place, [:x, :y])}}
     end
   end
 
   defp op_move({:dy, dy}), do: {0, dy}
+  defp op_move({:move, dx, dy}), do: {dx, dy}
   defp op_move({:rel, dx, dy, _, _}), do: {dx, dy}
 
   # `entries` (newest first, `n` items in all) with `op` to do on each item. A box that holds
@@ -7321,12 +7576,23 @@ defmodule Browser.Layout do
 
   defp wrap(entries, op, n), do: [{:wrap, op, entries, n}]
 
+  # the items of an atom (oldest first, see `atom_flat/1`), each with `op` to do on it: in one
+  # entry, or done at once on fewer than `@wrap_min` items
+  defp moved_items(items, op) do
+    case entries_count(items) do
+      n when n < @wrap_min -> items |> atom_flat() |> Enum.map(&apply_op(&1, op))
+      n -> [{:wrap, op, :lists.reverse(items), n}]
+    end
+  end
+
   # the keys `move/3` changes in an item that has none of the keys `plain_place?/1` looks for
   @place_keys [:x, :y, :xlim, :clip, :clips, :sc]
 
   # (an item whose place is only in `@place_keys` gets the ops in a small map of these keys, and
   # is made again one time; an item for which `own_place?/1` is false takes what the context
   # worked out)
+  # (one op is done as it is: the context saves nothing then)
+  defp apply_ctx(item, {[op], _}), do: apply_op(item, op)
   defp apply_ctx(item, {t, nil}), do: Enum.reduce(t, item, &apply_op(&2, &1))
 
   defp apply_ctx(item, {t, {moves, set}}) do
@@ -7368,6 +7634,7 @@ defmodule Browser.Layout do
 
   # `apply_op/2` on the keys of `item` in `@place_keys` (`place`)
   defp place_op({:dy, dy}, place, _item), do: move_place(place, 0, dy)
+  defp place_op({:move, dx, dy}, place, _item), do: move_place(place, dx, dy)
   defp place_op({:clip, clip, sid}, place, _item), do: put_clip(place, clip, sid)
   defp place_op({:xlim, limit}, place, _item), do: limit_extent(place, limit)
 
@@ -7377,6 +7644,7 @@ defmodule Browser.Layout do
   end
 
   defp apply_op(item, {:dy, dy}), do: move(item, 0, dy)
+  defp apply_op(item, {:move, dx, dy}), do: move(item, dx, dy)
   defp apply_op(item, {:clip, clip, sid}), do: put_clip(item, clip, sid)
   defp apply_op(item, {:xlim, limit}), do: limit_extent(item, limit)
 
@@ -7496,7 +7764,7 @@ defmodule Browser.Layout do
 
   # (the memo keys of atoms, extents, minimum extents and fold items hold the flex mark: the
   # layout under them reads it, and the same ops can be laid out with and without it)
-  defp layout_atom(st, sub, width, key \\ nil, cbh \\ nil) do
+  defp layout_atom(st, sub, width, key, cbh \\ nil) do
     memo(
       {:atom, key || :erlang.phash2(sub), width, cbh, Process.get(:layout_intrinsic, false),
        Process.get(:layout_boxes, false), Process.get(:layout_flex_item, false)},
@@ -7506,10 +7774,21 @@ defmodule Browser.Layout do
         # heights refer to)
         sub_st = run(sub, max(width, 0), st.measure, st.view_h, 0, nil, true, st.images, cbh)
         height = sub_st.y + sub_st.gap + sub_st.ngap
-        items = finalize(sub_st)
+        items = finalize_lazy(sub_st)
+
+        if Process.get(:layout_lazy) == :check and atom_flat(items) !== finalize(sub_st),
+          do: raise("layout check: the entries an atom keeps are not the items it has")
+
         {items, height, last_baseline(items, height)}
       end
     )
+  end
+
+  # `layout_atom/5` for a reader that moves, cuts or measures the items one by one: they are
+  # taken apart (see `atom_flat/1`)
+  defp layout_atom_flat(st, sub, width, key \\ nil, cbh \\ nil) do
+    {items, height, baseline} = layout_atom(st, sub, width, key, cbh)
+    {atom_flat(items), height, baseline}
   end
 
   # A flex item's height is not definite for what it holds: a percentage inside it is `auto`.
@@ -7554,37 +7833,145 @@ defmodule Browser.Layout do
     end
   end
 
-  # the `normal` line height of the last line of text in an atom
+  # the `normal` line height of the last line of text in an atom: the biggest `tn` of the texts
+  # whose top is the lowest one (in one pass, as `last_baseline/2`)
   defp last_line_tn(items) do
-    case Enum.filter(items, &(&1.type == :text)) do
-      [] ->
-        0
-
-      texts ->
-        last_y = texts |> Enum.map(& &1.y) |> Enum.max()
-        for(%{y: ^last_y} = t <- texts, do: Map.get(t, :tn, 0)) |> Enum.max()
+    case fold_texts(items, nil, &last_line_text/3) do
+      nil -> 0
+      {_top, tn} -> tn
     end
   end
+
+  defp last_line_text(it, y, nil), do: {y, Map.get(it, :tn, 0)}
+  defp last_line_text(it, y, {top, _}) when y > top, do: {y, Map.get(it, :tn, 0)}
+
+  defp last_line_text(it, y, {top, tn} = acc) when y === top do
+    case Map.get(it, :tn, 0) do
+      own when own > tn -> {top, own}
+      _ -> acc
+    end
+  end
+
+  defp last_line_text(_it, _y, acc), do: acc
 
   # the bottom of the last line of text: the lowest bottom of the texts whose top is the lowest
   # one (in one pass over the items, which an atom of a long text has many of; of equal numbers,
   # the first one counts, as with `Enum.max/1`, and a text sits on that line when its top is
   # exactly the same term)
   defp last_baseline(items, height) do
-    case Enum.reduce(items, nil, &last_text_bottom/2) do
+    case fold_texts(items, nil, &last_text_bottom/3) do
       nil -> height
       {_top, bottom} -> bottom
     end
   end
 
-  defp last_text_bottom(%{type: :text, y: y, h: h}, nil), do: {y, y + h}
-  defp last_text_bottom(%{type: :text, y: y, h: h}, {top, _}) when y > top, do: {y, y + h}
+  defp last_text_bottom(%{h: h}, y, nil), do: {y, y + h}
+  defp last_text_bottom(%{h: h}, y, {top, _}) when y > top, do: {y, y + h}
 
-  defp last_text_bottom(%{type: :text, y: y, h: h}, {top, bottom})
-       when y === top and y + h > bottom,
-       do: {top, y + h}
+  defp last_text_bottom(%{h: h}, y, {top, bottom}) when y === top and y + h > bottom,
+    do: {top, y + h}
 
-  defp last_text_bottom(_item, acc), do: acc
+  defp last_text_bottom(_it, _y, acc), do: acc
+
+  # `fun.(text, y, acc)` for each text of the items of an atom (oldest first, see
+  # `atom_flat/1`), with the `y` the text has when its entries are taken apart. No item is made:
+  # `y` is the same sum that `apply_ctx/2` makes, in the same order (`kept_into/5`). (An item
+  # that moves with an inline box around the atom, `rel`, is made: the op `:atom` moves it once
+  # more.)
+  defp fold_texts(items, acc, fun) do
+    Enum.reduce(items, acc, fn
+      {:frag, _, _, _} = entry, acc -> entry_texts(entry, nil, acc, fun)
+      {:wrap, _, _, _} = entry, acc -> entry_texts(entry, nil, acc, fun)
+      %{type: :text, y: y} = it, acc -> fun.(it, y, acc)
+      _, acc -> acc
+    end)
+  end
+
+  defp entry_texts({:frag, fdy, inner, _n}, ctx, acc, fun),
+    do: texts_newest_first(inner, add_dy(ctx, fdy), acc, fun)
+
+  defp entry_texts({:wrap, op, inner, _n}, ctx, acc, fun),
+    do: texts_newest_first(inner, add_op(ctx, op), acc, fun)
+
+  # (the entries of a run are newest first: they are visited from the end)
+  defp texts_newest_first(entries, ctx, acc, fun) do
+    dys = ctx_dys(ctx)
+
+    :lists.foldr(
+      fn
+        {:frag, _, _, _} = entry, acc -> entry_texts(entry, ctx, acc, fun)
+        {:wrap, _, _, _} = entry, acc -> entry_texts(entry, ctx, acc, fun)
+        %{type: :text} = it, acc -> fun.(it, text_y(it, ctx, dys), acc)
+        _, acc -> acc
+      end,
+      acc,
+      entries
+    )
+  end
+
+  defp text_y(%{y: y}, nil, _dys), do: y
+  defp text_y(%{rel: _} = it, {_, nil} = ctx, _dys), do: apply_ctx(it, ctx).y
+  defp text_y(%{y: y}, _ctx, dys), do: Enum.reduce(dys, y, &(&2 + &1))
+
+  @doc false
+  # For the tests: the number of items in `entries`.
+  def atom_count(entries), do: entries_count(entries)
+
+  @doc false
+  # For the tests: what the readers of an atom's items find on `items` (entries and all), and on
+  # the same items taken apart, as the readers did before entries: -> {lazy, flat}. `pzs` of the
+  # lazy side must hold every paint order of the flat side.
+  def atom_readers(items, height) do
+    flat = atom_flat(items)
+
+    texts = Enum.filter(flat, &(&1.type == :text))
+
+    tn =
+      case texts do
+        [] ->
+          0
+
+        texts ->
+          last_y = texts |> Enum.map(& &1.y) |> Enum.max()
+          for(%{y: ^last_y} = t <- texts, do: Map.get(t, :tn, 0)) |> Enum.max()
+      end
+
+    base =
+      Enum.reduce(texts, nil, fn
+        %{y: y, h: h}, nil -> {y, y + h}
+        %{y: y, h: h}, {top, _} when y > top -> {y, y + h}
+        %{y: y, h: h}, {top, bottom} when y === top and y + h > bottom -> {top, y + h}
+        _, acc -> acc
+      end)
+
+    base = if base, do: elem(base, 1), else: height
+    flat_pzs = for %{pz: pz} when pz != nil <- flat, uniq: true, do: pz
+
+    {%{baseline: last_baseline(items, height), tn: last_line_tn(items), pzs: pzs_in(items)},
+     %{baseline: base, tn: tn, pzs: flat_pzs, items: flat}}
+  end
+
+  @doc false
+  # For the tests: the items of a run (newest first, entries and all) in paint order, from
+  # `finalize_lazy/1` taken apart and from `finalize/1`, with the bottoms of the blocks that
+  # limit sticky boxes (`limits`). The two must be equal.
+  def finalize_both(items, limits) do
+    st = %{items: items, rects: [], overlays: [], limits: limits}
+    {atom_flat(finalize_lazy(st)), finalize(st)}
+  end
+
+  @doc false
+  # For the tests: what `pending_atom_items/3` makes of the items of an atom (oldest first,
+  # entries and all) and of the same items taken apart first, with the entries it makes taken
+  # apart. The two must be equal.
+  def pending_both(items, op) do
+    sort = fn items ->
+      {mine, rects, inline_rects} = pending_atom_items(items, op, {[], [], []})
+      {flat_items(mine), rects, inline_rects}
+    end
+
+    {sort.(items), sort.(atom_flat(items))}
+  end
 
   # A marker box is as wide as its content only when it is not just the measuring width: the
   # box of a block-level control fills whatever width it is laid out at.
@@ -7681,7 +8068,9 @@ defmodule Browser.Layout do
     edge = st.width - st.margin - st.right
 
     if Map.get(spec, :clear) == nil and st.x + w <= edge - st.fr do
-      {items, height, _base} = layout_atom(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
+      {items, height, _base} =
+        layout_atom_flat(st, sub, w, Map.get(spec, :key), atom_cbh(st, spec))
+
       {x, y} = place_float(st, side, w, height, st.y, st.margin + st.left, edge)
 
       if y == st.y do
@@ -8890,7 +9279,7 @@ defmodule Browser.Layout do
               clamp_width(w, %{maxw: it.maxw, minw: it.minw, extra: it.extra, mextra: 0}, span_w)
 
             w = max(round(w), 1)
-            {items, h, _} = layout_atom(st, it.sub, w, it.key)
+            {items, h, _} = layout_atom_flat(st, it.sub, w, it.key)
             Map.merge(it, %{w: w, items: items, h: h, room: room})
           end
 
@@ -8911,6 +9300,8 @@ defmodule Browser.Layout do
             dy = flex_offset(flex_align(it, gs.align), cross, it.h)
             dx = grid_justify(it, gs, it.room)
             x = Enum.at(xs, it.col) + auto_zero(it.ml) + dx
+            # (a stretched item has the items of `flex_atom/4`: see `atom_flat/1`)
+            it = %{it | items: atom_flat(it.items)}
             for item <- z_items(it), do: move(item, round(x), y + dy)
           end)
 
@@ -10014,7 +10405,7 @@ defmodule Browser.Layout do
 
     {placed, y} =
       Enum.map_reduce(laid, round(start), fn {items, cross}, y ->
-        {items |> List.flatten() |> Enum.map(&move(&1, 0, y)), y + cross + gap + round(between)}
+        {items |> List.flatten() |> moved_items({:move, 0, y}), y + cross + gap + round(between)}
       end)
 
     {List.flatten(placed), max(y - gap - round(between), round(cs.height))}
@@ -10168,7 +10559,7 @@ defmodule Browser.Layout do
 
         ix = x + it.ml
         # (halves go up, so that a box shifted by -2.5 lands where one at 97.5 would be drawn)
-        moved = for item <- z_items(it), do: move(item, floor(ix + 0.5), top + dy)
+        moved = flex_moved(it, floor(ix + 0.5), top + dy)
         {moved, ix + it.hw + it.mr + cs.col_gap + floor(between + 0.5)}
       end)
 
@@ -10343,7 +10734,9 @@ defmodule Browser.Layout do
   # the distance each baseline-aligned item is moved down so that their first baselines meet
   defp baseline_offsets(sized, container) do
     bases =
-      for it <- sized, baseline_item?(it, container), do: {it, first_baseline(it.items, it.h)}
+      for it <- sized,
+          baseline_item?(it, container),
+          do: {it, first_baseline(atom_flat(it.items), it.h)}
 
     case bases do
       [] ->
@@ -10505,6 +10898,7 @@ defmodule Browser.Layout do
       {laid, {x_end, tallest}} =
         Enum.map_reduce(cols, {0, 0}, fn col, {x, tallest} ->
           {items, y} = flex_column_place(st, pcs, col)
+          items = atom_flat(items)
           width = col |> Enum.map(&(&1.x + &1.w + auto_zero(&1.mr))) |> Enum.max()
 
           {Enum.map(items, &{&1, y}) |> Enum.map(fn {i, y} -> {move(i, x, 0), y} end),
@@ -10699,7 +11093,7 @@ defmodule Browser.Layout do
 
     {laid, y} =
       Enum.map_reduce(sized, round(start), fn it, y ->
-        moved = for item <- z_items(it), do: move(item, round(it.x), y)
+        moved = flex_moved(it, round(it.x), y)
         {moved, y + it.h + round(cs.row_gap + between)}
       end)
 
@@ -11747,7 +12141,7 @@ defmodule Browser.Layout do
           {eprops, vdelta} = if ts.collapse?, do: edge_props(p, ncols, nrows), else: {%{}, 0}
           sub = if eprops == %{}, do: p.cell.sub, else: p.cell.build.(eprops)
           key = if eprops == %{}, do: p.cell.key, else: {p.cell.key, eprops}
-          {items0, h, _} = layout_atom(st, sub, w, key)
+          {items0, h, _} = layout_atom_flat(st, sub, w, key)
           Map.merge(p, %{w: w, h0: h, items0: items0, eprops: eprops, vdelta: vdelta})
         end)
 
@@ -11818,7 +12212,9 @@ defmodule Browser.Layout do
             if p.cell.plain and not ts.collapse? and p.eprops == %{} do
               if extra_top == 0, do: p.items0, else: Enum.map(p.items0, &move(&1, 0, extra_top))
             else
-              {items, _h, _} = layout_atom(st, p.cell.build.(props), p.w, {p.cell.key, props})
+              {items, _h, _} =
+                layout_atom_flat(st, p.cell.build.(props), p.w, {p.cell.key, props})
+
               items
             end
 
@@ -11899,7 +12295,7 @@ defmodule Browser.Layout do
   defp table_caption_items(_st, nil, _w), do: {[], 0}
 
   defp table_caption_items(st, sub, w) do
-    {items, h, _} = layout_atom(st, sub, max(w, 1))
+    {items, h, _} = layout_atom_flat(st, sub, max(w, 1))
     {items, h}
   end
 
@@ -12403,6 +12799,16 @@ defmodule Browser.Layout do
 
   # -- floats --------------------------------------------------------------------------------
 
+  # The items of a flex item moved to its place, in one entry (`moved_items/2`). With a
+  # `z-index` they paint with the positioned boxes, as `z_items/1` makes them.
+  defp flex_moved(%{zi: zi} = it, dx, dy) when is_integer(zi) do
+    layer = if zi < 0, do: :under, else: :over
+    seq = :erlang.unique_integer([:monotonic])
+    moved_items(it.items, {:rel, dx, dy, layer, z_order(seq, zi)})
+  end
+
+  defp flex_moved(it, dx, dy), do: moved_items(it.items, {:move, dx, dy})
+
   # the items of a flex or grid item that has a `z-index`: they paint with the positioned boxes
   defp z_items(%{zi: zi, items: items}) when is_integer(zi) do
     layer = if zi < 0, do: :under, else: :over
@@ -12549,6 +12955,8 @@ defmodule Browser.Layout do
   # raises when the fold finds another width (what `mix reftest --layout-check` and
   # `mix reftest --sweep` run).
 
+  defp lazy_mode_of_env, do: if(System.get_env("LAYOUT_LAZY") == "check", do: :check, else: :on)
+
   defp fold_mode_of_env do
     case System.get_env("LAYOUT_FOLD") do
       "off" -> :off
@@ -12648,7 +13056,7 @@ defmodule Browser.Layout do
     :throw, :layout ->
       # (the height of the box it sits in, which its percentage heights refer to: not followed)
       if Map.get(spec, :hpct_atom) != nil, do: throw(:layout)
-      {items, _height, _base} = layout_atom(f.st, sub, w, Map.get(spec, :key))
+      {items, _height, _base} = layout_atom_flat(f.st, sub, w, Map.get(spec, :key))
       item_edges(items)
   end
 
@@ -13109,7 +13517,7 @@ defmodule Browser.Layout do
           fold_wrap_glued(f, style)
 
         true ->
-          f |> fold_flush(true) |> fold_start_line(0)
+          fold_wrap_line(f)
       end
 
     glue? = glued? and not f.empty and space_w == 0 and not f.after_space
@@ -13215,6 +13623,30 @@ defmodule Browser.Layout do
     %{f | x: f.l + dx + used, indent: f.l, lead: f.lead - used, line_lead: used}
   end
 
+  # A line wraps: it ends, and the next one starts (`fold_flush(f, true)` and then
+  # `fold_start_line(f, 0)`). A line of one text item, as the fast clause of `fold_flush/2`
+  # ends it, does the two in one update.
+  defp fold_wrap_line(%{line: [%{type: :text} = it], marks: [], active: []} = f)
+       when not is_map_key(it, :strut) do
+    {f, shift} = fold_shift(f, true)
+    used = f.lead
+
+    %{
+      f
+      | line: [],
+        empty: true,
+        x: f.l + used,
+        indent: f.l,
+        lead: f.lead - used,
+        line_lead: used,
+        pending: nil,
+        strut: false,
+        edges: fold_text_edge(f.edges, it, shift)
+    }
+  end
+
+  defp fold_wrap_line(f), do: f |> fold_flush(true) |> fold_start_line(0)
+
   # `wrap_glued` with `:hold`: a space of `break-spaces` does not wrap away from the word before
   # it. Alone on its line with `overflow-wrap: break-word` or `anywhere`, the line breaks before
   # it. Else the chain glued to it goes to the next line, or it stays where it is.
@@ -13224,7 +13656,7 @@ defmodule Browser.Layout do
         throw(:layout)
 
       match?([%{type: :text}], f.line) and style.wrap_chars in [:word, :anywhere] ->
-        f |> fold_flush(true) |> fold_start_line(0)
+        fold_wrap_line(f)
 
       true ->
         {chain, rest} = Enum.split_while(f.line, &Map.get(&1, :glue, false))
@@ -13261,10 +13693,10 @@ defmodule Browser.Layout do
       [%{type: :text} = first | [_ | _] = older] ->
         if Enum.all?(chain, &(&1.type == :text)),
           do: fold_carry_chain(f, [first | chain], older),
-          else: f |> fold_flush(true) |> fold_start_line(0)
+          else: fold_wrap_line(f)
 
       _ ->
-        f |> fold_flush(true) |> fold_start_line(0)
+        fold_wrap_line(f)
     end
   end
 
@@ -13281,7 +13713,7 @@ defmodule Browser.Layout do
       end)
 
     f = %{f | line: older, marks: kept, x: hd(older).x + hd(older).w}
-    f = f |> fold_flush(true) |> fold_start_line(0)
+    f = fold_wrap_line(f)
     shift = f.x - first_x
 
     mark_shift = fn
@@ -13332,7 +13764,40 @@ defmodule Browser.Layout do
     %{f | pending: nil, marks: [], active: active}
   end
 
-  defp fold_flush(f, soft?) do
+  # A line of one text item, with no inline box marked or open on it, in one step. This does
+  # the same work as `fold_flush_general/2`: `fold_justified!/2` cannot refuse one item (there
+  # is no gap to spread over), the item has one edge and nothing follows it on its line (so all
+  # of its hang counts), and `fold_inline_boxes/2` carries nothing and keeps the lead. A change
+  # to the general clause must also go here (the test of `fold_flush_both/2` compares the two).
+  defp fold_flush(%{line: [%{type: :text} = it], marks: [], active: []} = f, soft?)
+       when not is_map_key(it, :strut) do
+    {f, shift} = fold_shift(f, soft?)
+
+    %{
+      f
+      | line: [],
+        empty: true,
+        x: f.indent,
+        pending: nil,
+        strut: false,
+        edges: fold_text_edge(f.edges, it, shift)
+    }
+  end
+
+  defp fold_flush(f, soft?), do: fold_flush_general(f, soft?)
+
+  @doc false
+  # For the tests: a line ended by the clause `fold_flush/2` picks, and by the general clause.
+  # The two must be equal for each line.
+  def fold_flush_both(f, soft?), do: {fold_flush(f, soft?), fold_flush_general(f, soft?)}
+
+  @doc false
+  # For the tests: a line wrapped by `fold_wrap_line/1`, and by the general clause.
+  def fold_wrap_both(f),
+    do: {fold_wrap_line(f), f |> fold_flush_general(true) |> fold_start_line(0)}
+
+  # (the fast clause of `fold_flush/2` above does the same for a line of one text item)
+  defp fold_flush_general(f, soft?) do
     fold_justified!(f, soft?)
     {f, shift} = fold_shift(f, soft?)
     f = fold_line_edges(f, shift)
@@ -13463,6 +13928,12 @@ defmodule Browser.Layout do
     end)
   end
 
+  # (`fold_line_edges/2` for a text that is the last on its line: all of its hang counts)
+  defp fold_text_edge(edges, it, shift) do
+    edge = min(it.x + shift + it.w - Map.get(it, :hang, 0), @unbounded)
+    Map.update(edges, it.rr, edge, &max(&1, edge))
+  end
+
   # -> {the marks carried to the next line, the boxes still open, the lead of the next line}
   defp fold_inline_boxes(%{marks: [], active: []} = f, _last_right), do: {[], [], f.lead}
 
@@ -13502,7 +13973,7 @@ defmodule Browser.Layout do
     f =
       if not f.empty and f.x + space_w + w > f.width - f.r and
            not fold_glued_before?(f, space_w),
-         do: f |> fold_flush(true) |> fold_start_line(0),
+         do: fold_wrap_line(f),
          else: f
 
     space_w = if f.empty, do: 0, else: space_w

@@ -203,10 +203,10 @@ defmodule Browser.Fetch do
         {:ok, entry.body, url}
 
       {_, entry} ->
-        request(url, :get, body, redirects, ctx, entry)
+        shared(url, redirects, ctx, fn -> request(url, :get, body, redirects, ctx, entry) end)
 
       :miss ->
-        request(url, :get, body, redirects, ctx, nil)
+        shared(url, redirects, ctx, fn -> request(url, :get, body, redirects, ctx, nil) end)
     end
   end
 
@@ -215,6 +215,158 @@ defmodule Browser.Fetch do
 
   defp lookup(url, :history), do: HttpCache.lookup(url, use_stale: true)
   defp lookup(url, _), do: HttpCache.lookup(url)
+
+  # Two loads of the same address at the same time make one request: the second waits for the
+  # result of the first. (When a frame loads, the script process and the page both load each
+  # style sheet of the frame.) A load that the first load does not finish (it raised, or its
+  # process stopped) makes its own request. A load with `on_chunk` makes its own request.
+  # Only the first address of a load is shared, not the hops of a redirect: else two loads
+  # whose redirects go to the address of the other (a redirect loop) wait for each other.
+  @inflight :browser_fetch_inflight
+
+  @doc false
+  def inflight_table, do: @inflight
+
+  defp shared(url, @max_redirects, %{on_chunk: nil} = ctx, fun) do
+    if :ets.whereis(@inflight) == :undefined do
+      fun.()
+    else
+      cross_site = ctx.cross_site or cross_site?(ctx.initiator, url)
+      lead_or_wait({url, ctx.cache, ctx.navigation, cross_site, ctx.headers}, fun)
+    end
+  end
+
+  defp shared(_url, _redirects, _ctx, fun), do: fun.()
+
+  # The table holds `{key, leader}` for each first load, and `{{:wait, key, pid}, leader}`
+  # for each load that waits for it. The leader removes its key first, then each row of a
+  # waiter of its own: only the one that removes the row of a waiter (the leader or the
+  # waiter) sends or gets the result, so that no message stays in the mailbox of a waiter.
+  # The table belongs to `Browser.HttpCache`: if that process stops, the table goes with
+  # the rows, and a waiter makes its own request.
+  defp lead_or_wait(key, fun) do
+    case first?(key) do
+      true -> lead(key, fun)
+      false -> wait(key, fun)
+      :gone -> fun.()
+    end
+  end
+
+  defp first?(key) do
+    :ets.insert_new(@inflight, {key, self()})
+  rescue
+    # the table went with its owner, after the check of `shared/4`
+    ArgumentError -> :gone
+  end
+
+  defp lead(key, fun) do
+    outcome =
+      try do
+        {:ok, fun.()}
+      catch
+        kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+      end
+
+    finish(key, outcome)
+
+    case outcome do
+      {:ok, result} -> result
+      {:raised, kind, reason, stack} -> :erlang.raise(kind, reason, stack)
+    end
+  end
+
+  defp finish(key, outcome) do
+    me = self()
+    # the key goes first: a load that adds itself as a waiter after this sees no key and
+    # makes its own request
+    :ets.delete_object(@inflight, {key, me})
+
+    for pid <- :ets.select(@inflight, [{{{:wait, key, :"$1"}, me}, [], [:"$1"]}]),
+        take(key, pid, me),
+        do: send(pid, {@inflight, key, outcome})
+
+    :ok
+  rescue
+    # the table went with its owner; each waiter watches the owner
+    ArgumentError -> :ok
+  end
+
+  # removes the row of the waiter `pid` of `leader`; false when it was not there
+  defp take(key, pid, leader),
+    do: :ets.select_delete(@inflight, [{{{:wait, key, pid}, leader}, [], [true]}]) == 1
+
+  defp wait(key, fun) do
+    case join(key) do
+      {leader, ref, owner} ->
+        receive do
+          {@inflight, ^key, outcome} ->
+            Process.demonitor(ref, [:flush])
+            Process.demonitor(owner, [:flush])
+
+            case outcome do
+              {:ok, result} -> result
+              _ -> fun.()
+            end
+
+          {:DOWN, ^ref, :process, _, _} ->
+            Process.demonitor(owner, [:flush])
+            forget(key, leader)
+            fun.()
+
+          {:DOWN, ^owner, :process, _, _} ->
+            Process.demonitor(ref, [:flush])
+            fun.()
+        end
+
+      :own ->
+        fun.()
+    end
+  end
+
+  # Adds this load as a waiter of the first load of `key`: `{leader, ref, owner}` (the
+  # monitors of the leader and of the owner of the table), or `:own` when this load makes
+  # its own request (the first load has just finished, or it is this process).
+  defp join(key) do
+    me = self()
+
+    with [{_, leader}] when leader != me <- :ets.lookup(@inflight, key),
+         owner when is_pid(owner) <- :ets.info(@inflight, :owner) do
+      ref = Process.monitor(leader)
+      owner = Process.monitor(owner)
+
+      if joined?(key, me, leader) do
+        {leader, ref, owner}
+      else
+        Process.demonitor(ref, [:flush])
+        Process.demonitor(owner, [:flush])
+        :own
+      end
+    else
+      _ -> :own
+    end
+  rescue
+    ArgumentError -> :own
+  end
+
+  # The leader reads the waiters after it removes its key. While the key is there, the leader
+  # reads this row. If the key went before the row came, this load makes its own request,
+  # unless the leader has already taken the row: then its result comes.
+  defp joined?(key, me, leader) do
+    :ets.insert(@inflight, {{:wait, key, me}, leader})
+    :ets.lookup(@inflight, key) == [{key, leader}] or not take(key, me, leader)
+  rescue
+    # the table went with its owner: the :DOWN of the owner comes
+    ArgumentError -> true
+  end
+
+  # A leader that stopped in the middle leaves its key and the rows of its waiters behind
+  # (also of waiters that stopped).
+  defp forget(key, leader) do
+    :ets.delete_object(@inflight, {key, leader})
+    :ets.select_delete(@inflight, [{{{:wait, key, :_}, leader}, [], [true]}])
+  rescue
+    ArgumentError -> :ok
+  end
 
   # `entry`: a stale cached response to revalidate, or nil
   defp request(url, method, body, redirects, ctx, entry) do

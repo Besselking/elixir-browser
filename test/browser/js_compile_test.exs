@@ -801,22 +801,25 @@ defmodule Browser.JS.CompileTest do
 
   # The number of calls of `GC.mark/2` and `GC.push/3` in one collection. Each item that
   # the walk looks at is one call of `mark/2`, and each edge is one call of `push/3`. The
-  # count is for all processes, which is safe because this module is not async.
+  # count is for the calling process only: a page runtime of another test can still run
+  # its timers, and with `JS_GC=every` it collects after each timer.
   defp gc_calls(fun) do
     mfas = [{GC, :mark, 2}, {GC, :push, 3}]
     # A pattern on a module that is not loaded yet matches nothing.
     Code.ensure_loaded!(GC)
-    for mfa <- mfas, do: 1 = :erlang.trace_pattern(mfa, true, [:call_count])
+    for mfa <- mfas, do: 1 = :erlang.trace_pattern(mfa, true, [:call_time])
+    :erlang.trace(self(), true, [:call])
 
     try do
       fun.()
 
       for mfa <- mfas do
-        {:call_count, n} = :erlang.trace_info(mfa, :call_count)
-        n
+        {:call_time, counts} = :erlang.trace_info(mfa, :call_time)
+        for {pid, n, _, _} <- counts, pid == self(), reduce: 0, do: (sum -> sum + n)
       end
     after
-      for mfa <- mfas, do: :erlang.trace_pattern(mfa, false, [:call_count])
+      :erlang.trace(self(), false, [:call])
+      for mfa <- mfas, do: :erlang.trace_pattern(mfa, false, [:call_time])
     end
   end
 

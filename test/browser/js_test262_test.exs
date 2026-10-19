@@ -148,4 +148,13 @@ defmodule Browser.JS.Test262Test do
     assert Test262.collect(root, ["a/x.js"]) == ["a/x.js"]
     assert Test262.collect(root, ["nope"]) == []
   end
+
+  # The report of `mix js.test262` prints the first line of each failure reason. A reason
+  # with bytes that are not UTF-8 stopped the task with an io error in `-v` mode.
+  test "the report gives the first line of a reason as valid UTF-8" do
+    alias Mix.Tasks.Js.Test262, as: Task262
+    assert Task262.first_line("Test262Error: a\nb") == "Test262Error: a"
+    assert Task262.first_line("é: \xFF\xC3 end\nnext") == "é: \\xFF\\xC3 end"
+    assert String.valid?(Task262.first_line(<<0xC3, 0x28, ?\n, 0xFF>>))
+  end
 end

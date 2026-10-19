@@ -1,6 +1,9 @@
 # Usage: mix run --no-start bench/speedometer.exs URL [SUITES] [TIMEOUT_S]
 # Runs Speedometer 3.1 headlessly. URL is the folder with a local mirror, for example
-# http://localhost:8765/Speedometer3.1/ . SUITES is a comma separated list of suite names.
+# http://localhost:8765/Speedometer3.1/ . Serve the mirror with bench/serve.py
+# (`python3 bench/serve.py DIR 8765`), not with `python3 -m http.server`: the listen backlog of
+# that server is 5, and a burst of connections then adds 1 s to a page change.
+# SUITES is a comma separated list of suite names.
 # Prints console lines, the time until the run ends and a `MRED` line with the exact
 # reductions of the whole VM and of the run phase.
 alias Browser.{Fetch, Page}

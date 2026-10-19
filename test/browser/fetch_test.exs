@@ -253,6 +253,22 @@ defmodule Browser.FetchTest do
       assert {:ok, "b", _} = Fetch.load(base <> "/h2")
     end
 
+    test "a 304 without Last-Modified keeps the heuristic lifetime of the stored response" do
+      lm = "Mon, 01 Jan 2024 00:00:00 GMT"
+      base = serve([response("kept", ["Last-Modified: #{lm}"]), @not_modified])
+
+      assert {:ok, "kept", _} = Fetch.load(base <> "/r")
+      assert_receive {:request, "GET", "/r", _, ""}
+      # (a stored `max-age=0` stays after a 304 that has no `Cache-Control`, so a reload
+      # makes the request here)
+      assert {:ok, "kept", _} = Fetch.load(base <> "/r", cache: :reload)
+      assert_receive {:request, "GET", "/r", %{"if-modified-since" => ^lm}, ""}
+
+      # fresh now, for a tenth of its age
+      assert {:ok, "kept", _} = Fetch.load(base <> "/r")
+      refute_receive {:request, _, _, _, _}, 50
+    end
+
     test "Expires sets the lifetime when there is no max-age" do
       expires = :httpd_util.rfc1123_date() |> to_string()
       future = "Fri, 01 Jan 2100 00:00:00 GMT"
@@ -400,6 +416,191 @@ defmodule Browser.FetchTest do
       Fetch.load(base <> "/a", full: true, initiator: "http://page.test/")
       assert_receive {:request, "GET", "/a", headers, _}
       refute headers["cookie"]
+    end
+  end
+
+  describe "loads of one address at the same time" do
+    # A server that answers each connection in a process of its own, when the test says so:
+    # it reports {:held, handler, path} and replies with what the test sends it.
+    defp held_server do
+      test = self()
+
+      {:ok, listen} =
+        :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+      {:ok, port} = :inet.port(listen)
+
+      spawn_link(fn -> accept_loop(listen, test) end)
+      "http://127.0.0.1:#{port}"
+    end
+
+    defp accept_loop(listen, test) do
+      case :gen_tcp.accept(listen, 5_000) do
+        {:ok, sock} ->
+          handler =
+            spawn(fn ->
+              receive do
+                :go -> :ok
+              end
+
+              {:request, _, path, _, _} = request(sock)
+              send(test, {:held, self(), path})
+
+              receive do
+                {:reply, response} -> :gen_tcp.send(sock, response)
+              end
+
+              :gen_tcp.close(sock)
+            end)
+
+          :gen_tcp.controlling_process(sock, handler)
+          send(handler, :go)
+          accept_loop(listen, test)
+
+        _ ->
+          :gen_tcp.close(listen)
+      end
+    end
+
+    test "make one request, and both get its result" do
+      assert :ets.whereis(Fetch.inflight_table()) != :undefined
+      base = held_server()
+      first = Task.async(fn -> Fetch.load(base <> "/sheet.css") end)
+      assert_receive {:held, handler, "/sheet.css"}
+      second = Task.async(fn -> Fetch.load(base <> "/sheet.css") end)
+      refute_receive {:held, _, _}, 150
+
+      send(handler, {:reply, ok("shared")})
+      assert {:ok, "shared", _} = Task.await(first)
+      assert {:ok, "shared", _} = Task.await(second)
+      refute_receive {:held, _, _}, 50
+    end
+
+    test "a load whose first load stops makes its own request" do
+      base = held_server()
+      test = self()
+      first = spawn(fn -> send(test, {:first, Fetch.load(base <> "/s.css")}) end)
+      assert_receive {:held, handler1, "/s.css"}
+      second = Task.async(fn -> Fetch.load(base <> "/s.css") end)
+      refute_receive {:held, _, _}, 100
+
+      Process.exit(first, :kill)
+      assert_receive {:held, handler2, "/s.css"}
+      send(handler2, {:reply, ok("own")})
+      assert {:ok, "own", _} = Task.await(second)
+      send(handler1, {:reply, ok("late")})
+      refute_receive {:first, _}, 50
+
+      # the key of the stopped load is gone: the next load is a first load again
+      third = Task.async(fn -> Fetch.load(base <> "/s.css") end)
+      assert_receive {:held, handler3, "/s.css"}
+      send(handler3, {:reply, ok("again")})
+      assert {:ok, "again", _} = Task.await(third)
+    end
+
+    # (a navigation from another site sends its Lax cookies, a subresource from there does
+    # not, and a load from the same site sends all: three requests that are not the same)
+    test "loads that send other cookies make their own requests" do
+      base = held_server()
+      url = base <> "/c.css"
+      other = "http://other.test/"
+      first = Task.async(fn -> Fetch.load(url, initiator: other) end)
+      assert_receive {:held, h1, "/c.css"}, 1_000
+
+      others = [
+        Task.async(fn -> Fetch.load(url, initiator: other, navigation: true) end),
+        Task.async(fn -> Fetch.load(url, initiator: base <> "/") end)
+      ]
+
+      handlers =
+        for _ <- 1..2 do
+          assert_receive {:held, h, "/c.css"}, 1_000
+          h
+        end
+
+      for h <- [h1 | handlers], do: send(h, {:reply, ok("c")})
+      for t <- [first | others], do: assert({:ok, "c", _} = Task.await(t))
+    end
+
+    # the rows of the table of loads in progress that are about `url`
+    defp inflight_rows(url),
+      do: for(row <- :ets.tab2list(Fetch.inflight_table()), inspect(row) =~ url, do: row)
+
+    test "a first load and a load that waits for it stop: the next load removes their rows" do
+      base = held_server()
+      url = base <> "/gone.css"
+      first = spawn(fn -> Fetch.load(url) end)
+      assert_receive {:held, _, "/gone.css"}, 1_000
+      second = spawn(fn -> Fetch.load(url) end)
+      refute_receive {:held, _, _}, 100
+      assert length(inflight_rows(url)) == 2
+
+      Process.exit(second, :kill)
+      Process.exit(first, :kill)
+      third = Task.async(fn -> Fetch.load(url) end)
+      assert_receive {:held, handler, "/gone.css"}, 1_000
+      send(handler, {:reply, ok("x")})
+      assert {:ok, "x", _} = Task.await(third)
+      assert inflight_rows(url) == []
+    end
+
+    test "a load that waits gets the result and leaves no row and no message" do
+      base = held_server()
+      url = base <> "/clean.css"
+      first = Task.async(fn -> Fetch.load(url) end)
+      assert_receive {:held, handler, "/clean.css"}, 1_000
+
+      second =
+        Task.async(fn ->
+          result = Fetch.load(url)
+          {result, Process.info(self(), :messages)}
+        end)
+
+      refute_receive {:held, _, _}, 100
+      send(handler, {:reply, ok("x")})
+      assert {:ok, "x", _} = Task.await(first)
+      assert {{:ok, "x", _}, {:messages, []}} = Task.await(second)
+      assert inflight_rows(url) == []
+    end
+
+    test "two loads whose redirects go to the address of the other do not wait for each other" do
+      base = held_server()
+      a = Task.async(fn -> Fetch.load(base <> "/a") end)
+      assert_receive {:held, ha, "/a"}
+      b = Task.async(fn -> Fetch.load(base <> "/b") end)
+      assert_receive {:held, hb, "/b"}
+
+      send(ha, {:reply, redirect(302, "/b")})
+      send(hb, {:reply, redirect(302, "/a")})
+
+      for _ <- 1..2 do
+        assert_receive {:held, h, _}, 1_000
+        send(h, {:reply, ok("end")})
+      end
+
+      assert {:ok, "end", _} = Task.await(a)
+      assert {:ok, "end", _} = Task.await(b)
+    end
+
+    test "loads of other addresses, a reload and a load in pieces make their own requests" do
+      base = held_server()
+      first = Task.async(fn -> Fetch.load(base <> "/a.css") end)
+      assert_receive {:held, h1, "/a.css"}
+
+      others = [
+        Task.async(fn -> Fetch.load(base <> "/b.css") end),
+        Task.async(fn -> Fetch.load(base <> "/a.css", cache: :reload) end),
+        Task.async(fn -> Fetch.load(base <> "/a.css", on_chunk: fn _, _ -> :ok end) end)
+      ]
+
+      handlers =
+        for _ <- 1..3 do
+          assert_receive {:held, h, _}
+          h
+        end
+
+      for h <- [h1 | handlers], do: send(h, {:reply, ok("x")})
+      for t <- [first | others], do: assert({:ok, "x", _} = Task.await(t))
     end
   end
 end
