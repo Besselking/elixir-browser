@@ -545,11 +545,6 @@ defmodule Browser.JS.GC do
     push_vals(vec, tuple_size(vec), stack, marks)
   end
 
-  # (the data of a wrapper of the DOM: a node id, or a tuple that holds one)
-  defp push_record(Obj.fast_whole(p, v, host: {DOM, data}) = t, stack, marks)
-       when Obj.fast_whole?(t, 1),
-       do: push_vals(v, tuple_size(v), push_nids(data, push(p, stack, marks), marks), marks)
-
   defp push_record(t, stack, marks), do: push_fields(:maps.to_list(t), stack, marks)
 
   # (the entries of a Map or a Set, see above; an entry of another form is walked whole)
