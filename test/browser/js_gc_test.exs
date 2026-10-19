@@ -72,7 +72,9 @@ defmodule Browser.JSGCTest do
       {:obj, stray} = Interp.new_object([{"x", 1.0}])
       {:obj, slot_obj} = Interp.new_object([{"y", 2.0}])
       info = elem(Interp.deref(kept), 1)
-      frame = Interp.alloc({nil, info, nil, stray, Interp.global(), {:obj, slot_obj}})
+      # (a slot can hold a bare id too: the walk reads the slots of a frame as any term)
+      {:obj, bare} = Interp.new_object([{"z", 3.0}])
+      frame = Interp.alloc({nil, info, nil, stray, Interp.global(), {:obj, slot_obj}, bare})
       Process.put(:gc_test_frame, frame)
 
       # The frame of `dead` stays after its call (a closure was made in it), but nothing holds it.
@@ -90,6 +92,7 @@ defmodule Browser.JSGCTest do
       assert Interp.call({:obj, inc_id}, :undefined, []) == 42.0
       assert :erlang.get(stray) == :undefined
       assert is_map(:erlang.get(slot_obj))
+      assert is_map(:erlang.get(bare))
     end)
     |> Task.await()
   end
@@ -409,6 +412,91 @@ defmodule Browser.JSGCTest do
 
       assert run.("[[...m.keys()][0].k, m.get('v').k, [...s][0].k, acc.x, b(), p.k].join()") ==
                "key,value,set,get,this,target"
+    end)
+    |> Task.await(30_000)
+  end
+
+  # The walk matches the common forms of a record whole: a plain object, a function, a
+  # dense array and a Map. Each clause must still walk each field that can hold a
+  # reference: the prototype, the own properties, the home object of a method (for
+  # `super`) and the environment of a native. Each object of `held` has only one such
+  # field that holds it, and the program reads each one after the collection.
+  test "keeps what each field of a record of a common form holds" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+
+      run = fn src ->
+        {:ok, p} = Parser.parse(src)
+        Interp.run_program(p)
+      end
+
+      run.("""
+      var held = [{ k: 'proto' }, { k: 'fn' }, { k: 'array' }, { k: 'map' }, { k: 'home' }];
+      var o = Object.create(held[0]);
+      var f = function () {}; f.x = held[1];
+      var a = [1, 2]; a.x = held[2];
+      var m = new Map(); m.x = held[3];
+      var sub = new (class extends Map { get k() { return 'map proto' } })();
+      var meth = { __proto__: held[4], m() { return super.k } }.m;
+      """)
+
+      {:ok, {:obj, hid}} = Interp.lookup_scoped(Interp.global(), "held")
+      ids = for i <- 0..4, do: elem(Interp.get({:obj, hid}, i * 1.0), 1)
+      # (a native whose Elixir fun holds the only reference to an object)
+      {:obj, nat} = Interp.new_object([{"k", "native"}])
+      Interp.declare(Interp.global(), "nat", Interp.native("nat", fn _, _ -> {:obj, nat} end))
+
+      # (each record is of a form that the walk matches whole: the four fields of a fast
+      # record and `n` more)
+      for {name, n} <- [
+            {"o", 0},
+            {"f", 1},
+            {"a", 1},
+            {"m", 3},
+            {"sub", 3},
+            {"meth", 1},
+            {"nat", 1}
+          ] do
+        {:ok, {:obj, id}} = Interp.lookup_scoped(Interp.global(), name)
+        r = Interp.deref(id)
+        assert Obj.fast?(r) and map_size(r) == 4 + n, "#{name}: #{inspect(Map.keys(r))}"
+      end
+
+      {:ok, {:obj, aid}} = Interp.lookup_scoped(Interp.global(), "a")
+      assert Elems.dense?(Interp.deref(aid))
+      run.("held = null")
+
+      GC.collect()
+      for id <- [nat | ids], do: assert(is_map(:erlang.get(id)), "freed: #{id}")
+
+      assert run.("[o.k, f.x.k, a.x.k, m.x.k, sub.k, meth(), nat().k].join()") ==
+               "proto,fn,array,map,map proto,home,native"
+    end)
+    |> Task.await(30_000)
+  end
+
+  # A reference reads its mark bit before it reads the entry, so the bitmap has a bit for
+  # each id below `:js_next`, also above the largest key. A reference to an id that has no
+  # entry does not stop the collection. Here the 70 newest objects are gone, so the id of
+  # the last one is in a word of the bitmap above the word of the largest key.
+  test "a reference to an id below the next heap id with no entry does not stop the walk" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      ids = for _ <- 1..130, do: elem(Interp.new_object(), 1)
+      for id <- Enum.take(ids, -70), do: :erlang.erase(id)
+      Process.put(:js_freed, Process.get(:js_freed) + 70)
+      last = List.last(ids)
+      Process.put({:gc_test_key, 1}, {:held, {:obj, last}})
+      keys = for {k, _} <- Process.get(), is_integer(k), k >= 0, do: k
+      assert div(last, 64) > div(Enum.max(keys), 64)
+
+      GC.collect()
+      assert :erlang.get(last) == :undefined
+
+      assert Interp.heap_size() ==
+               length(for {k, _} <- Process.get(), is_integer(k), k >= 0, do: k)
     end)
     |> Task.await(30_000)
   end
