@@ -963,10 +963,14 @@ defmodule Browser.JS.Runtime do
       type = (DOM.get_attr(n, "type") || "") |> String.downcase() |> String.trim()
       text = Enum.map_join(n.kids, fn k -> DOM.node_data(k).text end)
 
+      # (a browser that runs modules does not run a classic script with `nomodule`: such a
+      # script is the fallback of a page for old browsers, often a set of polyfills that
+      # change the shared built-in prototypes)
       kind =
         cond do
           type == "importmap" -> :importmap
           type == "module" -> :module
+          DOM.get_attr(n, "nomodule") != nil -> :other
           type in ["", "text/javascript", "application/javascript", "text/ecmascript"] -> :classic
           true -> :other
         end

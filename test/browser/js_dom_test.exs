@@ -1110,6 +1110,26 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["3 function"]
     end
 
+    # A browser that runs modules does not run a classic script with `nomodule`, from a file
+    # or inline. The file is not fetched.
+    test "a classic script with nomodule does not run, and a module does" do
+      files = Map.put(@files, "http://t.test/old.js", "console.log('old file');")
+
+      {_, r} =
+        start(
+          """
+          <body><script nomodule src="/old.js"></script>
+          <script nomodule>console.log('old inline');</script>
+          <script>console.log('classic');</script>
+          <script type=module>console.log('module');</script></body>
+          """,
+          files
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["classic", "module"]
+    end
+
     test "a mouse event says where it is in the page and in the element" do
       r =
         run(
