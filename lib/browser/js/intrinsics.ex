@@ -80,10 +80,7 @@ defmodule Browser.JS.Intrinsics do
 
   defp function?(id), do: match?(%{class: :function}, :erlang.get(id))
 
-  # the part of a record that holds its own properties, or nil
-  defp part(%{shape: shape, vals: vals}), do: {shape, vals}
-  defp part(%{props: props}), do: props
-  defp part(_), do: nil
+  defp part(rec), do: Obj.own_part(rec)
 
   @doc """
   Gives the shared built-in objects back the boot state of each property that a function
