@@ -2333,7 +2333,9 @@ defmodule Browser.JS.FramesTest do
 
     test "the build at depth 1 after the owner returned (row 32)" do
       gid = heap()
-      node = fn3("function f(){ return () => arguments.length }", "f")
+      # (the arrow gives the object itself: `arguments.length` and `arguments[k]` read the
+      # list of the arguments and do not build the object)
+      node = fn3("function f(){ return () => arguments }", "f")
       assert %Info{slots: %{:args => 6, "arguments" => 7}} = info(node)
       {:obj, id} = f = Interp.make_function(node, gid, false)
 
@@ -2342,10 +2344,11 @@ defmodule Browser.JS.FramesTest do
       refute freed?(fid)
       assert slot(fid, 7) == {:unbuilt, id}
 
-      assert Interp.call(g, :undefined, []) == 3.0
-      assert {:obj, _} = ao = slot(fid, 7)
+      assert {:obj, _} = ao = Interp.call(g, :undefined, [])
+      assert slot(fid, 7) == ao
+      assert Interp.get(ao, "length") == 3.0
       assert Interp.get(ao, "callee") == f
-      assert Interp.call(g, :undefined, []) == 3.0
+      assert Interp.call(g, :undefined, []) == ao
       assert slot(fid, 7) == ao
     end
 
@@ -2540,7 +2543,7 @@ defmodule Browser.JS.FramesTest do
 
     test "1000 calls that read `arguments` leave no frame; the GC takes back the objects" do
       gid = heap()
-      run_script("function f(a){ return arguments[0] }", 3)
+      run_script("function f(a){ var o = arguments; return o[0] }", 3)
       f = global!(gid, "f")
       assert %{info: %Info{level: 3, rewritten: true, argmap: %{"a" => 0}}} = closure(f)
 
@@ -2550,6 +2553,17 @@ defmodule Browser.JS.FramesTest do
       # Each call leaves its arguments object, as `:off` does, and no frame.
       assert Interp.heap_size() == base + 1000
       GC.collect()
+      assert Interp.heap_size() == base
+    end
+
+    test "1000 calls that read only `arguments[k]` build no arguments object" do
+      gid = heap()
+      run_script("function f(a){ return arguments[0] + arguments.length }", 3)
+      f = global!(gid, "f")
+
+      GC.collect()
+      base = Interp.heap_size()
+      for _ <- 1..1000, do: assert(Interp.call(f, :undefined, [1.0]) == 2.0)
       assert Interp.heap_size() == base
     end
 
