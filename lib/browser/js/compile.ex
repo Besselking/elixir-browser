@@ -48,14 +48,18 @@ defmodule Browser.JS.Compile do
 
   These node kinds have closures of their own:
 
-    * constants, slot reads and `this`;
+    * constants, slot reads, `this`, `arguments` and regular expressions;
     * the reads of a name in the global scope or in a map scope (`{:gref}`, `{:mref}`);
     * `?:`, `&&`, `||`, `??`, the comma operator, templates and optional chains;
-    * the unary operators and the binary operators;
+    * the unary operators, `typeof` of a global name, `delete` of a property and the
+      binary operators;
     * property reads, calls, `new`, array literals and object literals;
     * assignments, compound assignments, `++` and `--` to a slot or to a property;
+    * destructuring assignments and declarations with a pattern, which give the pattern
+      with compiled expressions to `Interp.bind_pattern/4`;
     * the statements `expr`, `return`, `if`, `block`, `var`, `let`, `const`, `for`,
-      `while`, `break`, `continue`, `throw` and labels.
+      `while`, `do`-`while`, `break`, `continue`, `throw`, `switch`, `for-in`, `for-of`,
+      `try`, labels and the empty statement.
 
   A parent reads a constant operand inline. It also reads a slot of its own frame inline.
   Thus these operands need no closure call. A binary operator and a test have one closure
@@ -94,17 +98,16 @@ defmodule Browser.JS.Compile do
 
   These nodes are shells:
 
-    * `switch`, `try`, `for-in`, `for-of` and `do-while`;
-    * a block or a `for` that makes a block frame;
-    * a declaration with a pattern;
+    * a block, a `for`, a `for-in`, a `for-of`, a `switch` or a `catch` that makes a block
+      frame;
     * a literal with a spread or a method;
     * a call with a callee that the tree reads by name;
     * some rare forms of assignment and of `delete`.
 
-  Thus the order of `try` and `finally`, the close of iterators, the copies of a loop scope
-  and the block frames have one implementation, in `Interp`. A shell keeps the functions
-  and the classes as they are, because the heap keeps these nodes. A shell also keeps the
-  callee of a call as it is, because the text of an error names the callee.
+  Thus the copies of a loop scope for each round and the block frames have one
+  implementation, in `Interp`. A shell keeps the functions and the classes as they are,
+  because the heap keeps these nodes. A shell also keeps the callee of a call as it is,
+  because the text of an error names the callee.
 
   ## Nodes on the tree
 
@@ -113,8 +116,8 @@ defmodule Browser.JS.Compile do
 
     * functions and classes;
     * the reads and writes of a name that the resolver did not put in a slot;
-    * the special forms of `typeof` and `delete`;
-    * `super`, `import` and regular expressions;
+    * `typeof` of a name that is not global, and `delete` of a name;
+    * `super` and `import`;
     * the strings of a tagged template.
 
   ## Same results
@@ -290,6 +293,8 @@ defmodule Browser.JS.Compile do
       step 4).
     * The tuple of a frame maker is equal to the tuple of the frame builder of `Interp`
       (S6, in `Interp.frame_call/6`).
+    * A switch whose tests are constants finds its case with a map, and also with the
+      scan of the tree. The two cases must be the same (S7).
 
   When the process key `:jsc_trace` holds a list, the compiler adds to the list each node
   that stays on the tree. The coverage test uses this list.
@@ -1102,7 +1107,13 @@ defmodule Browser.JS.Compile do
   defp expr_node({:unary, "typeof", {k, _, _}} = node) when k in [:aslot, :mref],
     do: fallback(node)
 
-  defp expr_node({:unary, "typeof", {k, _}} = node) when k in [:gref, :id], do: fallback(node)
+  # (the clause of `ev/2` for a name that is not in a slot, from the root)
+  defp expr_node({:unary, "typeof", {:gref, name}}) do
+    node = {:unary, "typeof", {:id, name}}
+    fn env -> Interp.ev(node, Interp.root(env)) end
+  end
+
+  defp expr_node({:unary, "typeof", {:id, _}} = node), do: fallback(node)
 
   # (a constant operand gives the same value at each run, so the value is computed once)
   defp expr_node({:unary, "-", {:num, n}}) do
@@ -1114,6 +1125,40 @@ defmodule Browser.JS.Compile do
 
   defp expr_node({:unary, op, e}) when op in ["-", "+", "~", "typeof", "void"],
     do: unary(op, opnd(e))
+
+  # `delete o[k]`, as `ev/2` does it: the object, the key (a constant key is the string,
+  # any other key is its value with no conversion), the test of a nullish object, then
+  # the delete. Strict code throws when the delete gives false.
+  defp expr_node({:unary, "delete", {:member, o, k, _}}) when elem(k, 0) != :priv do
+    pair(
+      env,
+      opnd(o),
+      key_code(k),
+      ov,
+      key,
+      (
+        Interp.delete_base_check(ov, key)
+        Interp.delete(ov, key)
+      )
+    )
+  end
+
+  defp expr_node({:unary, "sdelete", {:member, o, k, _}}) when elem(k, 0) != :priv do
+    pair(
+      env,
+      opnd(o),
+      key_code(k),
+      ov,
+      key,
+      (
+        Interp.delete_base_check(ov, key)
+
+        if Interp.delete(ov, key) == false,
+          do: Interp.throw_error("TypeError", "Cannot delete property '#{Interp.to_str(key)}'"),
+          else: true
+      )
+    )
+  end
 
   defp expr_node({:unary, d, {:member, _, _, _} = target}) when d in ["delete", "sdelete"],
     do: shell({:unary, d, cmember(target)})
@@ -1149,7 +1194,36 @@ defmodule Browser.JS.Compile do
   # (the marker only keeps a name from the value, see `ev_named/3`)
   defp expr_node({:unnamed, e}), do: expr(e)
 
-  defp expr_node({:destructure, pat, right}), do: shell({:destructure, pat, cc(right)})
+  defp expr_node({:regex, source, flags}), do: fn _env -> Browser.JS.RegExp.new(source, flags) end
+
+  # `arguments` as a value, as `ev/2` reads it: the first read builds the object into the
+  # slot, which holds `{:unbuilt, id}` until then.
+  defp expr_node({:aslot, d, i} = form) do
+    fn env ->
+      if @check, do: Interp.check_landing(form, env)
+      frame = up(env, d)
+
+      case :erlang.element(i, :erlang.get(frame)) do
+        {:unbuilt, fid} -> Interp.build_arguments(frame, i, fid)
+        v -> v
+      end
+    end
+  end
+
+  # (as `ev/2`: the value, then the bind of the pattern as an assignment)
+  defp expr_node({:destructure, pat, right}) do
+    cp = cpat(pat)
+
+    one(
+      env,
+      opnd(right),
+      v,
+      (
+        Interp.bind_pattern(cp, v, env, :assign)
+        v
+      )
+    )
+  end
 
   # A hole of a compiled lift template (step 5c): the value of the leaf `i`, which
   # `Async.lifted/5` keeps in the process key `:js_cps_vals` while the template runs.
@@ -1827,26 +1901,26 @@ defmodule Browser.JS.Compile do
     enter(sc, bc)
   end
 
+  # (a name that the resolver did not put in a slot can meet a `with` object, which only
+  # the tree reads)
   defp stmt_node({:var, kind, decls}, labels) do
-    if Enum.all?(decls, &slot_decl?/1) do
-      # (a `var` without a value does nothing, as in `exec/3`)
-      ds =
-        for {{:slot, d, i, name}, init} <- decls,
-            not (init == nil and kind == :var),
-            do: {d, i, name, if(init, do: opnd(init), else: {:k, :undefined})}
-
-      case ds do
-        [{d, i, name, io}] -> decl_one(d, i, name, io)
-        _ -> fn env -> decls(ds, env) end
-      end
-    else
-      # (an initializer that takes a name keeps its node: `ev_named/3` names it after the
-      # pattern)
+    if Enum.any?(decls, &match?({{:id, _}, _}, &1)) do
       decls =
         for {pat, init} <- decls,
             do: {pat, if(init == nil or nameable(init), do: init, else: cc(init))}
 
       shell_stmt({:var, kind, decls}, labels)
+    else
+      # (a `var` without a value does nothing, as in `exec/3`)
+      ds =
+        for {pat, init} <- decls,
+            not (init == nil and kind == :var),
+            do: decl_form(kind, pat, init)
+
+      case ds do
+        [{d, i, name, io}] when is_integer(d) -> decl_one(d, i, name, io)
+        _ -> fn env -> decls(ds, env) end
+      end
     end
   end
 
@@ -1876,6 +1950,13 @@ defmodule Browser.JS.Compile do
     {tc, bc} = {ctest(c), stmt(body, [])}
     fn env -> while_loop(tc, bc, env, labels) end
   end
+
+  defp stmt_node({:dowhile, body, c}, labels) do
+    {bc, tc} = {stmt(body, []), ctest(c)}
+    fn env -> do_loop(tc, bc, env, labels) end
+  end
+
+  defp stmt_node({:empty}, _labels), do: fn _env -> :ok end
 
   # A break to this label ends the labeled statement normally, as in `fstmt/3`.
   defp stmt_node({:labeled, l, s}, labels) do
@@ -1911,9 +1992,34 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  # The statements below stay on the tree with compiled children, so that the order of
-  # `try`/`finally`, the closing of iterators, the copies of a loop scope for each round
-  # and the block frames keep one implementation, in `Interp`.
+  # (a for-in or a for-of whose head names a closure captures makes a frame for each item,
+  # which stays on the tree)
+  defp stmt_node({kind, decl, pat, obj, body, sc}, labels)
+       when kind in [:forin, :forof] and frameless(sc),
+       do: for_each(kind, opnd(obj), head(decl, pat), stmt(body, []), tdz_scope(sc), labels)
+
+  # (a catch whose names a closure captures makes a catch frame, which stays on the tree)
+  defp stmt_node({:try, block, param, handler, finalizer, sc}, _labels) when frameless(sc) do
+    pw = param && head(:let, param)
+    sc = if match?(%{tdz: [], hoist: []}, sc), do: nil, else: sc
+
+    try_code(
+      stmt(block, []),
+      pw,
+      handler && stmt(handler, []),
+      finalizer && stmt(finalizer, []),
+      sc
+    )
+  end
+
+  # (a switch ignores its labels: a `break` with the label of the switch goes to the
+  # labeled statement around it)
+  defp stmt_node({:switch, disc, cases, sc}, _labels) when frameless(sc),
+    do: switch(opnd(disc), cases, sc)
+
+  # The statements below make a block frame. They stay on the tree with compiled children,
+  # so that the copies of a loop scope for each round and the block frames keep one
+  # implementation, in `Interp`.
   defp stmt_node({:switch, disc, cases, sc}, labels) do
     cases =
       for {t, body} <- cases,
@@ -1929,8 +2035,6 @@ defmodule Browser.JS.Compile do
 
   defp stmt_node({kind, decl, pat, obj, body, sc}, labels) when kind in [:forin, :forof],
     do: shell_stmt({kind, decl, pat, cc(obj), cs(body), sc}, labels)
-
-  defp stmt_node({:dowhile, body, c}, labels), do: shell_stmt({:dowhile, cs(body), cc(c)}, labels)
 
   defp stmt_node({:block, stmts, sc}, labels),
     do: shell_stmt({:block, [{:cc, list(stmts)}], sc}, labels)
@@ -1963,9 +2067,17 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  # A declaration whose pattern is a slot and whose value takes no name.
-  defp slot_decl?({{:slot, _, _, _}, init}), do: init == nil or not nameable(init)
-  defp slot_decl?(_), do: false
+  # A declaration of a `var`, `let` or `const`, as `exec/3` runs it: the value (with
+  # `ev_named/3`, which names a function or a class after the binding), then the write as
+  # `bind/4` writes it. A slot is `{d, i, name, value form}`, and every other pattern is
+  # `{:bind, pattern, kind, value form}`. A `let` or a `const` with no value binds
+  # `undefined`.
+  defp decl_form(_kind, {:slot, d, i, name} = pat, init), do: {d, i, name, decl_value(pat, init)}
+  defp decl_form(kind, pat, init), do: {:bind, cpat(pat), kind, decl_value(pat, init)}
+
+  defp decl_value(_pat, nil), do: {:k, :undefined}
+  defp decl_value(pat, init) when nameable(init), do: {:f, named(init, pat)}
+  defp decl_value(_pat, init), do: opnd(init)
 
   # The write of a declaration, with the checks of check mode. A frame below the size of
   # the boxes (`Interp.box_min/0`) holds no box, so the write is a plain write of the tuple.
@@ -1985,6 +2097,12 @@ defmodule Browser.JS.Compile do
   # The declarations of a `var`, `let` or `const`, from left to right, as `bind/4` writes
   # them: the value, then the write with the checks of check mode.
   defp decls([], _env), do: :ok
+
+  defp decls([{:bind, pat, kind, io} | rest], env) do
+    v = av(io, env)
+    Interp.bind_pattern(pat, v, env, kind)
+    decls(rest, env)
+  end
 
   defp decls([{d, i, name, io} | rest], env) do
     v = av(io, env)
@@ -2077,6 +2195,417 @@ defmodule Browser.JS.Compile do
       end
     else
       :ok
+    end
+  end
+
+  # The rounds of a `do`-`while`, as `fstmt/3` runs them: the body with no step before it,
+  # then the rounds of `while_loop/4` (the test, a step, the body).
+  defp do_loop(tc, bc, env, labels) do
+    case bc.(env) do
+      :ok ->
+        while_loop(tc, bc, env, labels)
+
+      {:cont, l} = c ->
+        if l == nil or l in labels, do: while_loop(tc, bc, env, labels), else: leave(c)
+
+      {:brk, l} = c ->
+        if l == nil or l in labels, do: :ok, else: leave(c)
+
+      c ->
+        leave(c)
+    end
+  end
+
+  # ── switch ─────────────────────────────────────────────────
+
+  # A frameless switch, as the frameless clause of `exec/3` runs it: the discriminant, the
+  # entry of the scope (the TDZ reset and the functions of the cases), the first case whose
+  # test is strictly equal to the value (the tests run in source order, and the default is
+  # not a test), else the default case, then the bodies from that case to the end until
+  # one completes abruptly. A `break` without a label ends the switch normally. A switch
+  # makes no step.
+  #
+  # The dispatch gives the index of the first case to run. The bodies are a tuple, so that
+  # each body has one parent and the fall-through is the next index. When every test is a
+  # constant, the dispatch is one read of a map. A constant has no side effect and makes
+  # no step, so the map finds the case that the scan finds. Else the tests run in source
+  # order, each one only until a match, with `Interp.strict_eq/2`. No match gives the
+  # index of the default, or the size of the tuple when there is no default.
+  #
+  # The discriminant runs before the entry of the scope, as on the tree: the entry makes
+  # the functions of the cases, which gives them heap ids.
+  defp switch(do_, cases, sc) do
+    bodies = List.to_tuple(for {_, body} <- cases, do: list(body))
+    indexed = Enum.with_index(cases)
+    tests = for {{t, _}, i} <- indexed, t != :default, do: {t, i}
+
+    default =
+      Enum.find_value(indexed, tuple_size(bodies), fn {{t, _}, i} -> t == :default && i end)
+
+    sc = if match?(%{tdz: [], hoist: []}, sc), do: nil, else: sc
+
+    if Enum.all?(tests, fn {t, _} -> const_test?(t) end) do
+      # (each constant counts as one node of the memory bound, as a compiled test does)
+      consts =
+        for {t, i} <- tests do
+          count()
+          {opnd_value(t), i}
+        end
+
+      # (the first case of a constant that comes two times wins, as in the scan)
+      map = Enum.reduce(consts, %{}, fn {k, i}, m -> Map.put_new(m, num_key(k), i) end)
+
+      one(
+        env,
+        do_,
+        v,
+        (
+          if sc, do: Interp.enter_frameless(env, sc)
+
+          i =
+            case map do
+              %{^v => i} -> i
+              _ when is_number(v) -> Map.get(map, num_key(v), default)
+              _ -> default
+            end
+
+          # (S7: check mode also runs the scan of the tree and compares the two cases)
+          if @check, do: switch_check(consts, v, default, i)
+          run_cases(bodies, i, env)
+        )
+      )
+    else
+      tests = for {t, i} <- tests, do: {opnd(t), i}
+
+      one(
+        env,
+        do_,
+        v,
+        (
+          if sc, do: Interp.enter_frameless(env, sc)
+          run_cases(bodies, switch_find(tests, v, env, default), env)
+        )
+      )
+    end
+  end
+
+  # A test that is a constant with a key in the map of a switch: a constant operand form
+  # (`opnd/1`) that is a number, a string or an atom. NaN is not equal to itself, so it is
+  # not such a constant.
+  defp const_test?(t) do
+    case const_value(t) do
+      {:ok, v} -> is_number(v) or is_binary(v) or (is_atom(v) and v != :nan)
+      :error -> false
+    end
+  end
+
+  defp opnd_value(t) do
+    {:ok, v} = const_value(t)
+    v
+  end
+
+  # The value of a node that `opnd/1` makes a constant, with no compilation.
+  defp const_value({k, v}) when k in [:num, :str, :lit], do: {:ok, v}
+  defp const_value({:unary, "-", {:num, n}}), do: {:ok, Num.neg(n)}
+  defp const_value({:unary, "void", {:num, _}}), do: {:ok, :undefined}
+  defp const_value({:in_tdz, _names, e}), do: const_value(e)
+  defp const_value({:unnamed, e}), do: const_value(e)
+  defp const_value(_), do: :error
+
+  # The key of a constant in the map of a switch: a number is a float, and a zero of
+  # either sign is `0.0`, as `strict_eq/2` compares numbers (a map compares terms
+  # exactly). Every other constant is its own key.
+  defp num_key(n) when is_integer(n), do: n * 1.0
+  defp num_key(n) when is_float(n) and n == 0.0, do: 0.0
+  defp num_key(n), do: n
+
+  # The tests of a switch that are not all constants, in source order. The value of each
+  # test is read only until one is equal to the value of the discriminant.
+  defp switch_find([], _v, _env, default), do: default
+
+  defp switch_find([{to, i} | rest], v, env, default) do
+    if Interp.strict_eq(v, av(to, env)), do: i, else: switch_find(rest, v, env, default)
+  end
+
+  # The bodies of a switch from index `i` to the end, until one does not complete
+  # normally (the fall-through of JS), as `run_cases/3` in `Interp` runs them.
+  defp run_cases(bodies, i, env) when i < tuple_size(bodies) do
+    case :erlang.element(i + 1, bodies).(env) do
+      :ok -> run_cases(bodies, i + 1, env)
+      {:brk, nil} -> :ok
+      c -> c
+    end
+  end
+
+  defp run_cases(_bodies, _i, _env), do: :ok
+
+  # S7: the case of the map must be the case of the scan of the tree.
+  if @check do
+    defp switch_check(consts, v, default, i) do
+      scan = Enum.find_value(consts, default, fn {k, j} -> Interp.strict_eq(v, k) && j end)
+
+      unless scan == i,
+        do: raise(ArgumentError, "resolve check: the map of a switch gives another case")
+    end
+  else
+    defp switch_check(_consts, _v, _default, _i), do: :ok
+  end
+
+  # ── for-in and for-of ──────────────────────────────────────
+
+  # A frameless for-in or for-of, as `exec_for_each_frame/3` and `proto_loop/4` in `Interp`
+  # run it: the TDZ reset of the names of the head, the object, the source of the items,
+  # then for each item a step, the TDZ reset, the write of the item to the head, and the
+  # body. The completion of the body goes to the loop as in `for_loop/5`. A for-in skips a
+  # key that was deleted before its turn, with no step. A for-of over an array that the
+  # loop can read by index (`Interp.for_of_start/1`) reads the record at each step, so the
+  # loop sees a body that changes the array. A for-of over the iterator protocol writes
+  # the item and runs the body under a `try`, so that every way out closes the iterator.
+  #
+  # (a `return` in the body is `:plain` from the resolver, so the body gives no pending
+  # call that the loop must run before it closes the iterator)
+  #
+  # The TDZ reset comes before the object, because the object can read the names of the
+  # head, which are in their dead zone there (also at the second entry of the statement).
+  defp for_each(:forin, oo, wc, bc, sc, labels) do
+    fn env ->
+      if sc, do: Interp.reset_tdz(env, sc)
+      target = Interp.for_in_object(av(oo, env))
+      keys = if Interp.nullish?(target), do: [], else: Interp.for_in_keys(target)
+      forin_loop(keys, target, wc, bc, sc, env, labels)
+    end
+  end
+
+  defp for_each(:forof, oo, wc, bc, sc, labels) do
+    fn env ->
+      if sc, do: Interp.reset_tdz(env, sc)
+
+      case Interp.for_of_start(av(oo, env)) do
+        {:array, id} -> forof_array(id, 0, wc, bc, sc, env, labels)
+        {:proto, it, next} -> forof_proto(it, next, wc, bc, sc, env, labels)
+        {:list, items} -> forof_list(items, wc, bc, sc, env, labels)
+      end
+    end
+  end
+
+  # The scope of a head whose names go back to their dead zone at each round, or `nil` when
+  # the head has no such name.
+  defp tdz_scope(%{tdz: [_ | _]} = sc), do: sc
+  defp tdz_scope(_sc), do: nil
+
+  # The write of an item to the head of a for-in or a for-of, as `bind/4` writes it with
+  # the mode of the head (`:assign` when there is no declaration): an assignment to a
+  # slot tests the dead zone, a declaration of a slot writes it, and every other pattern
+  # goes to `Interp.bind_pattern/4`.
+  defp head(nil, {:slot, d, i, name}), do: {:assign, d, i, name}
+  defp head(_decl, {:slot, d, i, name}), do: {:decl, d, i, name}
+  defp head(decl, pat), do: {:bind, cpat(pat), decl || :assign}
+
+  defmacrop write_head(wc, v, env) do
+    quote do
+      env = unquote(env)
+      v = unquote(v)
+
+      case unquote(wc) do
+        {:assign, wd, wi, wn} -> Interp.assign_inline(up(env, wd), wi, wn, v)
+        {:decl, wd, wi, wn} -> put_decl(up(env, wd), wi, wn, v)
+        {:bind, wp, wm} -> Interp.bind_pattern(wp, v, env, wm)
+      end
+    end
+  end
+
+  # One round of a for-in or a for-of after its step: the TDZ reset, the write of the item
+  # and the body. It gives the completion of the body.
+  defmacrop round(wc, bc, sc, item, env) do
+    quote do
+      env = unquote(env)
+      if unquote(sc), do: Interp.reset_tdz(env, unquote(sc))
+      write_head(unquote(wc), unquote(item), env)
+      unquote(bc).(env)
+    end
+  end
+
+  # What a loop does with the completion `c` of its body: `next` runs the next round, a
+  # break to this loop gives `:ok`, and any other completion leaves the loop.
+  defmacrop after_round(c, labels, next) do
+    quote do
+      case unquote(c) do
+        :ok ->
+          unquote(next)
+
+        {:cont, l} = c ->
+          if l == nil or l in unquote(labels), do: unquote(next), else: leave(c)
+
+        {:brk, l} = c ->
+          if l == nil or l in unquote(labels), do: :ok, else: leave(c)
+
+        c ->
+          leave(c)
+      end
+    end
+  end
+
+  defp forin_loop([], _target, _wc, _bc, _sc, _env, _labels), do: :ok
+
+  defp forin_loop([k | rest], target, wc, bc, sc, env, labels) do
+    # (a key that was deleted before its turn is skipped)
+    if Interp.has_property?(target, k) do
+      Interp.tick()
+
+      after_round(
+        round(wc, bc, sc, k, env),
+        labels,
+        forin_loop(rest, target, wc, bc, sc, env, labels)
+      )
+    else
+      forin_loop(rest, target, wc, bc, sc, env, labels)
+    end
+  end
+
+  defp forof_array(id, i, wc, bc, sc, env, labels) do
+    case Interp.for_of_step(id, {:obj, id}, i) do
+      nil ->
+        :ok
+
+      {x, i} ->
+        Interp.tick()
+
+        after_round(
+          round(wc, bc, sc, x, env),
+          labels,
+          forof_array(id, i, wc, bc, sc, env, labels)
+        )
+    end
+  end
+
+  defp forof_list([], _wc, _bc, _sc, _env, _labels), do: :ok
+
+  defp forof_list([x | rest], wc, bc, sc, env, labels) do
+    Interp.tick()
+    after_round(round(wc, bc, sc, x, env), labels, forof_list(rest, wc, bc, sc, env, labels))
+  end
+
+  # The iterator protocol. The step comes before the `try`, so the step limit and an error
+  # of `next()` do not close the iterator. A throw in the write or in the body closes the
+  # iterator, and an error of its `return()` does not replace the throw. A break, a
+  # continue to an outer label and a return are normal exits: they close the iterator, an
+  # error of `return()` replaces them, and the result of `return()` must be an object.
+  defp forof_proto(it, next, wc, bc, sc, env, labels) do
+    case Interp.iter_step(it, next) do
+      :done ->
+        :ok
+
+      {:ok, x} ->
+        Interp.tick()
+        if sc, do: Interp.reset_tdz(env, sc)
+
+        c =
+          try do
+            write_head(wc, x, env)
+            bc.(env)
+          catch
+            # (a JS throw needs no stack trace)
+            :throw, e ->
+              Interp.iter_close(it, true)
+              throw(e)
+
+            kind, e ->
+              Interp.iter_close(it, true)
+              :erlang.raise(kind, e, __STACKTRACE__)
+          end
+
+        case c do
+          :ok ->
+            forof_proto(it, next, wc, bc, sc, env, labels)
+
+          {:cont, l} = c ->
+            if l == nil or l in labels,
+              do: forof_proto(it, next, wc, bc, sc, env, labels),
+              else: proto_exit(it, leave(c))
+
+          {:brk, l} = c ->
+            if l == nil or l in labels, do: proto_exit(it, :ok), else: proto_exit(it, leave(c))
+
+          c ->
+            proto_exit(it, leave(c))
+        end
+    end
+  end
+
+  # A normal exit of a loop over the iterator protocol: the close of the iterator, then the
+  # completion `c`.
+  defp proto_exit(it, c) do
+    Interp.iter_close(it, false)
+    c
+  end
+
+  # ── try ────────────────────────────────────────────────────
+
+  # A frameless `try`, as `try_statement/6` in `Interp` runs it. The handler catches a JS
+  # throw only (the step limit and the errors of the engine go past it). It runs in the
+  # `catch` clause, outside the `try` of the block, so a throw from the handler goes to the
+  # finalizer: the entry of the scope (the names of the parameter go to their dead zone),
+  # the write of the parameter, then the handler. With a finalizer, the outcome of the
+  # block and the handler is kept: a completion, a throw, or an error of the engine with
+  # its stack trace. The finalizer runs after each of them. When it completes normally,
+  # the outcome comes back. Any other completion of the finalizer replaces the outcome,
+  # also a throw or the step limit.
+  #
+  # (a `return` in the block or in the handler is `:plain` from the resolver, so they give
+  # no pending call that must run inside the `try`)
+  defp try_code(bc, pw, hc, nil, sc), do: fn env -> catch_part(bc, pw, hc, sc, env) end
+
+  defp try_code(bc, _pw, nil, fc, _sc) do
+    fn env ->
+      outcome =
+        try do
+          {:done, bc.(env)}
+        catch
+          :throw, v -> {:thrown, v}
+          kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+        end
+
+      finally_part(outcome, fc, env)
+    end
+  end
+
+  defp try_code(bc, pw, hc, fc, sc) do
+    fn env ->
+      outcome =
+        try do
+          {:done, catch_part(bc, pw, hc, sc, env)}
+        catch
+          :throw, v -> {:thrown, v}
+          kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+        end
+
+      finally_part(outcome, fc, env)
+    end
+  end
+
+  defp catch_part(bc, pw, hc, sc, env) do
+    try do
+      bc.(env)
+    catch
+      {:js_error, v} ->
+        if @check, do: Interp.check_link(env)
+        if sc, do: Interp.enter_frameless(env, sc)
+        if pw, do: write_head(pw, v, env)
+        hc.(env)
+    end
+  end
+
+  defp finally_part(outcome, fc, env) do
+    case fc.(env) do
+      :ok ->
+        case outcome do
+          {:done, c} -> c
+          {:thrown, v} -> throw(v)
+          {:raised, kind, reason, st} -> :erlang.raise(kind, reason, st)
+        end
+
+      c ->
+        c
     end
   end
 
@@ -2638,6 +3167,37 @@ defmodule Browser.JS.Compile do
   # children, and every other target keeps its node.
   defp ctarget({:member, _, _, _} = m), do: cmember(m)
   defp ctarget(t), do: t
+
+  # A pattern for `Interp.bind_pattern/4`, with compiled expressions: a default value, a
+  # computed key and the object and key of a member target. `bind/4` runs each of them
+  # with `ev/2` or `ev_key/2`, as it runs the nodes that they replace. A default that takes
+  # a name keeps its node, because `ev_named/3` names it after its target. Every other
+  # target keeps its node.
+  defp cpat({:default, pat, e}) do
+    e = if nameable(e), do: e, else: cc(e)
+    {:default, cpat(pat), e}
+  end
+
+  defp cpat({:arrpat, elems}) do
+    {:arrpat,
+     Enum.map(elems, fn
+       nil -> nil
+       {:rest, p} -> {:rest, cpat(p)}
+       p -> cpat(p)
+     end)}
+  end
+
+  defp cpat({:objpat, props, rest}) do
+    props = for {key, p} <- props, do: {ckey(key), cpat(p)}
+    {:objpat, props, rest && cpat(rest)}
+  end
+
+  defp cpat({:member, _, _, _} = m), do: cmember(m)
+  defp cpat(pat), do: pat
+
+  # The value of `init`, a function or a class that takes the name of the binding `pat`
+  # through `Interp.ev_named/3`, on the tree.
+  defp named(init, pat), do: trace(:ev, init, fn env -> Interp.ev_named(init, env, pat) end)
 
   # S4: in check mode a compiled child may not be in a node that the heap keeps
   # (`make_fn/3`, `Classes.define/2`) or in the callee of a call, whose node names the

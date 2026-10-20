@@ -1192,10 +1192,12 @@ defmodule Browser.JS.Interp do
   # A frameless scope keeps its `let` and `const` names in slots of the frame. At each entry
   # of the statement the slots go back to the temporal dead zone, so a loop body sees its
   # `let` uninitialized again on every iteration.
-  defp reset_tdz(_env, nil), do: :ok
-  defp reset_tdz(_env, %Browser.JS.Resolve.Scope{tdz: []}), do: :ok
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def reset_tdz(_env, nil), do: :ok
+  def reset_tdz(_env, %Browser.JS.Resolve.Scope{tdz: []}), do: :ok
 
-  defp reset_tdz(env, %Browser.JS.Resolve.Scope{tdz: idx}) do
+  def reset_tdz(env, %Browser.JS.Resolve.Scope{tdz: idx}) do
     t = :erlang.get(env)
     if tuple_size(t) >= @box_min, do: Enum.each(idx, &drop_box(:erlang.element(&1, t)))
     f = Enum.reduce(idx, t, fn i, acc -> :erlang.setelement(i, acc, :tdz) end)
@@ -4082,6 +4084,23 @@ defmodule Browser.JS.Interp do
 
   def for_of_source(v), do: iter_source(v)
 
+  @doc false
+  # The source of a `for … of` loop of the closure compiler (`Browser.JS.Compile`), as
+  # `for_of_source/1` finds it: `{:array, id}` for an array that `for_of_step/3` reads at
+  # each step, `{:proto, it, next}` for the iterator protocol, or `{:list, items}` for a
+  # string.
+  def for_of_start({:obj, id} = v) do
+    o = deref(id)
+
+    cond do
+      o.class == :array and array_iteration_pristine?(v) -> {:array, id}
+      o.class in [:map, :set] -> proto_source(v)
+      true -> iter_source(v)
+    end
+  end
+
+  def for_of_start(v), do: iter_source(v)
+
   # One step of a for-of loop over the array `v` at `id`: `{element, next index}`, or nil
   # after the last element. The record is read again at each step, so the loop sees a body
   # that changes the array. For an array that is not an arguments object, the `length` is
@@ -4090,8 +4109,10 @@ defmodule Browser.JS.Interp do
   # key (fast path `:iter`). A hole or an accessor goes to `get/2`. The test for an
   # arguments object is defence in depth today: an arguments object has an own
   # `@@iterator`, so a for-of loop over it does not get to this step.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
   @compile {:inline, for_of_step: 3}
-  defp for_of_step(id, v, i) do
+  def for_of_step(id, v, i) do
     if Fast.on?(:iter) do
       case deref(id) do
         a when Elems.dense_index?(a, i) ->
@@ -6100,7 +6121,9 @@ defmodule Browser.JS.Interp do
   # and `map_scope` (the frame), and the `:args` slot takes `{:mapped, aid}`, so that a
   # write to a parameter finds the object (see `sync_mapped/3`). The object and the two
   # slots are written with one `put` of the frame.
-  defp build_arguments(frame, i, fid) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def build_arguments(frame, i, fid) do
     f = :erlang.get(frame)
     info = :erlang.element(2, f)
     args_slot = :erlang.map_get(:args, info.slots)
@@ -9577,14 +9600,16 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp delete_base_check(base, key) when base in [:null, :undefined],
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def delete_base_check(base, key) when base in [:null, :undefined],
     do:
       throw_error(
         "TypeError",
         "Cannot convert undefined or null to object (delete #{to_str(key)})"
       )
 
-  defp delete_base_check(_, _), do: :ok
+  def delete_base_check(_, _), do: :ok
 
   @doc false
   # The name of a callee node in an error text. It is public because the closure compiler

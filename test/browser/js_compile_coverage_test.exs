@@ -22,17 +22,15 @@ defmodule Browser.JS.CompileCoverageTest do
   # The kinds that stay on the tree: the functions and classes that the heap keeps, the
   # reads and writes of a name that the resolver did not put in a slot, the special forms
   # of `typeof` and `delete`, `super`, private names, `import`, the template strings that
-  # are kept for each place, the regular expressions, and the shapes of the old path.
+  # are kept for each place, and the shapes of the old path.
   @allowed_ev MapSet.new([
                 :fn,
                 :class,
                 :gen,
                 :async,
-                :regex,
                 :tagged_strings,
                 :val,
                 :id,
-                :aslot,
                 :super_member,
                 :new_target,
                 :this,
@@ -40,7 +38,9 @@ defmodule Browser.JS.CompileCoverageTest do
                 :import_meta,
                 :import_phase,
                 :tdz_names,
-                {:unary, "typeof"},
+                {:unary, "typeof", :aslot},
+                {:unary, "typeof", :mref},
+                {:unary, "typeof", :id},
                 {:unary, "delete"},
                 {:unary, "sdelete"},
                 {:assign, :name},
@@ -58,6 +58,34 @@ defmodule Browser.JS.CompileCoverageTest do
   # Tail sites on the tree: a call whose callee `call_target/2` reads by name, through
   # `super` or through an optional chain.
   @allowed_tail MapSet.new([{:call, :id}, {:call, :super}, {:call, :chain}])
+
+  # The shells that stay on the tree (design r16 8.3): a statement with a block frame, a
+  # call whose callee the tree reads by name, through `super` or through an optional chain,
+  # a private name, a literal with a spread or a method, a logical assignment, and the rare
+  # targets of an assignment.
+  @allowed_shell MapSet.new(
+                   [
+                     {:switch, :framed},
+                     {:block, :framed},
+                     {:for, :framed},
+                     {:forin, :framed},
+                     {:forof, :framed},
+                     {:try, :framed},
+                     {:call, :id},
+                     {:call, :chain},
+                     {:call, :super},
+                     {:call, :super_member},
+                     {:member, :priv},
+                     {:binary, :priv},
+                     :object,
+                     :array
+                   ] ++
+                     for(
+                       kind <- [:assign, :sassign, :update, :supdate],
+                       t <- [:logical, :priv, :cslot, :fname, :mslot, :super_member],
+                       do: {kind, t}
+                     )
+                 )
 
   # One snippet for each compiled kind and for each kind with compiled children.
   @snippets [
@@ -88,7 +116,19 @@ defmodule Browser.JS.CompileCoverageTest do
     "function f(x) { return x ?? (g(x), x.h(x)) }",
     "function f() { return arguments.length }",
     "function f() { return this.a }",
-    "function f() { return new.target }"
+    "function f() { return new.target }",
+    # (r16) the statement kinds that compiled in round 16, and their framed twins
+    "function f(x) { switch (x) { case 'a': let y = 1; return y; case g(x): function h() {} return h } }",
+    "function f(x) { switch (x) { case 1: let y = x; return () => y; default: return 0 } }",
+    "function f(o, a) { var k, m = {}; for (k in o) {} for (var j in o) {} for (const c in o) {} for (let [p] in o) {} for (m.p in o) {} return k + j }",
+    "function f(a) { for (const x of a) {} for (var y of a) {} for (let z of a) { if (z) break } for (a of a) {} for (const [p, q = 1] of a) {} return y }",
+    "function f(a) { for (const x of a) { a.push(() => x) } for (let k in a) { a.push(() => k) } return a }",
+    "function f(a) { try { g(a) } catch (e) { a = e } try { g(a) } catch { a = 1 } finally { a++ } try { g(a) } catch ({m, n = 1}) { a = m + n } return a }",
+    "function f(a) { try { g(a) } catch (e) { a = () => e } return a }",
+    "function f(o) { const {a, b: [c = 1] = []} = o; let {[o.k]: d, ...e} = o, g; var [h, , ...i] = o; ({a: o.x, b: o[o.k] = 2} = o); return [a, c, d, e, g, h, i] }",
+    "function f(o) { const g = function () {}, h = () => 1; let k = class {}; var {m = function () {}} = o; return [g, h, k, m] }",
+    "function f(o, k) { 'use strict'; delete o[k]; delete o.a; return delete o[k + 1] }",
+    "function f(x) { do { x-- } while (x > 0); if (x) ; else ; for (;;) ; return [arguments, typeof q, typeof arguments, /a/g] }"
   ]
 
   # The programs of bench/js_runtime.exs. The script binds its program lists to variables,
@@ -135,7 +175,47 @@ defmodule Browser.JS.CompileCoverageTest do
   end
 
   # The key of a node on the tree: its kind, with the detail that the lists above need.
+  defp key(:ev, {:unary, "typeof", e}), do: {:unary, "typeof", elem(e, 0)}
   defp key(:ev, {:unary, op, _}), do: {:unary, op}
+
+  # A shell: a statement with a block frame is `{kind, :framed}`. A call names the kind of
+  # its callee, and a node with a private name says so.
+  defp key(:shell, node) do
+    case node do
+      {k, _, _, _, _, sc} when k in [:forin, :forof, :try, :for] ->
+        scoped(k, sc)
+
+      {:switch, _, _, sc} ->
+        scoped(:switch, sc)
+
+      {:block, _, sc} ->
+        scoped(:block, sc)
+
+      {:call, callee, _, _} ->
+        {:call, elem(callee, 0)}
+
+      {:member, _, {:priv, _}, _} ->
+        {:member, :priv}
+
+      {:binary, "in", {:priv_ref, _}, _} ->
+        {:binary, :priv}
+
+      {:unary, op, _} ->
+        {:unary, op}
+
+      {kind, op, _, _} when kind in [:assign, :sassign] and op in ["&&=", "||=", "??="] ->
+        {kind, :logical}
+
+      {kind, _, target, _} when kind in [:assign, :sassign] ->
+        {kind, target_key(target)}
+
+      {kind, _, _, target} when kind in [:update, :supdate] ->
+        {kind, target_key(target)}
+
+      _ ->
+        elem(node, 0)
+    end
+  end
 
   defp key(:ev, {kind, _, target, _value}) when kind in [:assign, :sassign] do
     if elem(target, 0) in [:id, :gref, :mref], do: {kind, :name}, else: {kind, :nameable}
@@ -144,6 +224,12 @@ defmodule Browser.JS.CompileCoverageTest do
   defp key(:ev, {kind, _, _, _}) when kind in [:update, :supdate], do: {kind, :name}
   defp key(:tail, {:call, callee, _, _}), do: {:call, elem(callee, 0)}
   defp key(_, node), do: elem(node, 0)
+
+  defp scoped(k, %{frame: true}), do: {k, :framed}
+  defp scoped(k, _sc), do: k
+
+  defp target_key({:member, _, {:priv, _}, _}), do: :priv
+  defp target_key(target), do: elem(target, 0)
 
   # The nodes that stay on the tree when each rewritten sync function of `src` compiles,
   # as `{how, key}`, and the number of bodies that compiled.
@@ -160,10 +246,11 @@ defmodule Browser.JS.CompileCoverageTest do
     Process.delete(:js_compile)
     for {:jsc, _} = k <- Process.get_keys(), do: Process.delete(k)
 
-    nodes = for {how, node} <- traced, how != :shell, do: {how, key(how, node)}
+    nodes = for {how, node} <- traced, do: {how, key(how, node)}
     {nodes, compiled}
   end
 
+  defp allowed?({:shell, k}), do: MapSet.member?(@allowed_shell, k)
   defp allowed?({:ev, k}), do: MapSet.member?(@allowed_ev, k)
   defp allowed?({:fstmt, k}), do: MapSet.member?(@allowed_fstmt, k)
   defp allowed?({:tail, k}), do: MapSet.member?(@allowed_tail, k)
@@ -185,11 +272,16 @@ defmodule Browser.JS.CompileCoverageTest do
 
   test "the bench programs keep no hot kind on the tree" do
     # The nine programs, the async programs and the step 3 programs use only kinds that
-    # compile: the functions that they make and the arguments object (`{:aslot}`, which
-    # the first read builds) are the only nodes on the tree.
-    nodes = for src <- bench(), n <- elem(tree_nodes(src), 0), uniq: true, do: n
+    # compile: the functions and the classes that they make are the only nodes on the
+    # tree.
+    nodes =
+      for src <- bench(),
+          {how, _} = n <- elem(tree_nodes(src), 0),
+          how != :shell,
+          uniq: true,
+          do: n
 
     assert Enum.sort(nodes) --
-             [{:ev, :aslot}, {:ev, :class}, {:ev, :fn}, {:ev, :gen}, {:ev, :async}] == []
+             [{:ev, :class}, {:ev, :fn}, {:ev, :gen}, {:ev, :async}] == []
   end
 end
