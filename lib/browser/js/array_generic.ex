@@ -124,6 +124,12 @@ defmodule Browser.JS.ArrayGeneric do
 
   # ArraySpeciesCreate
   defp species_create(o, n) do
+    if Interp.species_plain?(o),
+      do: array_create(n),
+      else: species_create_get(o, n)
+  end
+
+  defp species_create_get(o, n) do
     if Proxy.is_array(o) do
       c = Interp.get(o, "constructor")
 

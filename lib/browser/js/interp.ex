@@ -80,6 +80,7 @@ defmodule Browser.JS.Interp do
 
   # The key of the well-known symbol `Symbol.iterator`.
   @iterator_key {:symbol, :iterator, "Symbol.iterator"}
+  @species_key {:symbol, :species, "Symbol.species"}
 
   @doc false
   # The call depth of a chain in `:js_stack` (step 2f). The depth of the current call is in
@@ -179,6 +180,8 @@ defmodule Browser.JS.Interp do
     :erlang.erase(:js_arr_iter_pos)
     # (the chains of the misses of the host objects, see `host_lookup/3`)
     :erlang.erase(:js_pmiss)
+    # (the positions of `species_plain?/1` name the records of an earlier heap)
+    :erlang.erase(:js_species_pos)
 
     # The switch of the fast records (`Browser.JS.Shape`): the application setting
     # `:js_shapes` set to `false` (`JS_SHAPES=0`, or `mix js.test262 --shapes off`) turns
@@ -4330,6 +4333,73 @@ defmodule Browser.JS.Interp do
                {apid, s1, p1, :erlang.get(:js_arr_values), aipid, s2, p2,
                 :erlang.get(:js_arr_next)}
              )
+
+      true
+    else
+      _ -> false
+    end
+  end
+
+  @doc false
+  # Whether ArraySpeciesCreate of `v` gives a new plain array with no step that a script
+  # can see: `v` is an array that is not a proxy, its prototype is `Array.prototype` and it
+  # has no own `constructor`, the `constructor` of `Array.prototype` is the data value
+  # `%Array%`, and the `@@species` of `%Array%` is its own built-in getter. Then
+  # `constructor` gives `%Array%`, `@@species` gives `%Array%` with no step of a script, and
+  # `Construct(%Array%, n)` gives an array with `Array.prototype` (the `prototype` of
+  # `%Array%` cannot change), as `ArrayCreate(n)` does. The callers then make the result
+  # as a plain array. A false result costs only speed: the caller takes the steps of the
+  # spec.
+  #
+  # As for `array_record_pristine?/1`, the process key `:js_species_pos` keeps the ids of
+  # `Array.prototype` and `%Array%`, the `sid` of each one and the position of the key in
+  # it, from the last test that found the two values. A record with a new shape or in
+  # dictionary mode takes the search again. A new heap and a new realm erase the key. The
+  # two records are roots anyway (`{:proto, :array}` and `:js_array_species`), so the
+  # collector does not read the key (`Browser.JS.GC`).
+  def species_plain?({:obj, id}) do
+    case :erlang.get(id) do
+      %{class: :array} = o when not is_map_key(o, :proxy) -> species_record_plain?(o)
+      _ -> false
+    end
+  end
+
+  def species_plain?(_), do: false
+
+  defp species_record_plain?(o) do
+    with {apid, s1, p1, ctor, cid, s2, p2, getter} <- :erlang.get(:js_species_pos),
+         {:obj, ^apid} <- :erlang.map_get(:proto, o),
+         Obj.fast_record(^s1, v1) <- :erlang.get(apid),
+         Obj.fast_record(^s2, v2) <- :erlang.get(cid) do
+      # (the root shape of an array, `sid` -1, has no key, and most arrays have it)
+      case o do
+        Obj.fast_record(-1, _) -> true
+        _ -> not Obj.has_own?(o, "constructor")
+      end and
+        :erlang.element(p1, v1) == ctor and
+        :erlang.element(p2, v2) == {:accessor, getter, :undefined}
+    else
+      {:obj, _} -> false
+      _ -> species_search?(o)
+    end
+  end
+
+  # `species_record_plain?/1` with a search of the two keys. When the result is true and
+  # the two records are fast, it keeps the positions for the next test.
+  defp species_search?(o) do
+    with {:obj, apid} = ap <- :erlang.get({:proto, :array}),
+         {{:obj, cid} = ctor, getter} <- :erlang.get(:js_array_species),
+         true <- :erlang.map_get(:proto, o) == ap and not Obj.has_own?(o, "constructor"),
+         apr = :erlang.get(apid),
+         cr = :erlang.get(cid),
+         true <-
+           Obj.own_value(apr, "constructor") == ctor and
+             Obj.own_value(cr, @species_key) == {:accessor, getter, :undefined} do
+      with {p1, _} <- Obj.fast_slot(apr, "constructor"),
+           {p2, _} <- Obj.fast_slot(cr, @species_key),
+           s1 = Obj.shape_id(apr),
+           s2 = Obj.shape_id(cr),
+           do: :erlang.put(:js_species_pos, {apid, s1, p1, ctor, cid, s2, p2, getter})
 
       true
     else

@@ -434,11 +434,11 @@ defmodule Browser.JS.Builtins do
         end
       end)
 
-    put_hidden(
-      arr,
-      {:symbol, :species, "Symbol.species"},
-      {:accessor, native("get [Symbol.species]", fn this, _ -> this end), :undefined}
-    )
+    species_get = native("get [Symbol.species]", fn this, _ -> this end)
+    put_hidden(arr, {:symbol, :species, "Symbol.species"}, {:accessor, species_get, :undefined})
+    # (for `Interp.species_plain?/1`; the positions of an earlier realm go)
+    :erlang.put(:js_array_species, {arr, species_get})
+    :erlang.erase(:js_species_pos)
 
     def_fn(arr, "isArray", fn _, args -> Browser.JS.Proxy.is_array(arg(args, 0)) end)
     put_hidden(arr, "fromAsync", Browser.JS.Prelude.from_async())
@@ -503,6 +503,14 @@ defmodule Browser.JS.Builtins do
   # ArraySpeciesCreate: nil when the result is a plain array, else the object built by the
   # species constructor
   defp species_target(this, n) do
+    if species_plain?(this) do
+      nil
+    else
+      species_target_get(this, n)
+    end
+  end
+
+  defp species_target_get(this, n) do
     if Browser.JS.Proxy.is_array(this) do
       c = Interp.get(this, "constructor")
 

@@ -2338,4 +2338,38 @@ defmodule Browser.JSTest do
     assert js(src) ==
              "undefined,undefined,1,undefined,undefined,2,undefined,3,undefined,g,undefined,undefined,s,own,undefined,undefined,undefined,4,undefined,undefined,5,undefined,6,undefined,undefined,7,undefined,p,undefined,8"
   end
+
+  # ArraySpeciesCreate gives a plain array with no step when nothing changed
+  # (`Interp.species_plain?/1`); each change must show.
+  test "the species of an array shows each change of the constructor and of the species" do
+    src = ~S"""
+    var out = [];
+    class B extends Array {}
+    function Mk(n) { this.mk = n }
+    function kind(r) { return r.mk !== undefined ? 'M' : r instanceof B ? 'B' : Array.isArray(r) && Object.getPrototypeOf(r) === Array.prototype ? 'A' : '?' }
+    var b0 = B.from([1, 2]); out.push(kind(b0.map(function (x) { return x })));
+    var a = [1, 2, 3];
+    function ks(l) { var s = ''; for (var i = 0; i < l.length; i++) s += kind(l[i]); return s }
+    function t() { return ks([a.map(function (x) { return x }), a.filter(Boolean), a.slice(1), a.concat([4]), a.splice(0, 0)]) }
+    out.push(t());
+    function Other() {} Other[Symbol.species] = Mk;
+    Array.prototype.constructor = Other; out.push(t());
+    Array.prototype.constructor = Array; out.push(t());
+    var b = B.from([1, 2]); out.push(ks([b.map(function (x) { return x }), b.slice(0), b.concat([])]));
+    a.constructor = B; out.push(t()); delete a.constructor; out.push(t());
+    var desc = Object.getOwnPropertyDescriptor(Array, Symbol.species);
+    Object.defineProperty(Array, Symbol.species, {get: function () { return Mk }, configurable: true}); out.push(t());
+    Object.defineProperty(Array, Symbol.species, desc); out.push(t());
+    delete Array.prototype.constructor; out.push(t());
+    Array.prototype.z1 = 1; Array.prototype.constructor = Array; delete Array.prototype.z1; out.push(t());
+    var c = [1, 2]; Object.setPrototypeOf(c, B.prototype); out.push(kind(c.map(function (x) { return x })));
+    var log = [], pa = new Proxy([1], {get: function (t, k, r) { if (k === 'constructor') log.push('c'); return Reflect.get(t, k, r) }});
+    Array.prototype.map.call(pa, function (x) { return x }); Array.prototype.slice.call(pa); [0].concat.call(pa); out.push(log.join(''));
+    var e = [1]; e.constructor = B; out.push(kind(e.map(function (x) { return x })));
+    out.join(' ')
+    """
+
+    assert js(src) ==
+             "B AAAAA MMMMM AAAAA BBB BBBBB AAAAA MMMMM AAAAA AAAAA AAAAA B ccc B"
+  end
 end
