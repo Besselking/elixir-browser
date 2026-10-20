@@ -650,6 +650,46 @@ defmodule Browser.JS.DOMGCTest do
     end)
   end
 
+  # A frame that goes takes all of its realm with it: the wrappers of its window, location,
+  # history and storages, and its timers. They were roots, and each of them kept the global
+  # scope of the frame, and so the whole page of the frame, alive.
+  test "a frame that goes frees what its scripts made" do
+    page(fn ->
+      base = Interp.heap_size()
+
+      js(~S"""
+      var f = document.createElement('iframe');
+      f.srcdoc = '<p>frame</p><script>' +
+        'var big = []; for (var i = 0; i < 5000; i++) big.push({ i: i });' +
+        'history.length; try { sessionStorage.length; localStorage.length } catch (e) {}' +
+        'setInterval(function () { return big.length }, 1000);' +
+        'setTimeout(function () { return big.length }, 1e9);' +
+        '<\/script>';
+      document.body.appendChild(f); 0
+      """)
+
+      timers()
+      doc = st().frames |> Map.values() |> hd()
+      GC.collect()
+      assert Interp.heap_size() > base + 5000
+      assert is_map_key(st().wrappers, {:aux, {:history, doc}})
+      assert Enum.any?(Process.get(:js_timers), &(&1.realm == doc))
+
+      js("f.remove(); f = null; 0")
+      GC.collect()
+      assert Interp.heap_size() < base + 100
+      assert Process.get(:js_timers) == []
+
+      left =
+        for {{:aux, data}, _} <- st().wrappers,
+            is_tuple(data),
+            elem(data, tuple_size(data) - 1) == doc,
+            do: data
+
+      assert left == []
+    end)
+  end
+
   # A timer of a frame that has gone does not run, and an interval of it is not set again.
   # (A frame that goes takes its timers with it, see `DOM.destroy_realm/1`. The timer here
   # stands for one that stays in the list: it gets the id of a document that is not there.)
