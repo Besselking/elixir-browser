@@ -11,7 +11,11 @@ defmodule Browser.JS.ObjectStatics do
   require Browser.JS.Obj, as: Obj
 
   defp get(o, k), do: Interp.get(o, k)
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
+  # (a direct walk of the argument list: `Enum.at/3` slices the list, four calls and a list
+  # for each argument)
+  defp arg([a | _], 0), do: a
+  defp arg([_ | rest], i), do: arg(rest, i - 1)
+  defp arg([], _i), do: :undefined
 
   def install(obj, proto) do
     def_fn(obj, "keys", 1, fn _, args ->
@@ -30,7 +34,11 @@ defmodule Browser.JS.ObjectStatics do
       new_array(entries_of(object!(arg(args, 0)), fn k, v -> new_array([k, v]) end))
     end)
 
-    def_fn(obj, "assign", 2, fn _, args -> assign(arg(args, 0), Enum.drop(args, 1)) end)
+    def_fn(obj, "assign", 2, fn
+      _, [target | sources] -> assign(target, sources)
+      _, [] -> assign(:undefined, [])
+    end)
+
     def_fn(obj, "fromEntries", 1, fn _, args -> from_entries(arg(args, 0)) end)
 
     def_fn(obj, "hasOwn", 2, fn _, args ->

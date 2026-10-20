@@ -33,7 +33,11 @@ defmodule Browser.JS.TypedArrays do
 
   @max_f32 3.4028235677973366e38
 
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
+  # (a direct walk of the argument list: `Enum.at/3` slices the list, four calls and a list
+  # for each argument)
+  defp arg([a | _], 0), do: a
+  defp arg([_ | rest], i), do: arg(rest, i - 1)
+  defp arg([], _i), do: :undefined
   defp def_fn(obj, name, fun), do: put_hidden(obj, name, native(name, fun))
 
   defp def_fn(obj, name, arity, fun) do

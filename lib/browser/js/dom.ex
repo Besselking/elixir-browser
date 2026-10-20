@@ -2743,7 +2743,11 @@ defmodule Browser.JS.DOM do
 
   defp this_nid(this), do: nid_of(this)
 
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
+  # (a direct walk of the argument list: `Enum.at/3` slices the list, four calls and a list
+  # for each argument)
+  defp arg([a | _], 0), do: a
+  defp arg([_ | rest], i), do: arg(rest, i - 1)
+  defp arg([], _i), do: :undefined
   defp float(n), do: n * 1.0
   defp nodes_array(ids), do: new_array(wrap_all(ids))
 
