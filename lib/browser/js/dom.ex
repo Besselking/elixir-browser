@@ -34,7 +34,7 @@ defmodule Browser.JS.DOM do
   # read by `gc_node_roots/1` and cleaned by `gc_sweep/0`.)
   @gc_fields ~w(nodes ids aidx iframes rects rev next next_nid usp doc main frames meta fdirty
                 ce_done current_script write_after focus_ed focus_ctl scroll content width height
-                hist_idx history_before)a
+                hist_idx history_before tags)a
 
   @doc false
   # Check mode: the fields that `gc_begin/2` leaves out, which must hold no JS value.
@@ -690,7 +690,35 @@ defmodule Browser.JS.DOM do
          aidx: reindex_attrs(s.aidx, id, nil, n),
          iframes: iframes,
          rev: s.rev + 1
-     }}
+     }
+     |> add_tag(n)}
+  end
+
+  # The tags of the elements are in `tags`: each tag that an element of the node table has
+  # had. A new element is the one way into the table (`index_node/2`, `build_list_fast/3`),
+  # and the tag of an element never changes. A tag stays when its last element goes, so
+  # `tags` has the tag of each element and maybe more. It is enough for `tag_absent?/2`.
+  defp add_tag(s, %{kind: :element, tag: t}) when is_binary(t) do
+    case s do
+      %{tags: %{^t => _}} -> s
+      _ -> Map.put(s, :tags, Map.put(Map.get(s, :tags, %{}), t, true))
+    end
+  end
+
+  defp add_tag(s, _n), do: s
+
+  @doc false
+  # Check: the tags of the elements of the node table that `tags` does not have (an empty
+  # list when `tags` is correct).
+  def missing_tags do
+    s = st()
+    tags = Map.get(s, :tags, %{})
+
+    for {_, %{kind: :element, tag: t}} <- s.nodes,
+        is_binary(t),
+        not is_map_key(tags, t),
+        uniq: true,
+        do: t
   end
 
   @doc "True when the script changed the tree since the last `clean/0`."
@@ -1179,7 +1207,9 @@ defmodule Browser.JS.DOM do
       ed_sel: nil,
       scroll: {0.0, 0.0},
       content: {0.0, 0.0},
-      next_nid: Browser.Nids.max_nid(raw, -1) + 1
+      next_nid: Browser.Nids.max_nid(raw, -1) + 1,
+      # each tag that an element of the node table has had (see `tag_absent?/2`)
+      tags: %{}
     })
 
     doc = new_node(%{kind: :document})
@@ -1277,7 +1307,7 @@ defmodule Browser.JS.DOM do
         nodes: :maps.merge(s.nodes, :maps.from_list(new))
     }
 
-    {ids, s}
+    {ids, :lists.foldl(fn {_, n}, s -> add_tag(s, n) end, s, new)}
   end
 
   defp fast_list(raws, parent, acc), do: Enum.map_reduce(raws, acc, &fast_node(&1, parent, &2))
@@ -4309,10 +4339,34 @@ defmodule Browser.JS.DOM do
   defp query_all(root, selector) do
     sels = parse_selectors(selector)
 
-    case candidates(sels, root) do
-      :walk -> walk_matches(node(root).kids, st().nodes, sels, []) |> :lists.reverse()
-      nids -> for nid <- nids, below?(nid, root), matches?(nid, sels), do: nid
+    if tag_absent?(st(), sels) do
+      []
+    else
+      case candidates(sels, root) do
+        :walk -> walk_matches(node(root).kids, st().nodes, sels, []) |> :lists.reverse()
+        nids -> for nid <- nids, below?(nid, root), matches?(nid, sels), do: nid
+      end
     end
+  end
+
+  # True when no element can match the selector list `sels`: each selector has a compound
+  # with a tag that no element of the node table has (`querySelector("base")` on a page with
+  # no `<base>`). Then a search gives nothing at once, with no walk of the tree. A compound
+  # must match an element for the selector to match, so one such compound is enough. (Only
+  # the tag of the compound itself counts, not one inside `:not()` or `:is()`.)
+  defp tag_absent?(%{tags: tags}, sels),
+    do: sels != [] and Enum.all?(sels, &complex_tag_absent?(&1, tags))
+
+  defp tag_absent?(_s, _sels), do: false
+
+  defp complex_tag_absent?(complex, tags) do
+    Enum.any?(complex, fn {_comb, compound} ->
+      Enum.any?(compound, fn
+        {:tag, "*"} -> false
+        {:tag, t} -> not is_map_key(tags, t)
+        _ -> false
+      end)
+    end)
   end
 
   # The elements that can match a selector list, when an index gives them, or :walk. A
@@ -4413,9 +4467,11 @@ defmodule Browser.JS.DOM do
   defp query_first(root, selector) do
     sels = parse_selectors(selector)
 
-    case candidates(sels, root) do
-      :walk -> first_match(node(root).kids, st().nodes, sels)
-      nids -> Enum.find(nids, &(below?(&1, root) and matches?(&1, sels)))
+    unless tag_absent?(st(), sels) do
+      case candidates(sels, root) do
+        :walk -> first_match(node(root).kids, st().nodes, sels)
+        nids -> Enum.find(nids, &(below?(&1, root) and matches?(&1, sels)))
+      end
     end
   end
 

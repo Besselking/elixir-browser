@@ -729,6 +729,62 @@ defmodule Browser.JS.DOMGCTest do
     end)
   end
 
+  # `querySelector` and `querySelectorAll` give nothing at once for a tag that no element has
+  # (`DOM.tag_absent?/2`). The tags of the state must then have the tag of each element in the
+  # node table, after each way that makes elements: the parser, `createElement`, `innerHTML`
+  # (with and without a `<template>`), `insertAdjacentHTML`, `cloneNode`, `DOMParser` and a
+  # frame. `DOM.missing_tags/0` recounts them.
+  test "the tags of the elements stay complete, and a tag that no element has finds nothing" do
+    page("<p id=p>x</p>", fn ->
+      assert Browser.JS.DOM.missing_tags() == []
+
+      assert js("""
+             [document.querySelector('base'), document.querySelectorAll('p base, x-nope').length,
+              document.querySelectorAll('p, x-nope').length, document.querySelector('p:not(base)').id,
+              document.querySelector('*') !== null].join()
+             """) == ",0,1,p,true"
+
+      steps = [
+        "var q = document.getElementById('p')",
+        "document.body.appendChild(document.createElement('base'))",
+        "document.body.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'svg'))",
+        "q.innerHTML = '<x-a><x-b>1</x-b></x-a><i>2</i>'",
+        "q.innerHTML += '<template><x-t></x-t></template><x-c></x-c>'",
+        "q.insertAdjacentHTML('beforeend', '<x-d><x-e></x-e></x-d>')",
+        "document.body.appendChild(q.cloneNode(true))",
+        "new DOMParser().parseFromString('<x-f></x-f>', 'text/html')",
+        "document.createElement('x-g')",
+        "q.remove()"
+      ]
+
+      for step <- steps do
+        js(step <> "; 0")
+        assert Browser.JS.DOM.missing_tags() == [], step
+      end
+
+      GC.collect()
+      assert Browser.JS.DOM.missing_tags() == []
+
+      assert js("""
+             [document.querySelector('base').tagName, document.querySelector('BASE').tagName,
+              document.querySelectorAll('x-a x-b, x-d > x-e').length,
+              document.querySelector('x-t'), document.querySelector('template').content
+                .querySelector('x-t').tagName, document.querySelector('x-f'),
+              document.querySelector('x-c.none')].join()
+             """) == "BASE,BASE,2,,X-T,,"
+
+      js("""
+      var f = document.createElement('iframe');
+      f.srcdoc = '<x-h><x-i></x-i></x-h>';
+      document.body.appendChild(f); 0
+      """)
+
+      timers()
+      assert Browser.JS.DOM.missing_tags() == []
+      assert js("f.contentDocument.querySelector('x-h > x-i').tagName") == "X-I"
+    end)
+  end
+
   # A timer of a frame that has gone does not run, and an interval of it is not set again.
   # (A frame that goes takes its timers with it, see `DOM.destroy_realm/1`. The timer here
   # stands for one that stays in the list: it gets the id of a document that is not there.)
