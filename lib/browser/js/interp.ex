@@ -6457,7 +6457,12 @@ defmodule Browser.JS.Interp do
 
   # ── statements ─────────────────────────────────────────────
 
-  @doc "Runs a whole program in the global scope; returns the completion value."
+  @doc """
+  Runs a whole program in the global scope; returns the completion value. `script?` is
+  `true` for a script with the checks of GlobalDeclarationInstantiation (`declare_globals/2`),
+  `:classic` for a classic script of a page (its `var` and function names become fixed, see
+  `fix_globals/2`), and `false` for code of the runtime.
+  """
   def run_program({:program, stmts}, script? \\ false) do
     # Global code can run inside a JS call (the Function constructor, `$262.evalScript`).
     # It must not change the completion value of the code that called it, so the old value
@@ -6467,7 +6472,11 @@ defmodule Browser.JS.Interp do
     scope = global()
     names = once_names(stmts)
 
-    if script? do
+    # (a classic script of a page only records which names its `var`s and function
+    # declarations make fixed, see `fix_globals/2`)
+    if script? == :classic, do: fix_globals(stmts, names)
+
+    if script? == true do
       declare_globals(stmts, names)
       g = deref(scope)
 
@@ -6488,6 +6497,33 @@ defmodule Browser.JS.Interp do
     Browser.JS.Promise.run_microtasks()
     :erlang.put(:js_last, caller_last)
     result
+  end
+
+  # The names that a classic script of a page declares with `var` or `function` are
+  # properties of the window that are not configurable: `delete window.x` leaves them, and
+  # `defineProperty` cannot make them accessors (`global_fixed?/1`). As in `declare_globals/2`,
+  # a `var` of a name that is already there leaves that property as it is.
+  defp fix_globals(stmts, names) do
+    fun_names = Enum.map(fundecls(stmts), &elem(&1, 0))
+    g = deref(global())
+
+    before =
+      case g.vars do
+        %{this: {:obj, gid}} -> deref(gid)
+        _ -> nil
+      end
+
+    fresh =
+      for n <- Enum.uniq(names ++ fun_names),
+          is_binary(n),
+          n in fun_names or
+            not (Map.has_key?(g.vars, n) or (before != nil and Obj.has_own?(before, n))),
+          do: n
+
+    if fresh != [] do
+      fixed = Process.get(:js_global_fixed) || MapSet.new()
+      Process.put(:js_global_fixed, MapSet.union(fixed, MapSet.new(fresh)))
+    end
   end
 
   # GlobalDeclarationInstantiation: a script's `let`/`const`/class names may not collide with

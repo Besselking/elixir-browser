@@ -1080,7 +1080,7 @@ defmodule Browser.JS.Runtime do
 
   defp run_classic(src, file) do
     case Parser.parse(src, file: file) do
-      {:ok, program} -> Interp.run_program(program)
+      {:ok, program} -> Interp.run_program(program, :classic)
       {:error, msg} -> throw({:syntax, msg})
     end
   end

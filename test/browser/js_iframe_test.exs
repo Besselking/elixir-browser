@@ -663,4 +663,47 @@ defmodule Browser.JS.IframeTest do
                "ReferenceError ReferenceError v1 v2 v3 v4 e1 e2 w v4 local v4 frame v4 frame2 page2 page2 l2 c2"
            ]
   end
+
+  # The global variables of a realm are the properties of its window. One that a write made
+  # (`window.x = 1`, `x = 1`) is configurable: `delete` takes it away, and `defineProperty`
+  # makes it an own property of the window. A `var` or a function declaration is not
+  # configurable: `delete` gives false, and it cannot become an accessor.
+  test "delete and defineProperty on a window change its global variables" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const out = [];
+        function rd(n) { try { return String(eval(n)) } catch (e) { return e.name } }
+        function rx() { try { return String(gx) } catch (e) { return e.name } }
+        window.gx = 1; out.push(rx(), delete window.gx, rx(), "gx" in window);
+        gy = 2; out.push(delete window.gy, rd("gy"));
+        out.push(delete window.gv, gv, delete window.gf, typeof gf);
+        window.gw = 1;
+        Object.defineProperty(window, "gw", { value: 2, configurable: true, writable: true });
+        out.push(rd("gw"), window.gw);
+        gw = 3; out.push(window.gw, rd("gw"));
+        window.gg = 1;
+        Object.defineProperty(window, "gg", { get: function () { return "g" }, configurable: true });
+        out.push(rd("gg"), window.gg);
+        Object.defineProperty(window, "gv", { value: 5 }); out.push(gv, window.gv);
+        try { Object.defineProperty(window, "gv", { get: function () {} }) } catch (e) { out.push(e.name) }
+        const f = document.createElement("iframe");
+        f.srcdoc = "<script>var fv = 1; x2 = 2; function fr() { return typeof x2 }<\/script>";
+        f.onload = () => {
+          const w = f.contentWindow;
+          out.push(delete w.x2, w.fr(), delete w.fv, w.fv, rd("gv"));
+          console.log(out.join(" "));
+        };
+        document.body.appendChild(f);
+        """,
+        "<script>var gv = 1; function gf() {}</script>"
+      )
+
+    assert errors == []
+
+    assert logs == [
+             "1 true ReferenceError false true ReferenceError false 1 false function 2 2 3 3 " <>
+               "g g 5 5 TypeError true undefined false 1 5"
+           ]
+  end
 end

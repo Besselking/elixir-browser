@@ -64,6 +64,52 @@ defmodule Browser.JS.Global do
     end
   end
 
+  @doc """
+  `Object.defineProperty` on the global object (or a window) for the key `key`, when it is a
+  variable of the global scope of the running realm. Returns `:ok` when it is done, or the
+  descriptor for the ordinary define on the object.
+
+  A `var` or a function declaration is a property that is writable and enumerable but not
+  configurable: a new value goes into the variable, and an accessor, `configurable: true` or
+  `enumerable: false` is a TypeError. (`writable: false` is not kept.) Any other variable (a
+  write to an undeclared name, `window.x = 1`, a built-in) is configurable: it leaves the
+  scope and becomes an own property of the object, with the attributes it had (writable,
+  enumerable and configurable) where `desc` gives none. A read of the name then finds that
+  property (`Interp.lookup_var/2` reads the global object when the scope has no variable).
+  """
+  def define_var(key, desc) do
+    scope = Interp.global()
+    s = Interp.deref(scope)
+
+    cond do
+      key in ["NaN", "Infinity", "undefined"] or not Map.has_key?(s.vars, key) or
+          Interp.global_lexical?(key) ->
+        desc
+
+      Interp.global_fixed?(key) ->
+        if Map.has_key?(desc, :get) or Map.has_key?(desc, :set) or
+             Map.get(desc, :configurable) == true or Map.get(desc, :enumerable) == false,
+           do: Interp.throw_error("TypeError", "Cannot redefine property: #{key}")
+
+        if Map.has_key?(desc, :value),
+          do: Interp.store(scope, %{s | vars: Map.put(s.vars, key, desc.value)})
+
+        :ok
+
+      true ->
+        Interp.store(scope, %{s | vars: Map.delete(s.vars, key)})
+        accessor? = Map.has_key?(desc, :get) or Map.has_key?(desc, :set)
+        old = %{enumerable: true, configurable: true}
+
+        old =
+          if accessor?,
+            do: old,
+            else: Map.merge(old, %{value: Map.fetch!(s.vars, key), writable: true})
+
+        Map.merge(old, desc)
+    end
+  end
+
   # the built-ins are not enumerable; what a script declares is
   @doc "Every own string-keyed property of the global object, built-ins included."
   def all_names do

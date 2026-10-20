@@ -19,6 +19,7 @@ defmodule Browser.JS.DOM do
   import Browser.Re, only: [re: 1, split_words: 1]
   alias Browser.JS.Interp
   alias Browser.JS.Str
+  require Browser.JS.Obj, as: Obj
 
   @void ~w(area base br col embed hr img input link meta param source track wbr)
 
@@ -3258,6 +3259,11 @@ defmodule Browser.JS.DOM do
 
   defp hput({:style, nid}, key, v, _), do: style_put(nid, key, v)
   defp hput({:dataset, nid}, key, v, _), do: dataset_put(nid, key, v)
+  # (a property that `defineProperty` put on the window itself follows its own attributes)
+  defp hput(:window, key, v, {:obj, id}) when is_binary(key) do
+    if Obj.has_own?(deref(id), key), do: :miss, else: window_put(key, v)
+  end
+
   defp hput(:window, key, v, _), do: window_put(key, v)
   defp hput(:location, key, v, _), do: location_put(key, v)
 
@@ -5109,7 +5115,24 @@ defmodule Browser.JS.DOM do
     true
   end
 
+  # `delete window.x`: a global variable of the window's realm goes, as on the global object
+  # (`Browser.JS.Global.host_delete/2`); a `var` stays
+  def host_delete(data, key) when is_binary(key) and (data == :window or is_tuple(data)) do
+    case data do
+      {:window, _} -> in_window_realm(data, fn -> Browser.JS.Global.host_delete(:global, key) end)
+      :window -> in_window_realm(data, fn -> Browser.JS.Global.host_delete(:global, key) end)
+      _ -> :default
+    end
+  end
+
   def host_delete(_other, _key), do: :default
+
+  @doc false
+  # runs `fun` in the realm of the window `data` (`:window` or `{:window, doc}`)
+  def in_window_realm(data, fun) do
+    {doc, :window} = split_realm(data)
+    in_realm(doc, fun)
+  end
 
   defp storage_put(area, key, v), do: storage_set(area, key, to_str(v))
 
