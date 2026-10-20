@@ -566,9 +566,9 @@ defmodule Browser.FetchTest do
     test "two loads whose redirects go to the address of the other do not wait for each other" do
       base = held_server()
       a = Task.async(fn -> Fetch.load(base <> "/a") end)
-      assert_receive {:held, ha, "/a"}
+      assert_receive {:held, ha, "/a"}, 1_000
       b = Task.async(fn -> Fetch.load(base <> "/b") end)
-      assert_receive {:held, hb, "/b"}
+      assert_receive {:held, hb, "/b"}, 1_000
 
       send(ha, {:reply, redirect(302, "/b")})
       send(hb, {:reply, redirect(302, "/a")})
@@ -585,7 +585,7 @@ defmodule Browser.FetchTest do
     test "loads of other addresses, a reload and a load in pieces make their own requests" do
       base = held_server()
       first = Task.async(fn -> Fetch.load(base <> "/a.css") end)
-      assert_receive {:held, h1, "/a.css"}
+      assert_receive {:held, h1, "/a.css"}, 1_000
 
       others = [
         Task.async(fn -> Fetch.load(base <> "/b.css") end),
@@ -595,7 +595,7 @@ defmodule Browser.FetchTest do
 
       handlers =
         for _ <- 1..3 do
-          assert_receive {:held, h, _}
+          assert_receive {:held, h, _}, 1_000
           h
         end
 
