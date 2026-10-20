@@ -691,8 +691,9 @@ defmodule Browser.JS.DOMGCTest do
   end
 
   # The realms share the built-in objects. A frame that goes gives back what its functions
-  # changed on them (`Browser.JS.Intrinsics`): a later page sees the built-ins of the boot,
-  # and the page of the frame is freed. What the page's own realm changed stays.
+  # changed on them (`Browser.JS.Intrinsics`): a later page sees the built-ins of the boot.
+  # What the page's own realm changed stays, and so does a property that was not there at
+  # boot (the page can use it). When the page deletes those, the page of the frame is freed.
   test "a frame that goes gives the shared built-in objects back their boot state" do
     page(fn ->
       base = Interp.heap_size()
@@ -706,6 +707,7 @@ defmodule Browser.JS.DOMGCTest do
         'Set.prototype.foo = function () { return big };' +
         'Object.defineProperty(Element.prototype, "bar", { get: function () { return big }, configurable: true });' +
         'Map.prototype.fromPage = Map.prototype.fromPage;' +
+        'if (!Array.prototype.last) Array.prototype.last = function () { return this[this.length - 1] };' +
         '<\/script>';
       document.body.appendChild(f); 0
       """)
@@ -718,14 +720,20 @@ defmodule Browser.JS.DOMGCTest do
              ) == "frame 5000,function,true"
 
       js("f.remove(); f = null; 0")
-      GC.collect()
-      assert Interp.heap_size() < base + 100
 
       assert js("""
              var d = Object.getOwnPropertyDescriptor(Function.prototype, 'toString');
              [Function.prototype.toString.call(Math.max), d.value.name, d.enumerable, d.writable,
-              'foo' in Set.prototype, 'bar' in Element.prototype, new Map().fromPage()].join()
-             """) == "function max() { [native code] },toString,false,true,false,false,page"
+              Set.prototype.foo().length, 'bar' in Element.prototype, new Map().fromPage(),
+              [1, 2].last()].join()
+             """) == "function max() { [native code] },toString,false,true,5000,true,page,2"
+
+      js(
+        "delete Set.prototype.foo; delete Element.prototype.bar; delete Array.prototype.last; d = null; 0"
+      )
+
+      GC.collect()
+      assert Interp.heap_size() < base + 100
     end)
   end
 

@@ -14,10 +14,12 @@ defmodule Browser.JS.Intrinsics do
   and so on), their prototypes and the objects of their data properties that are not
   functions, and the prototypes of `Interp.proto/1` (the host interfaces too).
   `restore/1` runs when a frame goes. On each recorded object it gives back the boot state
-  of each property whose value, getter or setter is a function of the dead realm, and
-  deletes such a property that was not there at boot. It does not touch a property that a
-  live realm set. Thus a later page sees the built-in objects as they were at boot, as it
-  would in a browser.
+  of each property of the boot whose value, getter or setter is a function of the dead
+  realm. It does not touch a property that a live realm set. Thus a later page sees the
+  built-in methods as they were at boot, as it would in a browser. A property that was not
+  there at boot stays, also when a function of the dead realm holds it: a live realm can
+  use it. A polyfill (`if (!Array.prototype.last) Array.prototype.last = ...`) that ran
+  first in the frame is not run again by the page.
 
   The record has two process keys. `:js_boot_states` holds, for each object, its own
   properties at boot as `Obj.own_state/2` gives them. It is a root of the collector, so a
@@ -83,8 +85,8 @@ defmodule Browser.JS.Intrinsics do
   defp part(rec), do: Obj.own_part(rec)
 
   @doc """
-  Gives the shared built-in objects back the boot state of each property that a function
-  of the realm with the global scope `global` holds (see the moduledoc). Returns how many
+  Gives the shared built-in objects back the boot state of each property of the boot that a
+  function of the realm with the global scope `global` holds (see the moduledoc). Returns how many
   properties changed.
   """
   def restore(global) do
@@ -116,7 +118,13 @@ defmodule Browser.JS.Intrinsics do
   end
 
   defp restore_one(id, rec, boot, global) do
-    dead = for key <- Obj.all_keys(rec), dead?(Obj.own_state(rec, key), global), do: key
+    boot = boot || %{}
+
+    dead =
+      for key <- Obj.all_keys(rec),
+          is_map_key(boot, key),
+          dead?(Obj.own_state(rec, key), global),
+          do: key
 
     if dead == [] do
       0
@@ -124,9 +132,6 @@ defmodule Browser.JS.Intrinsics do
       rec =
         Enum.reduce(dead, rec, fn key, rec ->
           case boot[key] do
-            nil ->
-              Obj.own_delete(rec, key)
-
             {:data, v, w, e, c} ->
               Obj.own_redefine(rec, key, v, %{w: w, c: c}, e)
 
