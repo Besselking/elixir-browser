@@ -2364,35 +2364,28 @@ defmodule Browser.JS.Compile do
   #
   # (a `return` in the body is `:plain` from the resolver, so the body gives no pending
   # call that the loop must run before it closes the iterator)
+  #
+  # The TDZ reset comes before the object, because the object can read the names of the
+  # head, which are in their dead zone there (also at the second entry of the statement).
   defp for_each(:forin, oo, wc, bc, sc, labels) do
-    one(
-      env,
-      oo,
-      ov,
-      (
-        if sc, do: Interp.reset_tdz(env, sc)
-        target = Interp.for_in_object(ov)
-        keys = if Interp.nullish?(target), do: [], else: Interp.for_in_keys(target)
-        forin_loop(keys, target, wc, bc, sc, env, labels)
-      )
-    )
+    fn env ->
+      if sc, do: Interp.reset_tdz(env, sc)
+      target = Interp.for_in_object(av(oo, env))
+      keys = if Interp.nullish?(target), do: [], else: Interp.for_in_keys(target)
+      forin_loop(keys, target, wc, bc, sc, env, labels)
+    end
   end
 
   defp for_each(:forof, oo, wc, bc, sc, labels) do
-    one(
-      env,
-      oo,
-      ov,
-      (
-        if sc, do: Interp.reset_tdz(env, sc)
+    fn env ->
+      if sc, do: Interp.reset_tdz(env, sc)
 
-        case Interp.for_of_start(ov) do
-          {:array, id} -> forof_array(id, 0, wc, bc, sc, env, labels)
-          {:proto, it, next} -> forof_proto(it, next, wc, bc, sc, env, labels)
-          {:list, items} -> forof_list(items, wc, bc, sc, env, labels)
-        end
-      )
-    )
+      case Interp.for_of_start(av(oo, env)) do
+        {:array, id} -> forof_array(id, 0, wc, bc, sc, env, labels)
+        {:proto, it, next} -> forof_proto(it, next, wc, bc, sc, env, labels)
+        {:list, items} -> forof_list(items, wc, bc, sc, env, labels)
+      end
+    end
   end
 
   # The scope of a head whose names go back to their dead zone at each round, or `nil` when

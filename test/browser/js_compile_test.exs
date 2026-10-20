@@ -297,6 +297,13 @@ defmodule Browser.JS.CompileTest do
     {"r16 for-of step limit next",
      ~S|function f(){ var n = 0; var it = {[Symbol.iterator](){ return this }, next(){ for (var i = 0; i < 100; i++) n++; return {value: n, done: false} }, return(){ console.log('closed'); return {} }}; for (const x of it) { n++ } } f()|,
      max_steps: 3000},
+    # (the TDZ reset of the head comes before the object, also at the second entry)
+    {"r16 for-of object in head tdz",
+     ~S|function f(){ var r = []; for (var j = 0; j < 2; j++) { try { for (const x of (j ? [x] : [7])) r.push(x) } catch (e) { r.push(e.name) } } return r.join() } console.log(f())|},
+    {"r16 for-in object in head tdz",
+     ~S|function f(){ var r = [], o = {}; for (var j = 0; j < 3; j++) { try { for (let k in (j ? (o[k] = 1, o) : {b: 1})) r.push(k) } catch (e) { r.push(e.name) } } return r.join() } console.log(f())|},
+    {"r16 for-of head write in object",
+     ~S|function f(){ var r = []; for (var j = 0; j < 2; j++) { try { for (let x of (x = 5, [1])) r.push(x) } catch (e) { r.push(e.name) } } return r.join() } console.log(f())|},
     {"r16 for-of array steps",
      ~S|function f(a){ var s = 0; for (const x of a) s += x; for (var k in a) s += a[k]; return s } var a = []; for (var i = 0; i < 16; i++) a.push(i); console.log(f(a))|,
      max_steps: 2000},
