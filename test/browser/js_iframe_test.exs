@@ -740,4 +740,27 @@ defmodule Browser.JS.IframeTest do
     assert errors == []
     assert logs == ["true true <b>ab</b> true true <b>ab</b>"]
   end
+
+  test "the page edits again after a frame that also edited went" do
+    {logs, errors} =
+      run(~S"""
+      document.getSelection();
+      const f = document.createElement("iframe");
+      f.srcdoc = "<p>x</p><script>new Range(); document.getSelection();<\/script>";
+      f.onload = () => {
+        f.remove();
+        setTimeout(() => {
+          const out = [];
+          try { out.push(document.getSelection() === getSelection()); } catch (e) { out.push(e.name); }
+          try { out.push(document.createRange().startContainer === document); } catch (e) { out.push(e.name); }
+          try { out.push(new Range().startContainer === document); } catch (e) { out.push(e.name); }
+          console.log(out.join(" "));
+        }, 0);
+      };
+      document.body.appendChild(f);
+      """)
+
+    assert errors == []
+    assert logs == ["true true true"]
+  end
 end

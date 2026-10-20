@@ -105,6 +105,16 @@ defmodule Browser.JS.Intrinsics do
     end
   end
 
+  @doc "True when the property `key` of the shared object `id` has its state of the boot."
+  def at_boot?(id, key) do
+    with %{^id => %{^key => state}} <- Process.get(:js_boot_states),
+         rec when is_map(rec) <- :erlang.get(id) do
+      Obj.own_state(rec, key) == state
+    else
+      _ -> false
+    end
+  end
+
   defp restore_one(id, rec, boot, global) do
     dead = for key <- Obj.all_keys(rec), dead?(Obj.own_state(rec, key), global), do: key
 

@@ -457,11 +457,16 @@ defmodule Browser.JS.WebAPI do
     var editing = (function () {
       function load() { __load_editing(); }
       function lazy(obj, name, onGlobal) {
-        Object.defineProperty(obj, name, { value: function () {
+        // (when the stub is still there after the load, the prelude of this document went
+        // with a frame that ran it later: the load runs it again)
+        var stub = function () {
           load();
           var real = obj[name];
+          if (real === stub) { __load_editing(true); real = obj[name]; }
+          if (real === stub) throw new TypeError(name + " is not available");
           return real.apply(onGlobal ? g : this, arguments);
-        }, writable: true, configurable: true, enumerable: false });
+        };
+        Object.defineProperty(obj, name, { value: stub, writable: true, configurable: true, enumerable: false });
       }
       lazy(g, "getSelection", true);
       return { load: load, lazy: lazy };
