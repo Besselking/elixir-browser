@@ -886,7 +886,7 @@ defmodule Browser.JS.Compile do
 
     fn env ->
       if @check, do: Interp.check_landing(form, env)
-      Interp.ev_id(id, Interp.root(env))
+      Interp.ev_gref(id, Interp.root(env))
     end
   end
 

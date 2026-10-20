@@ -650,6 +650,190 @@ defmodule Browser.JS.DOMGCTest do
     end)
   end
 
+  # A frame that goes takes all of its realm with it: the wrappers of its window, location,
+  # history and storages, and its timers. They were roots, and each of them kept the global
+  # scope of the frame, and so the whole page of the frame, alive.
+  test "a frame that goes frees what its scripts made" do
+    page(fn ->
+      base = Interp.heap_size()
+
+      js(~S"""
+      var f = document.createElement('iframe');
+      f.srcdoc = '<p>frame</p><script>' +
+        'var big = []; for (var i = 0; i < 5000; i++) big.push({ i: i });' +
+        'history.length; try { sessionStorage.length; localStorage.length } catch (e) {}' +
+        'setInterval(function () { return big.length }, 1000);' +
+        'setTimeout(function () { return big.length }, 1e9);' +
+        '<\/script>';
+      document.body.appendChild(f); 0
+      """)
+
+      timers()
+      doc = st().frames |> Map.values() |> hd()
+      GC.collect()
+      assert Interp.heap_size() > base + 5000
+      assert is_map_key(st().wrappers, {:aux, {:history, doc}})
+      assert Enum.any?(Process.get(:js_timers), &(&1.realm == doc))
+
+      js("f.remove(); f = null; 0")
+      GC.collect()
+      assert Interp.heap_size() < base + 100
+      assert Process.get(:js_timers) == []
+
+      left =
+        for {{:aux, data}, _} <- st().wrappers,
+            is_tuple(data),
+            elem(data, tuple_size(data) - 1) == doc,
+            do: data
+
+      assert left == []
+    end)
+  end
+
+  # The realms share the built-in objects. A frame that goes gives back what its functions
+  # changed on them (`Browser.JS.Intrinsics`): a later page sees the built-ins of the boot.
+  # What the page's own realm changed stays, and so does a property that was not there at
+  # boot (the page can use it). When the page deletes those, the page of the frame is freed.
+  test "a frame that goes gives the shared built-in objects back their boot state" do
+    page(fn ->
+      base = Interp.heap_size()
+
+      js(~S"""
+      Map.prototype.fromPage = function () { return 'page' };
+      var f = document.createElement('iframe');
+      f.srcdoc = '<script>' +
+        'var big = []; for (var i = 0; i < 5000; i++) big.push({ i: i });' +
+        'Function.prototype.toString = function () { return "frame " + big.length };' +
+        'Set.prototype.foo = function () { return big };' +
+        'Object.defineProperty(Element.prototype, "bar", { get: function () { return big }, configurable: true });' +
+        'Map.prototype.fromPage = Map.prototype.fromPage;' +
+        'if (!Array.prototype.last) Array.prototype.last = function () { return this[this.length - 1] };' +
+        '<\/script>';
+      document.body.appendChild(f); 0
+      """)
+
+      timers()
+
+      assert js(
+               "[Function.prototype.toString.call(Math.max), typeof Set.prototype.foo, " <>
+                 "'bar' in document.body].join()"
+             ) == "frame 5000,function,true"
+
+      js("f.remove(); f = null; 0")
+
+      assert js("""
+             var d = Object.getOwnPropertyDescriptor(Function.prototype, 'toString');
+             [Function.prototype.toString.call(Math.max), d.value.name, d.enumerable, d.writable,
+              Set.prototype.foo().length, 'bar' in Element.prototype, new Map().fromPage(),
+              [1, 2].last()].join()
+             """) == "function max() { [native code] },toString,false,true,5000,true,page,2"
+
+      js(
+        "delete Set.prototype.foo; delete Element.prototype.bar; delete Array.prototype.last; d = null; 0"
+      )
+
+      GC.collect()
+      assert Interp.heap_size() < base + 100
+    end)
+  end
+
+  # The editing prelude of a frame puts its function on `__ed.action`, which all the realms
+  # share. When the frame goes, it is given back, and the page of the frame is freed.
+  test "a frame that edits and goes is freed" do
+    page(fn ->
+      base = Interp.heap_size()
+
+      js(~S"""
+      var f = document.createElement('iframe');
+      f.srcdoc = '<p id=e contenteditable>ab</p><script>' +
+        'var big = []; for (var i = 0; i < 5000; i++) big.push({ i: i });' +
+        'document.createRange(); getSelection();' +
+        '<\/script>';
+      document.body.appendChild(f); 0
+      """)
+
+      timers()
+      GC.collect()
+      assert Interp.heap_size() > base + 5000
+
+      js("f.remove(); f = null; 0")
+      GC.collect()
+      assert Interp.heap_size() < base + 100
+    end)
+  end
+
+  # `querySelector` and `querySelectorAll` give nothing at once for a tag that no element has
+  # (`DOM.tag_absent?/2`). The tags of the state must then have the tag of each element in the
+  # node table, after each way that makes elements: the parser, `createElement`, `innerHTML`
+  # (with and without a `<template>`), `insertAdjacentHTML`, `cloneNode`, `DOMParser` and a
+  # frame. `DOM.missing_tags/0` recounts them.
+  test "the tags of the elements stay complete, and a tag that no element has finds nothing" do
+    page("<p id=p>x</p>", fn ->
+      assert Browser.JS.DOM.missing_tags() == []
+
+      assert js("""
+             [document.querySelector('base'), document.querySelectorAll('p base, x-nope').length,
+              document.querySelectorAll('p, x-nope').length, document.querySelector('p:not(base)').id,
+              document.querySelector('*') !== null].join()
+             """) == ",0,1,p,true"
+
+      steps = [
+        "var q = document.getElementById('p')",
+        "document.body.appendChild(document.createElement('base'))",
+        "document.body.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'svg'))",
+        "q.innerHTML = '<x-a><x-b>1</x-b></x-a><i>2</i>'",
+        "q.innerHTML += '<template><x-t></x-t></template><x-c></x-c>'",
+        "q.insertAdjacentHTML('beforeend', '<x-d><x-e></x-e></x-d>')",
+        "document.body.appendChild(q.cloneNode(true))",
+        "new DOMParser().parseFromString('<x-f></x-f>', 'text/html')",
+        "document.createElement('x-g')",
+        "q.remove()"
+      ]
+
+      for step <- steps do
+        js(step <> "; 0")
+        assert Browser.JS.DOM.missing_tags() == [], step
+      end
+
+      GC.collect()
+      assert Browser.JS.DOM.missing_tags() == []
+
+      assert js("""
+             [document.querySelector('base').tagName, document.querySelector('BASE').tagName,
+              document.querySelectorAll('x-a x-b, x-d > x-e').length,
+              document.querySelector('x-t'), document.querySelector('template').content
+                .querySelector('x-t').tagName, document.querySelector('x-f'),
+              document.querySelector('x-c.none')].join()
+             """) == "BASE,BASE,2,,X-T,,"
+
+      js("""
+      var f = document.createElement('iframe');
+      f.srcdoc = '<x-h><x-i></x-i></x-h>';
+      document.body.appendChild(f); 0
+      """)
+
+      timers()
+      assert Browser.JS.DOM.missing_tags() == []
+      assert js("f.contentDocument.querySelector('x-h > x-i').tagName") == "X-I"
+    end)
+  end
+
+  # A timer of a frame that has gone does not run, and an interval of it is not set again.
+  # (A frame that goes takes its timers with it, see `DOM.destroy_realm/1`. The timer here
+  # stands for one that stays in the list: it gets the id of a document that is not there.)
+  test "an interval of a frame that has gone does not run and is not set again" do
+    page(fn ->
+      js("var runs = 0; setInterval(function () { runs++ }, 10); 0")
+      gone = 999_999_999
+      refute Browser.JS.DOM.realm_alive?(gone)
+      Process.put(:js_timers, Enum.map(Process.get(:js_timers), &%{&1 | realm: gone}))
+
+      timers()
+      assert js("runs") == "0"
+      assert Enum.filter(Process.get(:js_timers), &(&1.realm == gone)) == []
+    end)
+  end
+
   test "a frame's nodes that a collect freed, then the frame's removal" do
     page(fn ->
       js("""

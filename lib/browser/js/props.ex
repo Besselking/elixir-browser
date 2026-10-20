@@ -595,6 +595,34 @@ defmodule Browser.JS.Props do
   end
 
   defp define_own_plain(obj, id, key, desc) do
+    case global_var_define(deref(id), key, desc) do
+      :ok -> :ok
+      desc -> define_record(obj, id, key, desc)
+    end
+  end
+
+  # a define on the global object or a window, for a key that is a global variable (see
+  # `Browser.JS.Global.define_var/2`): `:ok` when it is done, else the descriptor to define
+  defp global_var_define(%{class: :host, host: host}, key, desc) when is_binary(key) do
+    case host do
+      {Browser.JS.Global, :global} ->
+        Browser.JS.Global.define_var(key, desc)
+
+      {Browser.JS.DOM, data} when data == :window or elem(data, 0) == :window ->
+        Browser.JS.DOM.in_window_realm(
+          data,
+          fn -> Browser.JS.Global.define_var(key, desc) end,
+          desc
+        )
+
+      _ ->
+        desc
+    end
+  end
+
+  defp global_var_define(_o, _key, desc), do: desc
+
+  defp define_record(obj, id, key, desc) do
     o = deref(id)
 
     cond do
@@ -1333,7 +1361,8 @@ defmodule Browser.JS.Props do
     if props in [:undefined, :null],
       do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
-    descs = for k <- enumerable_keys(props), do: {k, Interp.get(props, k)}
+    # (the enumerable own keys in the order of OwnPropertyKeys: the strings, then the symbols)
+    descs = for k <- enumerable_own_keys(props), do: {k, Interp.get(props, k)}
 
     descs = for {k, d} <- descs, do: {k, d, to_desc(d)}
     {:obj, id} = obj

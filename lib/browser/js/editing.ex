@@ -18,22 +18,49 @@ defmodule Browser.JS.Editing do
     Interp.declare(
       scope,
       "__load_editing",
-      Interp.native("__load_editing", fn _this, _args ->
-        load()
+      Interp.native("__load_editing", fn _this, args ->
+        load(args == [true])
         :undefined
       end)
     )
   end
 
-  @doc "Runs the editing prelude once in this runtime."
-  def load do
-    unless Process.get(:editing_loaded) do
-      Process.put(:editing_loaded, true)
+  @doc """
+  Runs the editing prelude once in each realm of this runtime. The prelude belongs to the realm
+  it runs in: it keeps the realm's document, and the functions that it puts on the shared
+  prototypes (`Node.prototype.appendChild`, `document.execCommand`) are closures of that realm.
+  When a frame goes, these go back to their boot state (`Browser.JS.Intrinsics`), so the next
+  realm that edits runs the prelude again. The documents that have it are in
+  `:editing_loaded`. With `force` true, the prelude runs also in a document that has it: a
+  stub calls it so when the stub is still there after a load.
+  """
+  def load(force \\ false) do
+    doc = Browser.JS.DOM.current_doc_or_nil()
+    loaded = Process.get(:editing_loaded) || MapSet.new()
+
+    if force or not MapSet.member?(loaded, doc) do
+      Process.put(:editing_loaded, MapSet.put(loaded, doc))
 
       case program() do
         {:ok, ast} -> Interp.run_program(ast)
         {:error, msg} -> throw({:syntax, "editing prelude: " <> msg})
       end
+    end
+
+    :ok
+  end
+
+  @doc """
+  Called when a frame went and `Browser.JS.Intrinsics.restore/1` changed the shared objects.
+  When `Document.prototype.createRange` is back to its boot state (the stub), the functions of
+  each realm that ran the prelude are gone from the shared prototypes: the last realm that ran
+  it was the dead one, and it replaced those of the realms before it. Then no document has the
+  prelude, and the next call of a stub runs it again.
+  """
+  def restored do
+    with {:obj, dp} <- Interp.proto({:dom, :document}),
+         true <- Browser.JS.Intrinsics.at_boot?(dp, "createRange") do
+      Process.delete(:editing_loaded)
     end
 
     :ok

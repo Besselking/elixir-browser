@@ -19,6 +19,7 @@ defmodule Browser.JS.DOM do
   import Browser.Re, only: [re: 1, split_words: 1]
   alias Browser.JS.Interp
   alias Browser.JS.Str
+  require Browser.JS.Obj, as: Obj
 
   @void ~w(area base br col embed hr img input link meta param source track wbr)
 
@@ -34,7 +35,7 @@ defmodule Browser.JS.DOM do
   # read by `gc_node_roots/1` and cleaned by `gc_sweep/0`.)
   @gc_fields ~w(nodes ids aidx iframes rects rev next next_nid usp doc main frames meta fdirty
                 ce_done current_script write_after focus_ed focus_ctl scroll content width height
-                hist_idx history_before)a
+                hist_idx history_before tags)a
 
   @doc false
   # Check mode: the fields that `gc_begin/2` leaves out, which must hold no JS value.
@@ -690,7 +691,35 @@ defmodule Browser.JS.DOM do
          aidx: reindex_attrs(s.aidx, id, nil, n),
          iframes: iframes,
          rev: s.rev + 1
-     }}
+     }
+     |> add_tag(n)}
+  end
+
+  # The tags of the elements are in `tags`: each tag that an element of the node table has
+  # had. A new element is the one way into the table (`index_node/2`, `build_list_fast/3`),
+  # and the tag of an element never changes. A tag stays when its last element goes, so
+  # `tags` has the tag of each element and maybe more. It is enough for `tag_absent?/2`.
+  defp add_tag(s, %{kind: :element, tag: t}) when is_binary(t) do
+    case s do
+      %{tags: %{^t => _}} -> s
+      _ -> Map.put(s, :tags, Map.put(Map.get(s, :tags, %{}), t, true))
+    end
+  end
+
+  defp add_tag(s, _n), do: s
+
+  @doc false
+  # Check: the tags of the elements of the node table that `tags` does not have (an empty
+  # list when `tags` is correct).
+  def missing_tags do
+    s = st()
+    tags = Map.get(s, :tags, %{})
+
+    for {_, %{kind: :element, tag: t}} <- s.nodes,
+        is_binary(t),
+        not is_map_key(tags, t),
+        uniq: true,
+        do: t
   end
 
   @doc "True when the script changed the tree since the last `clean/0`."
@@ -779,16 +808,26 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # The documents of the realms that were entered and run now, the last first, are in
+  # `:dom_stack`. A frame can go while its realm is on it: a script of the frame took its own
+  # `<iframe>` away (also through a function of the page). Then the realm's entry stays in the
+  # table until the last run of the realm ends, so that the code after the removal runs to its
+  # end (`destroy_realm/1` puts the document in `:dom_dead`).
   defp enter_realm(doc, fun) do
     prev = swap_realm(doc)
+    stack = Process.get(:dom_stack, [])
+    Process.put(:dom_stack, [doc | stack])
 
     try do
       fun.()
     after
+      Process.put(:dom_stack, stack)
       swap_realm(prev)
-      # a script that took its own frame away: what it left in the table goes with it
-      if Process.get(:dom_dead) == doc do
-        Process.delete(:dom_dead)
+      # (the realm went while it ran: what it left in the table goes with it)
+      dead = Process.get(:dom_dead, [])
+
+      if doc in dead and doc not in stack do
+        Process.put(:dom_dead, List.delete(dead, doc))
         put_st(%{st() | realms: Map.delete(st().realms, doc)})
       end
     end
@@ -825,6 +864,14 @@ defmodule Browser.JS.DOM do
 
   @doc "The document of the running realm."
   def current_doc, do: st().doc
+
+  @doc "The document of the running realm, or nil in a runtime with no document."
+  def current_doc_or_nil do
+    case Process.get(:dom) do
+      %{doc: d} -> d
+      _ -> nil
+    end
+  end
 
   @doc "The documents of every realm, the page's first."
   def realm_docs, do: [st().main | st().frames |> Map.values() |> Enum.sort()]
@@ -932,10 +979,37 @@ defmodule Browser.JS.DOM do
         _ -> nil
       end
 
-    if is_integer(global), do: Browser.JS.Compile.drop_realm(global)
+    if is_integer(global) do
+      Browser.JS.Compile.drop_realm(global)
+      # (the functions of the realm leave the built-in objects that all realms share)
+      if Browser.JS.Intrinsics.restore(global) > 0, do: Browser.JS.Editing.restored()
+    end
 
-    realms = if s.doc == doc, do: s.realms, else: Map.delete(s.realms, doc)
-    if s.doc == doc, do: Process.put(:dom_dead, doc)
+    # (a realm that runs now keeps its entry until its run ends, see `enter_realm/2`)
+    running? = s.doc == doc or doc in Process.get(:dom_stack, [])
+    realms = if running?, do: s.realms, else: Map.delete(s.realms, doc)
+    if running?, do: Process.put(:dom_dead, [doc | Process.get(:dom_dead, [])])
+
+    # The timers of the realm go with it. A timer holds its callback, and the callback holds
+    # the global scope of the realm: the whole page stays alive while the timer is there.
+    case Process.get(:js_timers) do
+      timers when is_list(timers) ->
+        Process.put(:js_timers, Enum.reject(timers, &(&1[:realm] == doc)))
+
+      _ ->
+        :ok
+    end
+
+    # (the functions of the editing prelude of the realm go back to their boot state, see
+    # `Browser.JS.Intrinsics`: the realm's document no longer has the prelude)
+    with %MapSet{} = loaded <- Process.get(:editing_loaded),
+         do: Process.put(:editing_loaded, MapSet.delete(loaded, doc))
+
+    # All the host objects of the realm go: the window and the location, and also the history
+    # and the storages. A wrapper is a root of the collector and holds a prototype of the
+    # realm, thus the realm's global scope. (A storage wrapper holds no data: its items are in
+    # the state of the page.)
+    dead_aux = for {{:aux, d} = k, _} <- s.wrappers, aux_doc(d) == doc, do: k
 
     # The maps without the nodes of the document (`ids`). When the document has most of the
     # nodes (a frame that held a whole app), a map is made again from the entries that stay:
@@ -958,7 +1032,7 @@ defmodule Browser.JS.DOM do
         ids: id_index,
         aidx: aidx,
         iframes: :maps.filter(fn e, _ -> not gone?.(e) end, s.iframes),
-        wrappers: drop.(s.wrappers, [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
+        wrappers: drop.(s.wrappers, dead_aux),
         listeners: drop.(s.listeners, [{:window, doc}]),
         realms: realms,
         frames: frames,
@@ -969,6 +1043,14 @@ defmodule Browser.JS.DOM do
 
     :ok
   end
+
+  # the document of the frame that the host object `data` of a window, a location, a history
+  # or a storage belongs to; nil for the page's own and for other data
+  defp aux_doc({:window, d}), do: d
+  defp aux_doc({:location, d}), do: d
+  defp aux_doc({:history, d}), do: d
+  defp aux_doc({:storage, _, d}), do: d
+  defp aux_doc(_), do: nil
 
   # what the host object `data` belongs to: the realm to run in, and the data as that realm
   # knows it (`:window` stands for the window of the running realm)
@@ -1151,7 +1233,9 @@ defmodule Browser.JS.DOM do
       ed_sel: nil,
       scroll: {0.0, 0.0},
       content: {0.0, 0.0},
-      next_nid: Browser.Nids.max_nid(raw, -1) + 1
+      next_nid: Browser.Nids.max_nid(raw, -1) + 1,
+      # each tag that an element of the node table has had (see `tag_absent?/2`)
+      tags: %{}
     })
 
     doc = new_node(%{kind: :document})
@@ -1249,7 +1333,7 @@ defmodule Browser.JS.DOM do
         nodes: :maps.merge(s.nodes, :maps.from_list(new))
     }
 
-    {ids, s}
+    {ids, :lists.foldl(fn {_, n}, s -> add_tag(s, n) end, s, new)}
   end
 
   defp fast_list(raws, parent, acc), do: Enum.map_reduce(raws, acc, &fast_node(&1, parent, &2))
@@ -2754,6 +2838,12 @@ defmodule Browser.JS.DOM do
   defp hget({:style, nid}, key, _self), do: style_get(nid, key)
   defp hget({:style, nid, :computed}, key, _self), do: computed_get(nid, key)
   defp hget({:dataset, nid}, key, _self), do: dataset_get(nid, key)
+  # (a property that `defineProperty` put on the window itself comes before a variable of the
+  # same name: a `let` binding stays as it is, see `Browser.JS.Global.define_var/2`)
+  defp hget(:window, key, {:obj, id}) when is_binary(key) do
+    if Obj.has_own?(deref(id), key), do: :miss, else: window_get(key)
+  end
+
   defp hget(:window, key, _self), do: window_get(key)
   defp hget(:location, key, _self), do: location_get(key)
   defp hget({:usp, k}, key, _self), do: usp_get(k, key)
@@ -3200,6 +3290,11 @@ defmodule Browser.JS.DOM do
 
   defp hput({:style, nid}, key, v, _), do: style_put(nid, key, v)
   defp hput({:dataset, nid}, key, v, _), do: dataset_put(nid, key, v)
+  # (a property that `defineProperty` put on the window itself follows its own attributes)
+  defp hput(:window, key, v, {:obj, id}) when is_binary(key) do
+    if Obj.has_own?(deref(id), key), do: :miss, else: window_put(key, v)
+  end
+
   defp hput(:window, key, v, _), do: window_put(key, v)
   defp hput(:location, key, v, _), do: location_put(key, v)
 
@@ -4281,10 +4376,34 @@ defmodule Browser.JS.DOM do
   defp query_all(root, selector) do
     sels = parse_selectors(selector)
 
-    case candidates(sels, root) do
-      :walk -> walk_matches(node(root).kids, st().nodes, sels, []) |> :lists.reverse()
-      nids -> for nid <- nids, below?(nid, root), matches?(nid, sels), do: nid
+    if tag_absent?(st(), sels) do
+      []
+    else
+      case candidates(sels, root) do
+        :walk -> walk_matches(node(root).kids, st().nodes, sels, []) |> :lists.reverse()
+        nids -> for nid <- nids, below?(nid, root), matches?(nid, sels), do: nid
+      end
     end
+  end
+
+  # True when no element can match the selector list `sels`: each selector has a compound
+  # with a tag that no element of the node table has (`querySelector("base")` on a page with
+  # no `<base>`). Then a search gives nothing at once, with no walk of the tree. A compound
+  # must match an element for the selector to match, so one such compound is enough. (Only
+  # the tag of the compound itself counts, not one inside `:not()` or `:is()`.)
+  defp tag_absent?(%{tags: tags}, sels),
+    do: sels != [] and Enum.all?(sels, &complex_tag_absent?(&1, tags))
+
+  defp tag_absent?(_s, _sels), do: false
+
+  defp complex_tag_absent?(complex, tags) do
+    Enum.any?(complex, fn {_comb, compound} ->
+      Enum.any?(compound, fn
+        {:tag, "*"} -> false
+        {:tag, t} -> not is_map_key(tags, t)
+        _ -> false
+      end)
+    end)
   end
 
   # The elements that can match a selector list, when an index gives them, or :walk. A
@@ -4385,9 +4504,11 @@ defmodule Browser.JS.DOM do
   defp query_first(root, selector) do
     sels = parse_selectors(selector)
 
-    case candidates(sels, root) do
-      :walk -> first_match(node(root).kids, st().nodes, sels)
-      nids -> Enum.find(nids, &(below?(&1, root) and matches?(&1, sels)))
+    unless tag_absent?(st(), sels) do
+      case candidates(sels, root) do
+        :walk -> first_match(node(root).kids, st().nodes, sels)
+        nids -> Enum.find(nids, &(below?(&1, root) and matches?(&1, sels)))
+      end
     end
   end
 
@@ -5025,7 +5146,32 @@ defmodule Browser.JS.DOM do
     true
   end
 
+  # `delete window.x`: a global variable of the window's realm goes, as on the global object
+  # (`Browser.JS.Global.host_delete/2`); a `var` stays. On the window of a frame that went,
+  # only an own property of the wrapper can go.
+  def host_delete(data, key) when is_binary(key) and (data == :window or is_tuple(data)) do
+    case data do
+      {:window, _} ->
+        in_window_realm(data, fn -> Browser.JS.Global.host_delete(:global, key) end, :default)
+
+      :window ->
+        in_window_realm(data, fn -> Browser.JS.Global.host_delete(:global, key) end, :default)
+
+      _ ->
+        :default
+    end
+  end
+
   def host_delete(_other, _key), do: :default
+
+  @doc false
+  # Runs `fun` in the realm of the window `data` (`:window` or `{:window, doc}`). The window
+  # of a frame that went has no realm: then it gives `dead` and touches no global scope (the
+  # running realm is not the window's).
+  def in_window_realm(data, fun, dead) do
+    {doc, :window} = split_realm(data)
+    if realm_alive?(doc), do: in_realm(doc, fun), else: dead
+  end
 
   defp storage_put(area, key, v), do: storage_set(area, key, to_str(v))
 
@@ -5722,6 +5868,10 @@ defmodule Browser.JS.DOM do
 
   defp ed_object do
     new_object([
+      # (`action` is the editing prelude's, see `ed_call/2`. It is there at boot, so that a
+      # frame that ran the prelude and went gives it back, see `Browser.JS.Intrinsics`: the
+      # function of the frame holds the frame's whole page)
+      {"action", :undefined},
       {"nid", native("nid", fn _this, args -> float(ensure_nid(nid_of(arg(args, 0)))) end)},
       {"node",
        native("node", fn _this, args ->
@@ -8157,6 +8307,13 @@ defmodule Browser.JS.DOM do
     declare(scope, "history", hist_host())
     declare(scope, "localStorage", storage_host(:local))
     declare(scope, "sessionStorage", storage_host(:session))
+    # (`delete` and `defineProperty` leave these, see `Browser.JS.Global.define_var/2`)
+    fixed = Process.get(:js_global_fixed) || MapSet.new()
+
+    Process.put(
+      :js_global_fixed,
+      MapSet.union(fixed, MapSet.new(Browser.JS.Global.unforgeable()))
+    )
 
     for {name, v} <- [
           {"innerWidth", float(st().width)},

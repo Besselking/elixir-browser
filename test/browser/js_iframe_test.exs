@@ -536,6 +536,36 @@ defmodule Browser.JS.IframeTest do
     assert dom.realms |> Map.keys() |> Enum.sort() == dom.frames |> Map.values() |> Enum.sort()
   end
 
+  # A frame's script takes its own `<iframe>` away, through a function of the page (so the
+  # realm of the page runs while the frame's realm waits for it). The code after the removal
+  # runs to its end, and then the realm goes.
+  test "a frame's script that takes its own iframe away runs to its end, then its realm goes" do
+    {raw, _} =
+      ~S"""
+      <body><script>
+      const f = document.createElement("iframe");
+      f.srcdoc = "<script>Array.prototype.myp = function () { return 1; }; var P = parent; P.out = ['pre'];" +
+        "P.document.querySelector('iframe').remove(); P.out.push('post', [].myp());<\/script>";
+      document.body.appendChild(f);
+      setTimeout(() => console.log(window.out.join(" ")), 20);
+      </script></body>
+      """
+      |> Browser.HTML.parse()
+      |> Browser.Forms.index()
+
+    info = %{url: "http://t.test/", width: 800, height: 600, fetch: fn _ -> {:error, "404"} end}
+    pid = Runtime.start(raw, info)
+    r = Runtime.run_scripts(pid)
+    logs = for({:log, t} <- r.console, do: t) ++ collect(pid)
+    {:dictionary, dict} = Process.info(pid, :dictionary)
+    Runtime.stop(pid)
+    dom = Keyword.fetch!(dict, :dom)
+
+    assert logs == ["pre post 1"]
+    assert dom.frames == %{} and dom.realms == %{}
+    assert Keyword.get(dict, :dom_dead, []) == [] and Keyword.get(dict, :dom_stack, []) == []
+  end
+
   # The `<iframe>`s come into a frame's document (that has none before) and into the page by
   # `innerHTML` in the frame, `importNode` of a template's content, the template's content
   # itself, a fragment that the frame's document made, and a shadow root of an element of the
@@ -600,5 +630,210 @@ defmodule Browser.JS.IframeTest do
              "content:page,fragment:page,html:frame,import:frame,shadow:frame",
              "content=null,fragment=null,html=null,import=null,shadow=null"
            ]
+  end
+
+  # A read of a global name in a function (`{:gref}`) takes the value of a variable of the
+  # global scope at once (`Interp.ev_gref/2`), and any other name by the walk. Each read must
+  # see the last write, by any path: a property of the window, `delete`, `defineProperty`, a
+  # getter, `var`, `let` and `const` of another script, eval, `with`, and the other realm.
+  test "a read of a global name sees each write to the global scope and the window" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const log = [];
+        function rd() { try { return String(gx) } catch (e) { return e.name } }
+        function ry() { try { return String(gy) } catch (e) { return e.name } }
+        function rz() { try { return String(gz) } catch (e) { return e.name } }
+        function rv() { return gv }
+        function rs() { var gv = "local"; return gv }
+        log.push(rd());
+        window.gx = 1; log.push(rd());
+        window.gx = 2; log.push(rd());
+        Object.defineProperty(window, "gy", { value: 3, configurable: true, writable: true });
+        log.push(ry());
+        delete window.gy; log.push(ry());
+        var n = 0;
+        Object.defineProperty(window, "gz", { get: function () { return "g" + ++n }, configurable: true });
+        log.push(rz(), rz());
+        delete window.gz; log.push(rz());
+        log.push(early, rl(), rc(), rv());
+        gv = "v2"; log.push(rv());
+        window.gv = "v3"; log.push(rv());
+        eval("gv = 'v4'"); log.push(rv());
+        eval("var ge = 'e1'"); function re() { return ge } log.push(re());
+        eval("ge = 'e2'"); log.push(re());
+        with ({ gv: "w" }) { log.push(gv, rv()) }
+        log.push(rs(), rv());
+        const f = document.createElement("iframe");
+        f.srcdoc = "<script>var gv = 'frame'; function fr() { return gv }<\/script>";
+        f.onload = () => {
+          const w = f.contentWindow;
+          log.push(w.fr(), rv());
+          w.gv = "frame2"; gv = "page2";
+          log.push(w.fr(), rv(), w.eval("parent.rv()"), rl(), rc());
+          console.log(log.join(" "));
+        };
+        document.body.appendChild(f);
+        let gl = "l2"; const gc = "c2";
+        """,
+        ~S"""
+        <script>
+        var gv = "v1";
+        function rl() { try { return gl } catch (e) { return e.name } }
+        function rc() { try { return gc } catch (e) { return e.name } }
+        var early = rl();
+        </script>
+        """
+      )
+
+    assert errors == []
+
+    assert logs == [
+             "ReferenceError 1 2 3 ReferenceError g1 g2 ReferenceError ReferenceError " <>
+               "ReferenceError ReferenceError v1 v2 v3 v4 e1 e2 w v4 local v4 frame v4 frame2 page2 page2 l2 c2"
+           ]
+  end
+
+  # The global variables of a realm are the properties of its window. One that a write made
+  # (`window.x = 1`, `x = 1`) is configurable: `delete` takes it away, and `defineProperty`
+  # makes it an own property of the window. A `var` or a function declaration is not
+  # configurable: `delete` gives false, and it cannot become an accessor.
+  test "delete and defineProperty on a window change its global variables" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const out = [];
+        function rd(n) { try { return String(eval(n)) } catch (e) { return e.name } }
+        function rx() { try { return String(gx) } catch (e) { return e.name } }
+        window.gx = 1; out.push(rx(), delete window.gx, rx(), "gx" in window);
+        gy = 2; out.push(delete window.gy, rd("gy"));
+        out.push(delete window.gv, gv, delete window.gf, typeof gf);
+        window.gw = 1;
+        Object.defineProperty(window, "gw", { value: 2, configurable: true, writable: true });
+        out.push(rd("gw"), window.gw);
+        gw = 3; out.push(window.gw, rd("gw"));
+        window.gg = 1;
+        Object.defineProperty(window, "gg", { get: function () { return "g" }, configurable: true });
+        out.push(rd("gg"), window.gg);
+        Object.defineProperty(window, "gv", { value: 5 }); out.push(gv, window.gv);
+        try { Object.defineProperty(window, "gv", { get: function () {} }) } catch (e) { out.push(e.name) }
+        const f = document.createElement("iframe");
+        f.srcdoc = "<script>var fv = 1; x2 = 2; function fr() { return typeof x2 }<\/script>";
+        f.onload = () => {
+          const w = f.contentWindow;
+          out.push(delete w.x2, w.fr(), delete w.fv, w.fv, rd("gv"));
+          console.log(out.join(" "));
+        };
+        document.body.appendChild(f);
+        """,
+        "<script>var gv = 1; function gf() {}</script>"
+      )
+
+    assert errors == []
+
+    assert logs == [
+             "1 true ReferenceError false true ReferenceError false 1 false function 2 2 3 3 " <>
+               "g g 5 5 TypeError true undefined false 1 5"
+           ]
+  end
+
+  # The editing prelude (`Browser.JS.Editing`) runs in each realm that edits. A frame that
+  # edits and goes takes the functions of its prelude with it (`Browser.JS.Intrinsics`), so a
+  # later frame that edits gets the prelude again, for its own document. (Before, the first
+  # frame's prelude stayed loaded, its functions were restored away, and the stubs of the
+  # next frame called themselves until the stack was full.)
+  test "a frame that edits after another one went gets the editing functions of its own" do
+    {logs, errors} =
+      run(~S"""
+      const out = [];
+      const edit =
+        "<div id=e contenteditable>ab</div><script>" +
+        "var r = document.createRange(); r.selectNodeContents(document.getElementById('e'));" +
+        "getSelection().removeAllRanges(); getSelection().addRange(r);" +
+        "document.execCommand('bold');" +
+        "var n = new Range();" +
+        "parent.out.push(r.startContainer.ownerDocument === document, n.startContainer === document," +
+        " document.getElementById('e').innerHTML);<\/script>";
+      window.out = out;
+      const a = document.createElement("iframe");
+      a.srcdoc = edit;
+      a.onload = () => {
+        a.remove();
+        const b = document.createElement("iframe");
+        b.srcdoc = edit;
+        b.onload = () => console.log(out.join(" "));
+        document.body.appendChild(b);
+      };
+      document.body.appendChild(a);
+      """)
+
+    assert errors == []
+    assert logs == ["true true <b>ab</b> true true <b>ab</b>"]
+  end
+
+  test "the page edits again after a frame that also edited went" do
+    {logs, errors} =
+      run(~S"""
+      document.getSelection();
+      const f = document.createElement("iframe");
+      f.srcdoc = "<p>x</p><script>new Range(); document.getSelection();<\/script>";
+      f.onload = () => {
+        f.remove();
+        setTimeout(() => {
+          const out = [];
+          try { out.push(document.getSelection() === getSelection()); } catch (e) { out.push(e.name); }
+          try { out.push(document.createRange().startContainer === document); } catch (e) { out.push(e.name); }
+          try { out.push(new Range().startContainer === document); } catch (e) { out.push(e.name); }
+          console.log(out.join(" "));
+        }, 0);
+      };
+      document.body.appendChild(f);
+      """)
+
+    assert errors == []
+    assert logs == ["true true true"]
+  end
+
+  test "delete and defineProperty on the window leave its unforgeable names and let bindings" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const out = [];
+        out.push(delete window.document, typeof document);
+        try { Object.defineProperty(window, "location", { value: 1 }); out.push("defined"); } catch (e) { out.push(e.name); }
+        out.push(typeof location, delete window.top, window.top === window);
+        out.push(delete window.lx, lx);
+        Object.defineProperty(window, "cx", { value: 7, configurable: true });
+        out.push(cx, window.cx);
+        console.log(out.join(" "));
+        """,
+        "<script>let lx = 1; const cx = 3;</script>"
+      )
+
+    assert errors == []
+    assert logs == ["false object TypeError object false true true 1 3 7"]
+  end
+
+  test "delete and defineProperty on the window of a frame that went leave the page's globals" do
+    {logs, errors} =
+      run(~S"""
+      yy = 1; zz = 5;
+      const f = document.createElement("iframe");
+      f.srcdoc = "<p>x</p>";
+      f.onload = () => {
+        const w = f.contentWindow;
+        f.remove();
+        setTimeout(() => {
+          const out = [delete w.yy, typeof yy];
+          Object.defineProperty(w, "zz", { value: 9 });
+          out.push(zz, w.zz);
+          console.log(out.join(" "));
+        }, 0);
+      };
+      document.body.appendChild(f);
+      """)
+
+    assert errors == []
+    assert logs == ["true number 5 9"]
   end
 end

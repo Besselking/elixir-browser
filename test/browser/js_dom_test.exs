@@ -1110,6 +1110,47 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["3 function"]
     end
 
+    # A browser that runs modules does not run a classic script with `nomodule`, from a file
+    # or inline. The file is not fetched.
+    test "a classic script with nomodule does not run, and a module does" do
+      files = Map.put(@files, "http://t.test/old.js", "console.log('old file');")
+
+      {_, r} =
+        start(
+          """
+          <body><script nomodule src="/old.js"></script>
+          <script nomodule>console.log('old inline');</script>
+          <script>console.log('classic');</script>
+          <script type=module>console.log('module');</script></body>
+          """,
+          files
+        )
+
+      assert errors(r) == []
+      assert logs(r) == ["classic", "module"]
+    end
+
+    # `noModule` reflects the attribute: a page asks for it on the prototype to know that the
+    # browser runs modules, and a script that a page makes with it set does not run.
+    test "noModule of a script reflects the nomodule attribute" do
+      r =
+        run("""
+        var s = document.createElement('script');
+        var before = ['noModule' in HTMLScriptElement.prototype, s.noModule];
+        s.noModule = true;
+        before.push(s.hasAttribute('nomodule'), s.noModule);
+        s.textContent = "console.log('ran')";
+        document.body.appendChild(s);
+        s = document.createElement('script');
+        s.noModule = true; s.noModule = false;
+        before.push(s.hasAttribute('nomodule'));
+        console.log(before.join(' '));
+        """)
+
+      assert errors(r) == []
+      assert logs(r) == ["true false true true false"]
+    end
+
     test "a mouse event says where it is in the page and in the element" do
       r =
         run(

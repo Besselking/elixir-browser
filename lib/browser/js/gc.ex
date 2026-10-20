@@ -74,12 +74,26 @@ defmodule Browser.JS.GC do
   # heap. A young heap that is small next to what is alive makes that happen often, and what dies a
   # little after it was made gets copied as well. So the young heap grows with the process, to at
   # most a part of its size (never down, and never past @max_young words).
+  #
+  # When the heap of the process has once gone past @big_heap words, the young heap goes to
+  # @max_young at once. The cost of a minor collection comes from the short-lived data that a page
+  # makes, not from what stays alive. A large app makes much of it, also when the live heap becomes
+  # small again: when a frame goes, the collector frees its whole page, and the heap of the
+  # process becomes about half as large. Thus the young heap does not follow the live heap down.
+  # (A young heap from the live heap alone stayed smaller after that, and the minor collections
+  # then cost more than the collector saved.) A small page never comes to @big_heap and keeps a
+  # small young heap.
   @min_young 2_000_000
   @max_young 16_000_000
+  @big_heap 8_000_000
 
   defp tune_young_heap do
     {:total_heap_size, words} = Process.info(self(), :total_heap_size)
-    target = words |> div(2) |> max(@min_young) |> min(@max_young)
+
+    target =
+      if words > @big_heap,
+        do: @max_young,
+        else: words |> div(2) |> max(@min_young) |> min(@max_young)
 
     if target > Process.get(:js_young, @min_young) * 5 / 4 do
       Process.put(:js_young, target)
@@ -236,6 +250,12 @@ defmodule Browser.JS.GC do
   defp classify_key(:dom_forced_rects, _, acc), do: acc
   defp classify_key(:dom_forced, _, acc), do: acc
   defp classify_key(:dom_forced_spent, _, acc), do: acc
+  # (the documents of the realms that run, and of those that went while they ran, see
+  # `Browser.JS.DOM.in_realm/2`: node ids, not heap ids)
+  defp classify_key(:dom_stack, _, acc), do: acc
+  defp classify_key(:dom_dead, _, acc), do: acc
+  # (an identity mark of each shared built-in object, compared only, see `Browser.JS.Intrinsics`)
+  defp classify_key(:js_boot_marks, _, acc), do: acc
   # (the document's state is read in `collect/0`, see `Browser.JS.DOM.gc_begin/2`)
   defp classify_key(:dom, v, acc) when is_map(v), do: acc
   # (the process keys of a node are walked when the node is live)

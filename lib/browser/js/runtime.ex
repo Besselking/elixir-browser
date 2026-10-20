@@ -210,6 +210,9 @@ defmodule Browser.JS.Runtime do
     # what a frame's global scope starts with: the built-ins and the page's own window-level
     # names (`DOM.declare_window/1` gives it its own `window`, `document` and so on)
     Process.put(:rt_base_vars, Interp.deref(Interp.global()).vars)
+    # (the shared built-in objects as they are now: a frame that goes gives back what it
+    # changed on them, see `Browser.JS.Intrinsics`)
+    Browser.JS.Intrinsics.snapshot()
     Process.put(:rt_load_frame, &load_frame/3)
     Process.put(:rt_blank_frame, &blank_frame/1)
   end
@@ -963,10 +966,14 @@ defmodule Browser.JS.Runtime do
       type = (DOM.get_attr(n, "type") || "") |> String.downcase() |> String.trim()
       text = Enum.map_join(n.kids, fn k -> DOM.node_data(k).text end)
 
+      # (a browser that runs modules does not run a classic script with `nomodule`: such a
+      # script is the fallback of a page for old browsers, often a set of polyfills that
+      # change the shared built-in prototypes)
       kind =
         cond do
           type == "importmap" -> :importmap
           type == "module" -> :module
+          DOM.get_attr(n, "nomodule") != nil -> :other
           type in ["", "text/javascript", "application/javascript", "text/ecmascript"] -> :classic
           true -> :other
         end
@@ -1073,7 +1080,7 @@ defmodule Browser.JS.Runtime do
 
   defp run_classic(src, file) do
     case Parser.parse(src, file: file) do
-      {:ok, program} -> Interp.run_program(program)
+      {:ok, program} -> Interp.run_program(program, :classic)
       {:error, msg} -> throw({:syntax, msg})
     end
   end

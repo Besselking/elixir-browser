@@ -451,16 +451,22 @@ defmodule Browser.JS.WebAPI do
     def("PerformanceObserver", function (cb) { this.observe = function () {}; this.disconnect = function () {}; this.takeRecords = function () { return []; }; });
     g.PerformanceObserver.supportedEntryTypes = [];
 
-    // ranges, the selection and execCommand are in priv/js/editing.js, loaded on first use
+    // ranges, the selection and execCommand are in priv/js/editing.js, loaded on first use in
+    // each realm (`__load_editing` runs it once for each document: its functions belong to the
+    // realm, see Browser.JS.Editing)
     var editing = (function () {
-      var loaded = false;
-      function load() { if (!loaded) { loaded = true; __load_editing(); } }
+      function load() { __load_editing(); }
       function lazy(obj, name, onGlobal) {
-        Object.defineProperty(obj, name, { value: function () {
+        // (when the stub is still there after the load, the prelude of this document went
+        // with a frame that ran it later: the load runs it again)
+        var stub = function () {
           load();
           var real = obj[name];
+          if (real === stub) { __load_editing(true); real = obj[name]; }
+          if (real === stub) throw new TypeError(name + " is not available");
           return real.apply(onGlobal ? g : this, arguments);
-        }, writable: true, configurable: true, enumerable: false });
+        };
+        Object.defineProperty(obj, name, { value: stub, writable: true, configurable: true, enumerable: false });
       }
       lazy(g, "getSelection", true);
       return { load: load, lazy: lazy };
@@ -647,7 +653,7 @@ defmodule Browser.JS.WebAPI do
       return 4;
     });
     ["createRange", "execCommand", "queryCommandState", "queryCommandEnabled", "queryCommandValue", "queryCommandSupported", "queryCommandIndeterm", "getSelection"].forEach(function (n) { editing.lazy(DP, n, false); });
-    function Range() { editing.load(); return new g.Range(); }
+    function Range() { editing.load(); return new (curDoc().defaultView.Range)(); }
     function Selection() {}
     def("Range", Range); def("Selection", Selection);
     function defDoc(name, fn) { if (!(name in Object.getPrototypeOf(document))) Object.defineProperty(Object.getPrototypeOf(document), name, { get: fn, configurable: true }); }
@@ -681,6 +687,14 @@ defmodule Browser.JS.WebAPI do
     // ── window ───────────────────────────────────────────────
     def("cancelAnimationFrame", function (id) { clearTimeout(id); });
     def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = curLoc().origin; e.source = g; g.dispatchEvent(e); }, 0); });
+    // noModule reflects the nomodule attribute. A page asks `"noModule" in
+    // HTMLScriptElement.prototype` to know that the browser runs modules; a script with it is
+    // not run (see Runtime.script_info)
+    Object.defineProperty(HTMLScriptElement.prototype, "noModule", {
+      get: function () { return this.hasAttribute("nomodule"); },
+      set: function (v) { if (v) this.setAttribute("nomodule", ""); else this.removeAttribute("nomodule"); },
+      enumerable: true, configurable: true
+    });
     // <dialog>: shown while it has the open attribute; showModal() puts it in the top layer
     // (see Browser.Modal) and makes the rest of the page inert
     if (typeof HTMLDialogElement === "function") {

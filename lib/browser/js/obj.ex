@@ -1084,6 +1084,20 @@ defmodule Browser.JS.Obj do
   @doc "The shape of the fast record `o`."
   defmacro shape(o), do: quote(do: :erlang.map_get(:shape, unquote(o)))
 
+  @doc """
+  The part of the record `o` that holds the keys and the values of its own properties: the
+  shape and the values of a fast record, the map of a dictionary record, or `nil`. A write
+  of a value or a new key gives a new part, so two states of a record whose parts are the
+  same term (`===`) have the same values. `Browser.JS.Intrinsics` compares them.
+  """
+  def own_part(o) do
+    case o do
+      %{shape: shape, vals: vals} -> {shape, vals}
+      %{props: props} -> props
+      _ -> nil
+    end
+  end
+
   @doc "The `sid` of the shape of `o`, or `nil` when `o` is not a fast record."
   def shape_id(o) do
     case o do
