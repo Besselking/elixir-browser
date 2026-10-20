@@ -906,13 +906,25 @@ defmodule Browser.JS.Compile do
     end
   end
 
+  # The three constant globals. Their binding is not writable and not configurable, so a
+  # `{:gref}` read (a read that no scope shadows) always gives the value. (Not in check
+  # mode, where each `{:gref}` read passes the landing check.)
+  @const_globals %{"undefined" => :undefined, "NaN" => :nan, "Infinity" => :infinity}
+
+  if not @check do
+    defp expr_node({:gref, name}) when is_map_key(@const_globals, name) do
+      v = :erlang.map_get(name, @const_globals)
+      fn _env -> v end
+    end
+  end
+
   defp expr_node({:gref, name} = form) do
     # (the by-name read of `ev_id/2` takes this node, so it is built once)
     id = {:id, name}
 
     fn env ->
       if @check, do: Interp.check_landing(form, env)
-      Interp.ev_gref(id, Interp.root(env))
+      Interp.ev_own(id, Interp.root(env))
     end
   end
 
@@ -1251,7 +1263,7 @@ defmodule Browser.JS.Compile do
 
     fn env ->
       if @check, do: Interp.check_landing(form, env)
-      Interp.ev_id(id, up(env, d))
+      Interp.ev_own(id, up(env, d))
     end
   end
 
@@ -1410,6 +1422,14 @@ defmodule Browser.JS.Compile do
   defp opnd({:slot, 0, i, name}), do: {:s, i, name}
   defp opnd({:unary, "-", {:num, n}}), do: {:k, Num.neg(n)}
   defp opnd({:unary, "void", {:num, _}}), do: {:k, :undefined}
+
+  # (a parent reads `undefined`, `NaN` and `Infinity` inline, as `expr_node/1` makes them
+  # constants)
+  if not @check do
+    defp opnd({:gref, name}) when is_map_key(@const_globals, name),
+      do: {:k, :erlang.map_get(name, @const_globals)}
+  end
+
   defp opnd({:in_tdz, _names, e}), do: opnd(e)
   defp opnd({:unnamed, e}), do: opnd(e)
   defp opnd(e), do: {:f, expr(e)}

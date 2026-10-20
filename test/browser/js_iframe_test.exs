@@ -633,7 +633,7 @@ defmodule Browser.JS.IframeTest do
   end
 
   # A read of a global name in a function (`{:gref}`) takes the value of a variable of the
-  # global scope at once (`Interp.ev_gref/2`), and any other name by the walk. Each read must
+  # global scope at once (`Interp.ev_own/2`), and any other name by the walk. Each read must
   # see the last write, by any path: a property of the window, `delete`, `defineProperty`, a
   # getter, `var`, `let` and `const` of another script, eval, `with`, and the other realm.
   test "a read of a global name sees each write to the global scope and the window" do

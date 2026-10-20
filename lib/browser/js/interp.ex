@@ -6014,23 +6014,25 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  # The read of a name in the global scope `g` of its realm (a `{:gref}`). Most such names
-  # are variables of the global scope with a value (`document`, the built-ins, the top-level
-  # `var`s of a classic script). Their value is read at once from the scope, with no walk
-  # of `lookup_var/2`. There is no cache, so a write to the scope cannot leave a stale value.
-  # The other cases take `ev_id/2`: a name that the scope does not have (a property of the
-  # global object, an element with that id), an alias of a module, a binding in its temporal
-  # dead zone, and `undefined` (whose read clears `:js_with_gone`).
+  # The read of a name in a map scope `s` with no walk of `lookup_var/2`: the global scope
+  # of the realm for a `{:gref}`, or the scope of a `{:mref}` (the scope of a module, a
+  # class or an eval). Most such names are variables of that scope with a value
+  # (`document`, the built-ins, the top-level `var`s of a classic script, the top-level
+  # functions and `const`s of a module). Their value is read at once from the scope's own
+  # `vars`. There is no cache, so a write to the scope cannot leave a stale value. The other
+  # cases take `ev_id/2`: a name that the scope does not have (a property of the global
+  # object, an element with that id), an alias of an import, a binding in its temporal dead
+  # zone, and a value `undefined` (whose read clears `:js_with_gone`).
   # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
   @doc false
-  def ev_gref({:id, name} = id, g) do
-    case :erlang.get(g) do
+  def ev_own({:id, name} = id, s) do
+    case :erlang.get(s) do
       %{vars: %{^name => v}}
       when v != :undefined and v != :tdz and (not is_tuple(v) or elem(v, 0) != :alias) ->
         v
 
       _ ->
-        ev_id(id, g)
+        ev_id(id, s)
     end
   end
 
@@ -8489,7 +8491,7 @@ defmodule Browser.JS.Interp do
 
   def ev({:gref, name} = form, env) do
     if @check, do: check_landing(form, env)
-    ev_gref({:id, name}, root(env))
+    ev_own({:id, name}, root(env))
   end
 
   def ev({:mref, d, name} = form, env) do

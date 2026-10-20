@@ -20,7 +20,7 @@ defmodule Browser.JS.CompileTest do
   # module could start a heap while the oracle has the setting changed.
   use ExUnit.Case, async: false
 
-  alias Browser.JS.{Builtins, GC, Interp, Parser}
+  alias Browser.JS.{Builtins, GC, Interp, Modules, Parser}
   alias Browser.JS.CompileTest.Corpus
   alias Browser.JS.DatamodelCorpus
   alias Browser.JS.Resolve.{Info, Scope}
@@ -445,7 +445,26 @@ defmodule Browser.JS.CompileTest do
      ~S|function f(){ var log = [], a, b, c, d; function t(x){ log.push(x); return x } a = (t(1), t(2)); b = (t(3), t(4), t(5), t(6)); c = (t(7), t(8), t(9), t(10), t(11)); d = (t('x'), t('y'), t('z')); t(12), t(13); t(14), t(15), t(16), t(17), t(18); for (var i = 0, j = 10; i < j; i++, j--) ; try { (t(19), null.x, t(20)) } catch (e) { log.push(e.constructor.name) } try { t(21), t(22), t(23), undefinedName, t(24) } catch (e) { log.push(e.message) } try { (t(25), t(26), t(27), t(28), t(29), null.y) } catch (e) { log.push(e.constructor.name) } var e = (a++, b++, a + b); return [a, b, c, d, e, i, j, log.join()].join(';') } console.log(f())|},
     {"r18 comma steps",
      ~S|function f(){ var s = 0, i = 0; while (i < 1000) s++, s++, i++; for (;;) s++, s--, i--, i++, s++ } f()|,
-     max_steps: 600}
+     max_steps: 600},
+    # (r18) `undefined`, `NaN` and `Infinity` compile to constants when no scope shadows
+    # them: a local or a parameter with the name, `with`, eval code that declares the name,
+    # a write to the global name in sloppy and strict code, and the property of the global
+    # object.
+    {"r18 constant globals",
+     ~S"function f(){ var o = {}; o[undefined] = 1; o[NaN] = 2; o[Infinity] = 3; o[undefined] += 4; o[NaN]++; var u; return [undefined, typeof undefined, NaN, Infinity, -Infinity, 1 / Infinity, NaN === NaN, NaN !== NaN, u === undefined, null == undefined, undefined === void 0, isNaN(NaN), [undefined, NaN, Infinity].join(), String(undefined), NaN + 1, Infinity - Infinity, Infinity > 1e308, undefined ?? 'd', NaN || 'n', JSON.stringify(o), o.undefined, o.NaN, o.Infinity, typeof NaN].join('|') } function g(x){ if (x === undefined) return 'u'; if (x !== x) return 'nan'; return x === Infinity ? 'inf' : 'other' } console.log(f(), g(), g(undefined), g(NaN), g(Infinity), g(0))"},
+    {"r18 constant globals shadowed",
+     ~S"function f(undefined){ return undefined } function g(){ var undefined = 5; return [undefined, (() => undefined)(), function(){ return undefined }()].join() } function h(){ { let undefined = 'b'; var r = undefined } try { throw 'c' } catch (undefined) { r += undefined } return r + typeof undefined } function k(){ function NaN(){ return 'n' } let Infinity = 'i'; return NaN() + Infinity + (() => Infinity)() } function m(){ var u = undefined; return [u, (function(undefined){ return function(){ return undefined } })(7)(), (function(NaN = 2){ return NaN })(), (function({Infinity}){ return Infinity })({Infinity: 3}), (function(...undefined){ return undefined.length })(1, 2)].join() } function n(){ const {undefined: x = 'dflt'} = {}; for (let undefined of [8]) return x + undefined } console.log(f(1), f(), g(), h(), k(), m(), n(), undefined, NaN, Infinity)"},
+    {"r18 constant globals with and eval",
+     ~S"function f(o){ with (o) { return [undefined, NaN, Infinity, (function(){ return undefined })(), (() => NaN)()].join() } } function g(){ eval('var undefined = 4'); return [undefined, (() => undefined)(), function(){ return undefined }()].join() } function h(){ var x = eval('undefined'); return [x, eval('NaN'), (0, eval)('Infinity')].join() } function k(){ eval('var NaN = 1'); return function(){ return function(){ return NaN }() }() } console.log(f({undefined: 1, NaN: 2, Infinity: 3}), f({}), f({undefined: 4, [Symbol.unscopables]: {undefined: true}}), g(), h(), k())"},
+    {"r18 constant globals writes",
+     ~S"undefined = 1; NaN = 2; Infinity = 3; var undefined = 9; var NaN; function f(){ undefined = 4; Infinity++; var r = [undefined, NaN, Infinity]; try { (function(){ 'use strict'; undefined = 5 })() } catch (e) { r.push(e.constructor.name) } try { (function(){ 'use strict'; NaN = 5 })() } catch (e) { r.push(e.constructor.name) } try { (() => { 'use strict'; Infinity += 1 })() } catch (e) { r.push(e.constructor.name) } globalThis.undefined = 6; r.push(globalThis.undefined, delete globalThis.undefined, delete NaN, typeof undefined, JSON.stringify(Object.getOwnPropertyDescriptor(globalThis, 'undefined')), Object.getOwnPropertyDescriptor(globalThis, 'Infinity').value); try { Object.defineProperty(globalThis, 'undefined', {value: 1}) } catch (e) { r.push(e.constructor.name) } r.push((0, eval)('let undefined = 1; undefined'), undefined, (0, eval)('var undefined = 2; undefined'), undefined); return r.join() } console.log(f()); try { eval('let undefined = 3') } catch (e) { console.log(e.constructor.name) } console.log(f(), undefined)"},
+    # (r18) A name of a map scope (a class, a field, a static block, strict eval code) reads
+    # with no walk when the scope has a value for it: the dead zone, a value `undefined`,
+    # a write after the first read. (The module rows are in `@modules`.)
+    {"r18 map scope names",
+     ~S"function f(){ var r = []; class C { m(){ return C.name } static s(){ return C === this } x = C.name + 'f'; static { r.push(typeof C, (() => C.name)()) } } r.push(new C().m(), C.s(), new C().x); try { class D extends (() => D)() {} } catch (e) { r.push(e.constructor.name) } try { class E { [(() => E)()](){} } } catch (e) { r.push(e.constructor.name) } var K = class L { static g(){ return L.name } }; r.push(K.g()); return r.join() } console.log(f())"},
+    {"r18 eval scope names",
+     ~S"function f(){ 'use strict'; return eval('var a = 1; let b = 2; const g = () => a + b; var u; var r = [g(), (() => u)(), (() => typeof u)()]; u = 3; a = undefined; r.push((() => u)(), (() => a)(), g()); r.join()') } function g(){ 'use strict'; return eval('var r; try { (() => b)() } catch (e) { r = e.constructor.name } let b = 1; r + (() => b)()') } console.log(f(), g())"}
   ]
 
   # One snippet for each kind that the compiler handles, and one for each kind that falls
@@ -587,6 +606,30 @@ defmodule Browser.JS.CompileTest do
 
   # The matrix runs these programs at every level, and the structural tests read the code
   # that they compile.
+  # (r18) Module programs: a name of the module scope that a function reads (`{:mref}`)
+  # takes the value from the scope with no walk, and the other cases take the walk: an
+  # import (an alias of the binding of the other module, which a call there changes), a
+  # name in its dead zone, a value `undefined`, and a module name that hides `undefined`.
+  # Each row is `{name, source, files}`: the source runs as the module `main.js`, and
+  # `files` are the modules that it imports, by file name.
+  @modules [
+    {"r18 module names",
+     ~S"import { a, b as bb, inc, C } from './a.js'; import * as ns from './a.js'; import def from './a.js'; const k = 1; let l = 2; var v = 3; var u; function fn(){ return 'fn' } class K {} function read(){ return [k, l, v, u, typeof u, fn(), K.name, a, bb, ns.a, def, C.name].join() } console.log(read()); inc(); l = 5; v = undefined; u = 'set'; console.log(read(), a, ns.a); for (var i = 0; i < 3; i++) inc(); console.log(read())",
+     %{
+       "a.js" =>
+         "export let a = 1; export const b = 2; export function inc(){ a++ } export class C {} export default 'd';"
+     }},
+    {"r18 module tdz",
+     ~S"import { early as e2 } from './b.js'; function early(){ try { return late } catch (e) { return e.constructor.name } } function earlyC(){ try { return new LateC() } catch (e) { return e.constructor.name } } console.log(early(), earlyC(), e2()); let late = 'ok'; class LateC {} console.log(early(), typeof earlyC(), e2())",
+     %{
+       "b.js" =>
+         "export function early(){ try { return later } catch (e) { return e.constructor.name } } console.log(early()); export let later = 'b';"
+     }},
+    {"r18 module undefined",
+     ~S"var x; let y; const z = undefined; var undefined = 5; let NaN = 'n'; function r(){ return [x, y, z, typeof x, undefined, NaN, Infinity].join('/') } console.log(r()); x = 0; y = null; console.log(r()); x = undefined; undefined = 6; console.log(r())",
+     %{}}
+  ]
+
   @small @judge_rows ++ @hot_kinds_rows ++ Enum.map(@edges ++ @kinds ++ @classes, &Corpus.row/1)
 
   # Every program of the oracle, as `{name, source, options}`: the new programs, the
@@ -655,7 +698,7 @@ defmodule Browser.JS.CompileTest do
   defp run(src, opts) do
     level = Keyword.get(opts, :level, 4)
 
-    case Parser.parse(src, resolve: level, file: @file_name) do
+    case Parser.parse(src, resolve: level, file: @file_name, module: opts[:modules] != nil) do
       {:error, msg} ->
         %{items: %{syntax: msg}, compiled: 0, inspect: nil}
 
@@ -703,7 +746,12 @@ defmodule Browser.JS.CompileTest do
 
     result =
       try do
-        v = Interp.run_program(program, true)
+        v =
+          case opts[:modules] do
+            nil -> Interp.run_program(program, true)
+            files -> run_module(program, files)
+          end
+
         # The result is a root while the last collection runs, because only this
         # function holds it.
         Process.put(:compile_test_result, v)
@@ -739,6 +787,23 @@ defmodule Browser.JS.CompileTest do
     inspect_result = if f = opts[:inspect], do: f.()
 
     %{items: items, compiled: length(cache()), inspect: inspect_result}
+  end
+
+  # Runs `program` as the module `main.js`, with the modules `files` (by file name) that it
+  # imports. The value is the namespace of the module.
+  defp run_module(program, files) do
+    Modules.reset()
+
+    loader =
+      {fn spec, _base -> {:ok, Path.basename(spec)} end,
+       fn name ->
+         case files do
+           %{^name => src} -> {:ok, src, name}
+           _ -> {:error, "404"}
+         end
+       end}
+
+    Modules.run(:main, @file_name, program, loader)
   end
 
   defp collect_last do
@@ -1161,6 +1226,18 @@ defmodule Browser.JS.CompileTest do
 
         for {{n, _, _}, _, on} <- pairs,
             do: assert(on.compiled == 0, "#{n} compiled at #{inspect(level)}")
+      end
+    end
+
+    test "the module programs give the same outcome with compilation on and off" do
+      rows = for {n, src, files} <- @modules, do: {n, src, [modules: files]}
+
+      for level <- [:off, 1, 4] do
+        pairs = both(rows, level: level)
+        assert_same(pairs, "at #{inspect(level)}")
+
+        for {{n, _, _}, off, _} <- pairs,
+            do: assert(match?({:ok, _}, off.items.result), "#{n}: #{inspect(off.items)}")
       end
     end
 
