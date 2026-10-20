@@ -219,7 +219,48 @@ defmodule Browser.JS.CompileTest do
     # A declaration reads its frame after its value, which can write the same frame: at
     # depth 0, and at depth 1 from the frame of a loop or of a block.
     {"decl after value",
-     ~S|function f(){ var y = 1; var x = (y = 2, 3); let z = (x += 1, y += 10, x * y); const w = (() => { z = 0; return y })(); var out = [x, y, z, w]; for (const k of [5]) { var a = 1; var b = (a = k, a + 1); let g = () => k; out.push(a, b, g()) } { let c = 0; var h = () => c; var d = (c = 7, y = 1, c + y); out.push(d, h(), y) } return out.join() } console.log(f())|}
+     ~S|function f(){ var y = 1; var x = (y = 2, 3); let z = (x += 1, y += 10, x * y); const w = (() => { z = 0; return y })(); var out = [x, y, z, w]; for (const k of [5]) { var a = 1; var b = (a = k, a + 1); let g = () => k; out.push(a, b, g()) } { let c = 0; var h = () => c; var d = (c = 7, y = 1, c + y); out.push(d, h(), y) } return out.join() } console.log(f())|},
+    # (r16) The compiled switch (design r16 4.1): the map dispatch of constant tests against
+    # a value of each kind, a repeated constant, an empty switch, a default in the middle,
+    # tests with side effects (the linear dispatch), labels, `let` and a function
+    # declaration in a case, a discriminant or a test that throws, the step count, and tests
+    # that are not constants.
+    {"r16 switch const kinds",
+     ~S|function f(v){ switch (v) { case 0: return 'zero'; case 1: return 'one'; case '1': return 'str1'; case true: return 'true'; case null: return 'null'; case undefined: return 'undef'; case -1: return 'neg'; case 1e400: return 'inf'; case -1e400: return '-inf'; case void 0: return 'void'; default: return 'def' } } console.log([0, -0, 1, '1', true, null, undefined, -1, NaN, {}, '0', 1.0, 2, false, 'true', Infinity, -Infinity, 0.5 + 0.5, 1n, Symbol.iterator].map(f).join())|},
+    {"r16 switch repeated const",
+     ~S|function f(v){ var s = ''; switch (v) { case 1: s += 'a'; break; case 1: s += 'b'; break; case 'x': s += 'c'; case 'x': s += 'd' } return s } console.log(f(1), f('x'), f(2))|},
+    {"r16 switch empty and no match",
+     ~S|function f(v){ switch (v) {} switch (v) { case 1: return 'one' } switch (v) { default: } return 'none' } console.log(f(1), f(2))|},
+    {"r16 switch default middle",
+     ~S|function f(v){ var s = ''; switch (v) { case 1: s += '1'; default: s += 'd'; case 2: s += '2'; break; case 3: s += '3' } return s } function g(v){ var s = ''; switch (v) { case 'a': s += 'a'; default: s += 'd' } return s } console.log([1, 2, 3, 4].map(f).join(), g('a'), g('b'))|},
+    {"r16 switch side effects",
+     ~S|function f(v){ var log = []; function t(x){ log.push('t' + x); return x } switch (v) { case t(1): log.push('one'); break; default: log.push('def'); case t(2): log.push('two'); break; case t(3): log.push('three') } return log.join() } console.log(f(1), f(2), f(3), f(4))|},
+    {"r16 switch labels",
+     ~S|function f(){ var out = []; outer: for (var i = 0; i < 4; i++) { sw: switch (i) { case 0: continue outer; case 1: break sw; case 2: break outer; default: out.push('d') } out.push(i) } return out.join() } function g(){ var n = 0; l: { switch (n) { case 0: n = 5; break l } n = 9 } return n } console.log(f(), g())|},
+    {"r16 switch return in loop",
+     ~S|function f(a){ for (var i = 0; i < a.length; i++) { switch (a[i]) { case 'x': return i; case 'y': continue; default: break } } return -1 } function g(a){ var i = 0; while (i < a.length) { switch (a[i++]) { case 1: continue; case 2: return 'two' } } return 'end' } console.log(f(['a', 'y', 'x']), f(['y']), g([1, 1, 2]), g([3]))|},
+    {"r16 switch let and fundecl",
+     ~S|function f(v){ switch (v) { case 1: let y = 'one'; return y + g(); case 2: try { return y } catch (e) { return e.constructor.name } default: function g(){ return 'g' } return g() } } console.log(f(1), f(2), f(3))|},
+    {"r16 switch fundecl heap order",
+     ~S|function f(){ var r = []; switch ((r.push({}), r.length)) { case 1: function g(){ return 'g' } r.push(g()); break; default: r.push('d') } var o = {}; return r.length + ':' + r[1] } console.log(f(), f())|},
+    {"r16 switch throws",
+     ~S|function f(){ try { switch ((function(){ throw new Error('disc') })()) { case 1: return 1 } } catch (e) { return e.message } } function g(o){ try { switch (1) { case o.k(): return 1; default: return 2 } } catch (e) { return e.message } } console.log(f(), g({k(){ throw new Error('test') }}), g({k(){ return 1 }}))|},
+    {"r16 switch steps",
+     ~S|function f(n){ var s = 0; for (var i = 0; i < n; i++) { switch (i % 4) { case 0: s += 1; case 1: s += 2; break; case 2: s += 4; break; default: s += 8 } } return s } console.log(f(100))|,
+     max_steps: 100_000},
+    {"r16 switch step limit",
+     ~S|function f(){ var i = 0; for (;;) { switch (i++ % 3) { case 0: break; case 1: continue; default: i += 2 } } } f()|,
+     max_steps: 3000},
+    {"r16 switch non-const tests",
+     ~S|var K = {A: 'a', B: 'b', C: 3}; function f(v){ switch (v) { case K.A: return 'A'; case K.B: return 'B'; case K.C: return 'C'; case 4: return '4'; case NaN: return 'nan' } return '?' } console.log(['a', 'b', 3, 4, 'c', NaN].map(f).join())|},
+    {"r16 switch object disc",
+     ~S|function f(){ var o = {}; var r = []; switch (o) { case o: r.push('same'); break; default: r.push('def') } switch ('1') { case 1: r.push('num'); break; case '1': r.push('str') } switch (1n) { case 1: r.push('n'); break; default: r.push('big') } switch (-0) { case 0: r.push('zero') } switch (0) { case -0: r.push('negzero') } return r.join() } console.log(f())|},
+    {"r16 switch in closure and arrow",
+     ~S|function f(){ var k = 0; var g = x => { switch (x) { case 'a': k += 1; break; case 'b': k += 10 } return k }; return [g('a'), g('b'), g('c')].join() } console.log(f())|},
+    {"r16 switch twenty numbers",
+     ~S|function f(n){ var s = 0; for (var i = 0; i < n; i++) { switch (i % 21) { case 0: s += 1; break; case 1: s += 2; break; case 2: s += 3; break; case 3: s += 4; break; case 4: s += 5; break; case 5: s += 6; break; case 6: s += 7; break; case 7: s += 8; break; case 8: s += 9; break; case 9: s += 10; break; case 10: s += 11; break; case 11: s += 12; break; case 12: s += 13; break; case 13: s += 14; break; case 14: s += 15; break; case 15: s += 16; break; case 16: s += 17; break; case 17: s += 18; break; case 18: s += 19; break; case 19: s += 20; break; default: s -= 1 } } return s } console.log(f(100))|},
+    {"r16 switch twelve strings",
+     ~S|function f(k){ switch (k) { case 'a': return 1; case 'b': return 2; case 'c': return 3; case 'd': return 4; case 'e': return 5; case 'f': return 6; case 'g': return 7; case 'h': return 8; case 'i': return 9; case 'j': return 10; case 'k': return 11; case 'l': return 12 } return 0 } console.log('abcdefghijklm'.split('').map(f).join())|}
   ]
 
   # One snippet for each kind that the compiler handles, and one for each kind that falls

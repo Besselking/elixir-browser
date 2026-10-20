@@ -55,7 +55,7 @@ defmodule Browser.JS.Compile do
     * property reads, calls, `new`, array literals and object literals;
     * assignments, compound assignments, `++` and `--` to a slot or to a property;
     * the statements `expr`, `return`, `if`, `block`, `var`, `let`, `const`, `for`,
-      `while`, `break`, `continue`, `throw` and labels.
+      `while`, `break`, `continue`, `throw`, `switch` and labels.
 
   A parent reads a constant operand inline. It also reads a slot of its own frame inline.
   Thus these operands need no closure call. A binary operator and a test have one closure
@@ -94,8 +94,8 @@ defmodule Browser.JS.Compile do
 
   These nodes are shells:
 
-    * `switch`, `try`, `for-in`, `for-of` and `do-while`;
-    * a block or a `for` that makes a block frame;
+    * `try`, `for-in`, `for-of` and `do-while`;
+    * a block, a `for` or a `switch` that makes a block frame;
     * a declaration with a pattern;
     * a literal with a spread or a method;
     * a call with a callee that the tree reads by name;
@@ -290,6 +290,8 @@ defmodule Browser.JS.Compile do
       step 4).
     * The tuple of a frame maker is equal to the tuple of the frame builder of `Interp`
       (S6, in `Interp.frame_call/6`).
+    * A switch whose tests are constants finds its case with a map, and also with the
+      scan of the tree. The two cases must be the same (S7).
 
   When the process key `:jsc_trace` holds a list, the compiler adds to the list each node
   that stays on the tree. The coverage test uses this list.
@@ -1911,6 +1913,11 @@ defmodule Browser.JS.Compile do
     end
   end
 
+  # (a switch ignores its labels: a `break` with the label of the switch goes to the
+  # labeled statement around it)
+  defp stmt_node({:switch, disc, cases, sc}, _labels) when frameless(sc),
+    do: switch(opnd(disc), cases, sc)
+
   # The statements below stay on the tree with compiled children, so that the order of
   # `try`/`finally`, the closing of iterators, the copies of a loop scope for each round
   # and the block frames keep one implementation, in `Interp`.
@@ -2078,6 +2085,141 @@ defmodule Browser.JS.Compile do
     else
       :ok
     end
+  end
+
+  # ── switch ─────────────────────────────────────────────────
+
+  # A frameless switch, as the frameless clause of `exec/3` runs it: the discriminant, the
+  # entry of the scope (the TDZ reset and the functions of the cases), the first case whose
+  # test is strictly equal to the value (the tests run in source order, and the default is
+  # not a test), else the default case, then the bodies from that case to the end until
+  # one completes abruptly. A `break` without a label ends the switch normally. A switch
+  # makes no step.
+  #
+  # The dispatch gives the index of the first case to run. The bodies are a tuple, so that
+  # each body has one parent and the fall-through is the next index. When every test is a
+  # constant, the dispatch is one read of a map. A constant has no side effect and makes
+  # no step, so the map finds the case that the scan finds. Else the tests run in source
+  # order, each one only until a match, with `Interp.strict_eq/2`. No match gives the
+  # index of the default, or the size of the tuple when there is no default.
+  #
+  # The discriminant runs before the entry of the scope, as on the tree: the entry makes
+  # the functions of the cases, which gives them heap ids.
+  defp switch(do_, cases, sc) do
+    bodies = List.to_tuple(for {_, body} <- cases, do: list(body))
+    indexed = Enum.with_index(cases)
+    tests = for {{t, _}, i} <- indexed, t != :default, do: {t, i}
+
+    default =
+      Enum.find_value(indexed, tuple_size(bodies), fn {{t, _}, i} -> t == :default && i end)
+
+    sc = if match?(%{tdz: [], hoist: []}, sc), do: nil, else: sc
+
+    if Enum.all?(tests, fn {t, _} -> const_test?(t) end) do
+      # (each constant counts as one node of the memory bound, as a compiled test does)
+      consts =
+        for {t, i} <- tests do
+          count()
+          {opnd_value(t), i}
+        end
+
+      # (the first case of a constant that comes two times wins, as in the scan)
+      map = Enum.reduce(consts, %{}, fn {k, i}, m -> Map.put_new(m, num_key(k), i) end)
+
+      one(
+        env,
+        do_,
+        v,
+        (
+          if sc, do: Interp.enter_frameless(env, sc)
+
+          i =
+            case map do
+              %{^v => i} -> i
+              _ when is_number(v) -> Map.get(map, num_key(v), default)
+              _ -> default
+            end
+
+          # (S7: check mode also runs the scan of the tree and compares the two cases)
+          if @check, do: switch_check(consts, v, default, i)
+          run_cases(bodies, i, env)
+        )
+      )
+    else
+      tests = for {t, i} <- tests, do: {opnd(t), i}
+
+      one(
+        env,
+        do_,
+        v,
+        (
+          if sc, do: Interp.enter_frameless(env, sc)
+          run_cases(bodies, switch_find(tests, v, env, default), env)
+        )
+      )
+    end
+  end
+
+  # A test that is a constant with a key in the map of a switch: a constant operand form
+  # (`opnd/1`) that is a number, a string or an atom. NaN is not equal to itself, so it is
+  # not such a constant.
+  defp const_test?(t) do
+    case const_value(t) do
+      {:ok, v} -> is_number(v) or is_binary(v) or (is_atom(v) and v != :nan)
+      :error -> false
+    end
+  end
+
+  defp opnd_value(t) do
+    {:ok, v} = const_value(t)
+    v
+  end
+
+  # The value of a node that `opnd/1` makes a constant, with no compilation.
+  defp const_value({k, v}) when k in [:num, :str, :lit], do: {:ok, v}
+  defp const_value({:unary, "-", {:num, n}}), do: {:ok, Num.neg(n)}
+  defp const_value({:unary, "void", {:num, _}}), do: {:ok, :undefined}
+  defp const_value({:in_tdz, _names, e}), do: const_value(e)
+  defp const_value({:unnamed, e}), do: const_value(e)
+  defp const_value(_), do: :error
+
+  # The key of a constant in the map of a switch: a number is a float, and a zero of
+  # either sign is `0.0`, as `strict_eq/2` compares numbers (a map compares terms
+  # exactly). Every other constant is its own key.
+  defp num_key(n) when is_integer(n), do: n * 1.0
+  defp num_key(n) when is_float(n) and n == 0.0, do: 0.0
+  defp num_key(n), do: n
+
+  # The tests of a switch that are not all constants, in source order. The value of each
+  # test is read only until one is equal to the value of the discriminant.
+  defp switch_find([], _v, _env, default), do: default
+
+  defp switch_find([{to, i} | rest], v, env, default) do
+    if Interp.strict_eq(v, av(to, env)), do: i, else: switch_find(rest, v, env, default)
+  end
+
+  # The bodies of a switch from index `i` to the end, until one does not complete
+  # normally (the fall-through of JS), as `run_cases/3` in `Interp` runs them.
+  defp run_cases(bodies, i, env) when i < tuple_size(bodies) do
+    case :erlang.element(i + 1, bodies).(env) do
+      :ok -> run_cases(bodies, i + 1, env)
+      {:brk, nil} -> :ok
+      c -> c
+    end
+  end
+
+  defp run_cases(_bodies, _i, _env), do: :ok
+
+  # S7: the case of the map must be the case of the scan of the tree.
+  if @check do
+    defp switch_check(consts, v, default, i) do
+      scan = Enum.find_value(consts, default, fn {k, j} -> Interp.strict_eq(v, k) && j end)
+
+      unless scan == i,
+        do: raise(ArgumentError, "resolve check: the map of a switch gives another case")
+    end
+  else
+    defp switch_check(_consts, _v, _default, _i), do: :ok
   end
 
   # ── tail sites ─────────────────────────────────────────────
