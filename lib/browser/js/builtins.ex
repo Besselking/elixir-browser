@@ -2281,8 +2281,11 @@ defmodule Browser.JS.Builtins do
         Process.put(:js_timers, List.delete(Process.get(:js_timers), t))
         # time never runs backwards: a timer that is late sees the time it actually ran
         Process.put(:js_now, max(t.at, Process.get(:js_now, 0.0)))
+        # (a timer of a frame runs in the frame; one of a frame that has gone does not run, and
+        # an interval of that frame is not set again)
+        alive? = Browser.JS.DOM.realm_alive?(t[:realm])
 
-        if t.interval do
+        if t.interval && alive? do
           seq = Process.get(:js_timer_seq)
           Process.put(:js_timer_seq, seq + 1)
 
@@ -2296,8 +2299,7 @@ defmodule Browser.JS.Builtins do
         mark = Interp.check_mark()
 
         try do
-          # (a timer of a frame runs in the frame; one of a frame that has gone does not run)
-          if Browser.JS.DOM.realm_alive?(t[:realm]) do
+          if alive? do
             Browser.JS.DOM.in_realm(t[:realm], fn -> call(t.fun, :undefined, t.args) end)
           end
 

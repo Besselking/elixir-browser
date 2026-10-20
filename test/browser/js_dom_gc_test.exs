@@ -650,6 +650,22 @@ defmodule Browser.JS.DOMGCTest do
     end)
   end
 
+  # A timer of a frame that has gone does not run, and an interval of it is not set again.
+  # (A frame that goes takes its timers with it, see `DOM.destroy_realm/1`. The timer here
+  # stands for one that stays in the list: it gets the id of a document that is not there.)
+  test "an interval of a frame that has gone does not run and is not set again" do
+    page(fn ->
+      js("var runs = 0; setInterval(function () { runs++ }, 10); 0")
+      gone = 999_999_999
+      refute Browser.JS.DOM.realm_alive?(gone)
+      Process.put(:js_timers, Enum.map(Process.get(:js_timers), &%{&1 | realm: gone}))
+
+      timers()
+      assert js("runs") == "0"
+      assert Enum.filter(Process.get(:js_timers), &(&1.realm == gone)) == []
+    end)
+  end
+
   test "a frame's nodes that a collect freed, then the frame's removal" do
     page(fn ->
       js("""
