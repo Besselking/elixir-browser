@@ -2372,4 +2372,30 @@ defmodule Browser.JSTest do
     assert js(src) ==
              "B AAAAA MMMMM AAAAA BBB BBBBB AAAAA MMMMM AAAAA AAAAA AAAAA B ccc B"
   end
+
+  # `concat` of plain dense arrays joins their lists (`ArrayGeneric.concat/2`).
+  test "concat takes the steps of the spec for holes, spreadable keys and other objects" do
+    src = ~S"""
+    var out = [], sp = Symbol.isConcatSpreadable;
+    function s(v) { return JSON.stringify(v) + ':' + v.length }
+    out.push(s([1, 2].concat([3], 4, [[5]])));
+    var h = [1, , 3].concat([4]); out.push(h.length + ',' + (1 in h) + ',' + h[1]);
+    Object.prototype[1] = 'p'; var h2 = [1, , 3].concat([4]); out.push((1 in h2) + ',' + h2[1] + ',' + h2.hasOwnProperty(1)); delete Object.prototype[1];
+    Array.prototype[sp] = false; out.push(s([1].concat([2]))); delete Array.prototype[sp];
+    Object.prototype[sp] = false; out.push(s([1].concat([2]))); delete Object.prototype[sp];
+    var o = [2, 3]; o[sp] = false; out.push(s([1].concat(o)));
+    var t = [1]; t[sp] = false; out.push(s(t.concat([2])));
+    (function () { out.push(s([1].concat(arguments))) })(7, 8);
+    (function () { Object.setPrototypeOf(arguments, Array.prototype); out.push(s([1].concat(arguments))) })(7, 8);
+    (function () { 'use strict'; Object.setPrototypeOf(arguments, Array.prototype); out.push(s([1].concat(arguments))) })(7, 8);
+    var q = [9], pq = Object.create(Array.prototype); pq[sp] = false; Object.setPrototypeOf(q, pq); out.push(s([1].concat(q)));
+    var o2 = {length: 2, 0: 'a', 1: 'b'}; out.push(s([1].concat(o2))); o2[sp] = true; out.push(s([1].concat(o2)));
+    var g = [1, 2]; Object.defineProperty(g, 0, {get: function () { return 'got' }}); out.push(s([0].concat(g)));
+    var r = [1]; var c = r.concat(); c.push(2); out.push(r.length + ',' + c.length + ',' + (r !== c));
+    out.join(' ')
+    """
+
+    assert js(src) ==
+             ~S'[1,2,3,4,[5]]:5 4,false,undefined true,p,true [[1],[2]]:2 [[1],[2]]:2 [1,[2,3]]:2 [[1],2]:2 [1,{"0":7,"1":8}]:2 [1,{"0":7,"1":8}]:2 [1,{"0":7,"1":8}]:2 [1,[9]]:2 [1,{"0":"a","1":"b","length":2}]:2 [1,"a","b"]:3 [0,"got",2]:3 1,2,true'
+  end
 end
