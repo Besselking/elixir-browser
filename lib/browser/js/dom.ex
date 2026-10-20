@@ -5135,22 +5135,30 @@ defmodule Browser.JS.DOM do
   end
 
   # `delete window.x`: a global variable of the window's realm goes, as on the global object
-  # (`Browser.JS.Global.host_delete/2`); a `var` stays
+  # (`Browser.JS.Global.host_delete/2`); a `var` stays. On the window of a frame that went,
+  # only an own property of the wrapper can go.
   def host_delete(data, key) when is_binary(key) and (data == :window or is_tuple(data)) do
     case data do
-      {:window, _} -> in_window_realm(data, fn -> Browser.JS.Global.host_delete(:global, key) end)
-      :window -> in_window_realm(data, fn -> Browser.JS.Global.host_delete(:global, key) end)
-      _ -> :default
+      {:window, _} ->
+        in_window_realm(data, fn -> Browser.JS.Global.host_delete(:global, key) end, :default)
+
+      :window ->
+        in_window_realm(data, fn -> Browser.JS.Global.host_delete(:global, key) end, :default)
+
+      _ ->
+        :default
     end
   end
 
   def host_delete(_other, _key), do: :default
 
   @doc false
-  # runs `fun` in the realm of the window `data` (`:window` or `{:window, doc}`)
-  def in_window_realm(data, fun) do
+  # Runs `fun` in the realm of the window `data` (`:window` or `{:window, doc}`). The window
+  # of a frame that went has no realm: then it gives `dead` and touches no global scope (the
+  # running realm is not the window's).
+  def in_window_realm(data, fun, dead) do
     {doc, :window} = split_realm(data)
-    in_realm(doc, fun)
+    if realm_alive?(doc), do: in_realm(doc, fun), else: dead
   end
 
   defp storage_put(area, key, v), do: storage_set(area, key, to_str(v))

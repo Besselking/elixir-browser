@@ -609,7 +609,11 @@ defmodule Browser.JS.Props do
         Browser.JS.Global.define_var(key, desc)
 
       {Browser.JS.DOM, data} when data == :window or elem(data, 0) == :window ->
-        Browser.JS.DOM.in_window_realm(data, fn -> Browser.JS.Global.define_var(key, desc) end)
+        Browser.JS.DOM.in_window_realm(
+          data,
+          fn -> Browser.JS.Global.define_var(key, desc) end,
+          desc
+        )
 
       _ ->
         desc

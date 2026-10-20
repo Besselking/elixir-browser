@@ -783,4 +783,27 @@ defmodule Browser.JS.IframeTest do
     assert errors == []
     assert logs == ["false object TypeError object false true true 1 3 7"]
   end
+
+  test "delete and defineProperty on the window of a frame that went leave the page's globals" do
+    {logs, errors} =
+      run(~S"""
+      yy = 1; zz = 5;
+      const f = document.createElement("iframe");
+      f.srcdoc = "<p>x</p>";
+      f.onload = () => {
+        const w = f.contentWindow;
+        f.remove();
+        setTimeout(() => {
+          const out = [delete w.yy, typeof yy];
+          Object.defineProperty(w, "zz", { value: 9 });
+          out.push(zz, w.zz);
+          console.log(out.join(" "));
+        }, 0);
+      };
+      document.body.appendChild(f);
+      """)
+
+    assert errors == []
+    assert logs == ["true number 5 9"]
+  end
 end
