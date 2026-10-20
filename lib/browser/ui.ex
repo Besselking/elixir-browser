@@ -102,6 +102,7 @@ defmodule Browser.UI do
     develop = :wxMenu.new()
     :wxMenu.append(develop, 5200, Browser.ConsoleWindow.menu_label())
     :wxMenu.append(develop, 5201, Browser.NetworkWindow.menu_label())
+    :wxMenu.appendCheckItem(develop, 5202, ~c"Record Page Archive")
     :wxMenuBar.append(menubar, develop, ~c"Develop")
     :wxFrame.setMenuBar(frame, menubar)
 

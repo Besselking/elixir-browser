@@ -77,6 +77,22 @@ button empties the list. The list keeps the last 500 requests. It shows the requ
 
 Every crash (a process dying, a failing wx callback, `Logger.error`) is saved as a text file with the time, the page that was open, the version and commit, and the stacktrace. They go to `$BROWSER_CRASH_DIR`, else `crashes/` under the user data dir (on macOS `~/Library/Application Support/elixir_browser/crashes`), and the newest 100 are kept. `mix browser.crashes [--show|--clear]` lists, prints or deletes them.
 
+## Page archives
+
+A page archive is one file with the network responses of a page: the HTML, the style sheets, the scripts, the images and the redirects, with their headers, as the server sent them. A page can load from the file with no network. Use it to look at a site that a machine cannot reach, for example a cloud session. Scripts run on the original HTML, not on a copy that a browser saved after the scripts had changed it.
+
+To record a page:
+
+- `mix browser.archive URL OUT.ebarchive [--js]` loads the page and writes the archive. With `--js` the scripts run, so the archive has what they request.
+- In the window, choose Develop > Record Page Archive. The page loads again, and the browser does not use its cache. Use the page. Choose the item again to stop. The file goes to the Downloads folder (name: host and time).
+
+To replay a page:
+
+- `mix browser.screenshot URL OUT.png --wx --js --archive FILE` and `mix browser.layout URL --js --archive FILE` load `URL` from the archive.
+- `BROWSER_ARCHIVE=FILE` starts the window in replay mode. A request that is not in the archive fails.
+
+`mix browser.archive --show FILE [--extract DIR]` lists the responses. An archive keeps no cookies and no request bodies. It does keep what the pages sent, so do not share an archive of a page where you were logged in. WebSocket traffic is not recorded.
+
 ## Proxy
 
 The browser uses a proxy when the usual environment variables are set: `https_proxy`,

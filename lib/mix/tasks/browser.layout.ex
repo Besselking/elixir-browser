@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Browser.Layout do
   Loads a page (a URL or a file), lays it out and prints the boxes as an indented tree, so
   that a layout can be read, and two layouts compared, without looking at a picture.
 
-      mix browser.layout URL_OR_FILE [--viewport 800x600] [--all] [--style] [--js]
+      mix browser.layout URL_OR_FILE [--viewport 800x600] [--all] [--style] [--js] [--archive FILE]
 
   Each line is one element: its tag with `#id` and `.classes`, the border box that holds
   everything drawn for it and its descendants as `x,y WxH` in page coordinates, then its
@@ -22,6 +22,8 @@ defmodule Mix.Tasks.Browser.Layout do
   * `--style` adds the margin, border width and padding of each box, as `m=t,r,b,l`.
   * `--js` runs the page's scripts first and lays out what they leave (text and line breaks in
     an editable region show up as `<@t>` elements with a box of their own).
+  * `--archive FILE` loads the page from a page archive (see `mix browser.archive`), with no
+    network.
   * `--all` also lists elements that are not drawn (`<head>`, `<script>`, `display: none`).
 
   Needs no window, so it works in CI and cloud sessions, and on local files such as WPT
@@ -35,7 +37,13 @@ defmodule Mix.Tasks.Browser.Layout do
   def run(args) do
     {opts, rest} =
       OptionParser.parse!(args,
-        strict: [viewport: :string, all: :boolean, style: :boolean, js: :boolean]
+        strict: [
+          viewport: :string,
+          all: :boolean,
+          style: :boolean,
+          js: :boolean,
+          archive: :string
+        ]
       )
 
     [input] = rest
@@ -43,6 +51,7 @@ defmodule Mix.Tasks.Browser.Layout do
 
     Application.put_env(:browser, :gui, false)
     Mix.Task.run("app.start")
+    if opts[:archive], do: Browser.Archive.replay!(opts[:archive])
 
     env = %{Browser.Style.default_env() | width: width, height: height}
 

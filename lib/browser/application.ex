@@ -13,6 +13,7 @@ defmodule Browser.Application do
       [
         Browser.Console,
         Browser.NetLog,
+        Browser.Archive,
         Browser.HttpCache,
         Browser.SheetCache,
         Browser.Cookies,

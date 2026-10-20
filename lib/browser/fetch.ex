@@ -1,7 +1,7 @@
 defmodule Browser.Fetch do
   @moduledoc "Loads a URL into `{:ok, body, final_url}`."
 
-  alias Browser.{Cookies, HttpCache, NetLog, Proxy}
+  alias Browser.{Archive, Cookies, HttpCache, NetLog, Proxy}
 
   @max_redirects 8
 
@@ -197,7 +197,8 @@ defmodule Browser.Fetch do
   defp fetch(_url, _method, _body, 0, _cache), do: {:error, "Too many redirects"}
 
   defp fetch(url, :get, body, redirects, %{full: false, cache: cache} = ctx) do
-    case lookup(url, cache) do
+    # recording and replaying skip the cache: a response is recorded as the network sent it
+    case if(Archive.mode() == :off, do: lookup(url, cache), else: :miss) do
       {:fresh, entry} when cache != :reload ->
         log_cached(url, ctx, entry)
         {:ok, entry.body, url}
@@ -400,9 +401,31 @@ defmodule Browser.Fetch do
     started = System.monotonic_time(:millisecond)
 
     result =
-      if method == :get and ctx.on_chunk,
-        do: stream_get(request, http_opts, url, ctx.on_chunk, profile),
-        else: :httpc.request(method, request, http_opts, [body_format: :binary], profile)
+      case Archive.mode() do
+        :replay ->
+          replay(method, url, body, ctx)
+
+        mode ->
+          result =
+            if method == :get and ctx.on_chunk,
+              do: stream_get(request, http_opts, url, ctx.on_chunk, profile),
+              else: :httpc.request(method, request, http_opts, [body_format: :binary], profile)
+
+          with :record <- mode, {:ok, {{_, status, reason}, resp_headers, resp_body}} <- result do
+            Archive.record(
+              method,
+              url,
+              body,
+              status,
+              reason,
+              resp_headers,
+              resp_body,
+              ctx.navigation
+            )
+          end
+
+          result
+      end
 
     with true <- cookies?, {:ok, {_, resp_headers, _}} <- result do
       store_cookies(url, resp_headers, cookie_opts)
@@ -442,7 +465,7 @@ defmodule Browser.Fetch do
 
       {:ok, {{_, 200, _}, headers, body}} ->
         with {:ok, body, _} = ok <- decode_body(headers, body, url) do
-          if method == :get, do: HttpCache.store(url, headers, body)
+          if method == :get and Archive.mode() != :replay, do: HttpCache.store(url, headers, body)
           ok
         end
 
@@ -455,6 +478,28 @@ defmodule Browser.Fetch do
       {:error, reason} ->
         {:error, "Request failed: #{inspect(reason)}"}
     end
+  end
+
+  # The answer of an archive to a request, shaped like the reply of `:httpc`. A request that
+  # is not in the archive fails, as it would without a network.
+  defp replay(method, url, body, ctx) do
+    case Archive.lookup(method, url, body) do
+      {:ok, status, reason, headers, resp_body} ->
+        if method == :get and status == 200,
+          do: replay_chunk(ctx.on_chunk, headers, resp_body, url)
+
+        {:ok, {{~c"HTTP/1.1", status, String.to_charlist(reason)}, headers, resp_body}}
+
+      :miss ->
+        {:error, :not_in_archive}
+    end
+  end
+
+  defp replay_chunk(nil, _headers, _body, _url), do: :ok
+
+  defp replay_chunk(on_chunk, headers, body, url) do
+    with {:ok, text, _} <- decode_body(headers, body, url), do: on_chunk.(text, url)
+    :ok
   end
 
   # ── the network log ────────────────────────────────────────

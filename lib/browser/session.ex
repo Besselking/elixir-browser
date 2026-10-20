@@ -12,6 +12,7 @@ defmodule Browser.Session do
   import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1, wxList: 1]
 
   alias Browser.{
+    Archive,
     Download,
     Editing,
     Fetch,
@@ -453,6 +454,10 @@ defmodule Browser.Session do
 
   def handle_info(wx(id: 5220, event: wxCommand(type: :command_button_clicked)), state),
     do: {:noreply, clear_net(state)}
+
+  # Develop > Record Page Archive: on starts recording and loads the page again, off saves
+  def handle_info(wx(id: 5202, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, toggle_archive(state)}
 
   def handle_info(wx(id: 5221, event: wxCommand(type: :command_text_updated)), state),
     do: {:noreply, refilter_net(state)}
@@ -3518,6 +3523,38 @@ defmodule Browser.Session do
   # -- network panel -----------------------------------------------------------------
 
   # the window is made on first use; `rows` are the numbers of the entries in the list, top down
+  defp toggle_archive(state) do
+    bar = :wxFrame.getMenuBar(state.ui.frame)
+
+    cond do
+      Archive.mode() == :replay ->
+        :wxMenuBar.check(bar, 5202, false)
+        UI.set_status(state.ui, "A page archive is replayed (BROWSER_ARCHIVE): nothing to record")
+        state
+
+      :wxMenuBar.isChecked(bar, 5202) ->
+        Archive.record_start()
+        UI.set_status(state.ui, "Recording a page archive…")
+        if state.url, do: load(state, state.url, :history, cache: :reload), else: state
+
+      true ->
+        me = self()
+        dir = Download.dir()
+
+        Task.start(fn ->
+          result =
+            case Archive.save_recording(dir) do
+              {:ok, path, _count} -> {:ok, path}
+              {:error, why} -> {:error, why}
+            end
+
+          send(me, {:downloaded, result})
+        end)
+
+        state
+    end
+  end
+
   defp open_net(%{net: nil} = state) do
     win = Browser.NetworkWindow.new(state.ui.frame)
     open_net(%{state | net: %{win: win, seq: 0, filter: "", rows: [], ticking: false}})
