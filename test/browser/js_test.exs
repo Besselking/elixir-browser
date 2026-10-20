@@ -2398,4 +2398,47 @@ defmodule Browser.JSTest do
     assert js(src) ==
              ~S'[1,2,3,4,[5]]:5 4,false,undefined true,p,true [[1],[2]]:2 [[1],[2]]:2 [1,[2,3]]:2 [[1],2]:2 [1,{"0":7,"1":8}]:2 [1,{"0":7,"1":8}]:2 [1,{"0":7,"1":8}]:2 [1,[9]]:2 [1,{"0":"a","1":"b","length":2}]:2 [1,"a","b"]:3 [0,"got",2]:3 1,2,true'
   end
+
+  # `arguments.length` and `arguments[k]` read the list of the arguments while the object
+  # is not built (`Interp.args_get/4`).
+  test "a read of arguments before the object is built gives the values of the object" do
+    src = ~S"""
+    var out = [];
+    function a1(x, y){ x = 5; return [arguments.length, arguments[0], arguments[1], arguments[2], arguments['0'], arguments[-0]].join(); }
+    out.push(a1(1, 2));
+    function a2(x, y){ 'use strict'; x = 5; return [arguments.length, arguments[0], arguments[1], arguments[2]].join(); }
+    out.push(a2(1, 2));
+    function a3(x, x){ return [arguments[0], arguments[1], x].join(); }
+    out.push(a3(1, 2));
+    Object.prototype[2] = 'proto';
+    function a4(){ return [arguments.length, arguments[2], arguments[1]].join(); }
+    out.push(a4(1));
+    delete Object.prototype[2];
+    function a5(x){ var i = 0; var r = arguments[i]; x = 9; return r + ',' + arguments[i] + ',' + arguments[0]; }
+    out.push(a5(1));
+    function a6(x){ arguments[0] = 7; return x + ',' + arguments[0] + ',' + arguments.length; }
+    out.push(a6(1));
+    function a7(x){ arguments.length = 0; return arguments.length + ',' + arguments[0]; }
+    out.push(a7(1));
+    function a8(){ var f = () => arguments[1] + arguments.length; return f(); }
+    out.push(a8(3, 4));
+    function a9(x){ var s = 'length'; return arguments[s] + ',' + arguments.callee.name; }
+    out.push(a9(1, 2, 3));
+    function a10(x, y){ y = 'w'; return arguments[1] + ',' + arguments.length; }
+    out.push(a10(1));
+    function a11(x){ let k = 1; return arguments[k]; }
+    out.push(String(a11(1, 'two')));
+    function a12(x = 1){ return arguments[0] + ',' + arguments.length; }
+    out.push(a12(4, 5));
+    out.join(' | ');
+    ;
+    function b1(x) { 'use strict'; arguments[0] = 7; return x + ',' + arguments[0] }
+    function b2(x) { var r = arguments.length; arguments[5] = 1; return r + ',' + arguments.length + ',' + arguments[5] }
+    function b3(x) { x = 2; var a = arguments; return arguments[0] + ',' + a[0] }
+    out.join(' | ') + ' || ' + [b1(1), b2(1), b3(1)].join(' | ')
+    """
+
+    assert js(src) ==
+             "2,5,2,,5,5 | 2,1,2, | 1,2,2 | 1,proto, | 1,9,9 | 7,7,1 | 0,1 | 6 | 3,a9 | undefined,1 | two | 4,2 || 1,7 | 1,1,1 | 2,2"
+  end
 end

@@ -912,6 +912,11 @@ defmodule Browser.JS.Compile do
   defp expr_node({:binary, "in", {:priv_ref, _} = l, r}), do: shell({:binary, "in", l, cc(r)})
   defp expr_node({:binary, op, l, r}), do: binary(op, opnd(l), opnd(r))
 
+  # (`arguments.length` and `arguments[k]` read the arguments list while the object is not
+  # built, as `ev/2` reads them: `Interp.args_get/4`)
+  defp expr_node({:member, {:aslot, d, i}, k, false}) when elem(k, 0) in [:num, :str, :slot],
+    do: one(env, key_code(k), kv, Interp.args_get(env, d, i, kv))
+
   defp expr_node({:member, o, k, opt}) do
     case k do
       {:priv, _} -> shell({:member, cc(o), k, opt})

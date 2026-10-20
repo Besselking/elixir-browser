@@ -6113,6 +6113,63 @@ defmodule Browser.JS.Interp do
     a
   end
 
+  @doc false
+  # A read of `arguments[key]` through the form `{:aslot, d, i}` (`arguments.length`,
+  # `arguments[0]`, `arguments[i]`), for `ev/2` and the compiled code. While the slot holds
+  # `{:unbuilt, fid}`, the object is not built, and no code changed it: each change of the
+  # object reads the slot first, which builds the object. Then `length` is the count of the
+  # arguments, and an index below it gives the argument, or the value of its parameter when
+  # the element is mapped (a mapped element shows the current value of its parameter, as
+  # `build_arguments/3` copies it). These are own data properties, so the read is exact
+  # with no object. Every other key, and an index at or after the count (which the
+  # prototype chain answers), builds the object and reads it as before. The key is a
+  # constant or a slot (the callers allow no other key), so its evaluation cannot see
+  # that the object is built after it.
+  def args_get(env, d, i, key) do
+    frame = hop(env, d)
+    f = :erlang.get(frame)
+
+    case :erlang.element(i, f) do
+      {:unbuilt, fid} ->
+        case args_read(f, key) do
+          {:ok, v} -> v
+          :build -> get(build_arguments(frame, i, fid), key)
+        end
+
+      a ->
+        get(a, key)
+    end
+  end
+
+  defp args_read(f, key) do
+    info = :erlang.element(2, f)
+
+    case :erlang.element(:erlang.map_get(:args, info.slots), f) do
+      args when is_list(args) and key == "length" ->
+        {:ok, length(args) * 1.0}
+
+      args when is_list(args) ->
+        case index(key) do
+          k when is_integer(k) and k < length(args) ->
+            case info.argmap do
+              %{} = argmap when map_size(argmap) > 0 ->
+                if :lists.keymember(k, 2, :maps.to_list(argmap)),
+                  do: {:ok, unbox(:erlang.element(@frame_base + k, f))},
+                  else: {:ok, :lists.nth(k + 1, args)}
+
+              _ ->
+                {:ok, :lists.nth(k + 1, args)}
+            end
+
+          _ ->
+            :build
+        end
+
+      _ ->
+        :build
+    end
+  end
+
   # index to name for the mapped parameters: only the indices below the argument count
   defp argument_map(nil, _argc), do: %{}
 
@@ -8918,6 +8975,14 @@ defmodule Browser.JS.Interp do
 
   def ev({:supdate, op, prefix?, {:mref, d, name}}, env),
     do: ev({:supdate, op, prefix?, {:id, name}}, hop(env, d))
+
+  # (`arguments.length` and `arguments[k]` read the arguments list while the object is not
+  # built, see `args_get/4`)
+  def ev({:member, {:aslot, d, i} = form, k, false}, env)
+      when elem(k, 0) in [:num, :str, :slot] do
+    if @check, do: check_landing(form, env)
+    args_get(env, d, i, ev(k, env))
+  end
 
   def ev({:member, o, k, opt}, env) do
     ov = ev(o, env)
