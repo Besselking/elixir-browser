@@ -584,4 +584,30 @@ defmodule Browser.JSGCTest do
     end)
     |> Task.await()
   end
+
+  # The young heap of a process that once had a large heap stays large when the heap becomes
+  # small again (a frame that went and freed its page), see `GC.tune_young_heap/0`.
+  test "the young heap goes to its largest size after a large heap and stays there" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+      # (a threshold that no heap here comes to: the collector does not run)
+      Process.put(:js_gc_at, 1_000_000_000)
+      {:min_heap_size, small} = Process.info(self(), :min_heap_size)
+      assert small < 16_000_000
+
+      # (5 million list cells of 2 words each: a heap of more than 8 million words)
+      Process.put(:test_big, Enum.to_list(1..5_000_000))
+      GC.maybe_collect()
+      # (the runtime rounds a size up to the next size of its table)
+      {:min_heap_size, large} = Process.info(self(), :min_heap_size)
+      assert large >= 16_000_000
+
+      Process.delete(:test_big)
+      :erlang.garbage_collect()
+      GC.maybe_collect()
+      assert Process.info(self(), :min_heap_size) == {:min_heap_size, large}
+    end)
+    |> Task.await(30_000)
+  end
 end
