@@ -3581,6 +3581,8 @@ defmodule Browser.Session do
           @recording_status
         )
 
+        # the pictures of the page are kept between loads: fetch them again, to record them
+        state = %{state | images: %{}}
         if state.url, do: load(state, state.url, :history, cache: :reload), else: state
 
       true ->
