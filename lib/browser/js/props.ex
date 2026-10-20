@@ -1333,7 +1333,8 @@ defmodule Browser.JS.Props do
     if props in [:undefined, :null],
       do: throw_error("TypeError", "Cannot convert undefined or null to object")
 
-    descs = for k <- enumerable_keys(props), do: {k, Interp.get(props, k)}
+    # (the enumerable own keys in the order of OwnPropertyKeys: the strings, then the symbols)
+    descs = for k <- enumerable_own_keys(props), do: {k, Interp.get(props, k)}
 
     descs = for {k, d} <- descs, do: {k, d, to_desc(d)}
     {:obj, id} = obj

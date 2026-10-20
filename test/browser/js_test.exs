@@ -444,6 +444,24 @@ defmodule Browser.JSTest do
              ) == "b,c,a,h"
     end
 
+    # Object.defineProperties and Object.create read the enumerable own keys of the
+    # descriptor object: the strings, then the symbols (OwnPropertyKeys). A symbol that is not
+    # enumerable defines nothing.
+    test "defineProperties and create define the symbol keys of the descriptors too" do
+      assert js(
+               "var a = Symbol('a'), b = Symbol('b'), h = Symbol('h'); var order = []; " <>
+                 "var d = {}; d[b] = {value: 1, enumerable: true}; d.x = {value: 2}; " <>
+                 "d[a] = {get: function () { return 3 }}; " <>
+                 "Object.defineProperty(d, h, {value: {value: 4}}); " <>
+                 "var p = new Proxy(d, {get: function (t, k) { order.push(String(k)); return t[k] }}); " <>
+                 "var o = Object.defineProperties({}, p); var c = Object.create(null, d); " <>
+                 "[order.join(), Reflect.ownKeys(o).map(String).join(), o[b], o.x, o[a], h in o, " <>
+                 "Object.getOwnPropertySymbols(c).map(String).join(), c[a], " <>
+                 "Object.getOwnPropertyDescriptor(c, b).enumerable].join(' ')"
+             ) ==
+               "x,Symbol(b),Symbol(a) x,Symbol(b),Symbol(a) 1 2 3 false Symbol(b),Symbol(a) 3 true"
+    end
+
     test "the length of an arguments object is an ordinary own property" do
       assert js(
                "function f(){ var r = [Object.getOwnPropertyNames(arguments).join()]; " <>
