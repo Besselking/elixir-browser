@@ -89,6 +89,7 @@ To record a page:
 To replay a page:
 
 - `mix browser.screenshot URL OUT.png --wx --js --archive FILE` and `mix browser.layout URL --js --archive FILE` load `URL` from the archive.
+- In the window, type the path or the `file://` address of the file in the address bar (like Safari with a webarchive). The page loads from the archive and the network is not used. Develop > Stop Replaying Archive goes back to the network. The built app (`mix app.bundle`) is also registered for `.ebarchive` files, so a double click in Finder opens them.
 - `BROWSER_ARCHIVE=FILE` starts the window in replay mode. A request that is not in the archive fails.
 
 `mix browser.archive --show FILE [--extract DIR]` lists the responses. An archive keeps no cookies and no request bodies. It does keep what the pages sent, so do not share an archive of a page where you were logged in. WebSocket traffic is not recorded.

@@ -152,4 +152,23 @@ defmodule Browser.ArchiveTest do
     assert {:ok, "body", _} = Fetch.load("http://x.test/")
     assert {:ok, "body", _} = Fetch.load("http://x.test/", cache: :history)
   end
+
+  test "the address of an archive file starts the replay and gives the first page", %{
+    tmp_dir: dir
+  } do
+    Archive.record_start()
+    Archive.record(:get, "http://x.test/a.css", nil, 200, "OK", [], "css", false)
+    Archive.record(:get, "http://x.test/", nil, 200, "OK", [], "<p>hi</p>", true)
+    {:ok, path, 2} = Archive.save_recording(Path.join(dir, "with space"))
+
+    assert {:ok, "http://x.test/"} = Archive.open("file://" <> URI.encode(path))
+    assert Archive.mode() == :replay
+    assert {:ok, "<p>hi</p>", _} = Fetch.load("http://x.test/")
+
+    Archive.stop()
+    assert Archive.open("file:///tmp/page.html") == :none
+    assert Archive.open("https://x.test/y.ebarchive") == :none
+    assert {:error, _} = Archive.open("file://" <> Path.join(dir, "nothing.ebarchive"))
+    assert Archive.mode() == :off
+  end
 end

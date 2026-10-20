@@ -6,7 +6,8 @@ defmodule Browser.Archive do
   An archive is for a site that a cloud session cannot reach. Record it where the site
   loads (`mix browser.archive URL OUT`, or Develop > Record Page Archive in the window),
   and replay it anywhere (`--archive FILE` of `mix browser.screenshot` and `mix
-  browser.layout`, or `BROWSER_ARCHIVE=FILE` for the window). The page then gets the bytes
+  browser.layout`, or `BROWSER_ARCHIVE=FILE` for the window; in the window also the address of
+  the file, or opening it with the app). The page then gets the bytes
   and headers that the server sent, so its scripts run on the original HTML, not on a
   copy that a browser saved after the scripts had changed it.
 
@@ -183,6 +184,27 @@ defmodule Browser.Archive do
   rescue
     ArgumentError -> :miss
   end
+
+  @doc """
+  For a `file://` address of an archive: starts replaying it and gives the address it was
+  recorded from, `{:ok, url}` (or `{:error, message}`); `:none` for any other address.
+  """
+  @spec open(String.t()) :: {:ok, String.t()} | {:error, String.t()} | :none
+  def open("file://" <> path) do
+    path = path |> String.split(["#", "?"], parts: 2) |> hd() |> URI.decode()
+
+    if Path.extname(path) == @extension do
+      with {:ok, archive} <- read(path),
+           url when is_binary(url) <- start_url(archive) || {:error, "the archive is empty"},
+           :ok <- replay(path) do
+        {:ok, url}
+      end
+    else
+      :none
+    end
+  end
+
+  def open(_url), do: :none
 
   # ── files ──────────────────────────────────────────────────
 

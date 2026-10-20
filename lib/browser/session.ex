@@ -48,6 +48,8 @@ defmodule Browser.Session do
   def init(_) do
     Process.put(:layout_serve, &__MODULE__.serve_layout/1)
     ui = UI.build()
+    # a file that the system opens with this app (Finder) arrives as `{:open_file, path}`
+    :wx.subscribe_events()
     cache = UI.new_measure_cache()
     # the same widths for a layout running in the background, which needs a DC of its own
     measure_bg = UI.measurer(ui, cache)
@@ -186,6 +188,21 @@ defmodule Browser.Session do
   # -- loading -------------------------------------------------------------
 
   defp load(state, url, mode, fetch_opts \\ []) do
+    case Archive.open(url) do
+      {:ok, start} ->
+        UI.set_status(state.ui, "Replaying #{Path.basename(URI.decode(url))}: no network")
+        load(state, start, mode, fetch_opts)
+
+      {:error, why} ->
+        UI.set_status(state.ui, "Cannot open the archive: #{why}")
+        state
+
+      :none ->
+        load_url(state, url, mode, fetch_opts)
+    end
+  end
+
+  defp load_url(state, url, mode, fetch_opts) do
     me = self()
     nonce = state.nonce + 1
     UI.set_status(state.ui, "Loading #{url}…")
@@ -459,6 +476,25 @@ defmodule Browser.Session do
 
   def handle_info(wx(id: 5220, event: wxCommand(type: :command_button_clicked)), state),
     do: {:noreply, clear_net(state)}
+
+  # Finder opens a page archive with this app
+  def handle_info({:open_file, file}, state) do
+    path = to_string(file)
+
+    if Path.extname(path) == Archive.extension(),
+      do: {:noreply, load(state, "file://" <> URI.encode(path), :push)},
+      else: {:noreply, state}
+  end
+
+  # Develop > Stop Replaying Archive
+  def handle_info(wx(id: 5203, event: wxCommand(type: :command_menu_selected)), state) do
+    if Archive.mode() == :replay do
+      Archive.stop()
+      UI.set_status(state.ui, "The network is used again")
+    end
+
+    {:noreply, state}
+  end
 
   # Develop > Record Page Archive: on starts recording and loads the page again, off saves
   def handle_info(wx(id: 5202, event: wxCommand(type: :command_menu_selected)), state),
