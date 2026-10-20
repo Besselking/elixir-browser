@@ -1249,6 +1249,14 @@ defmodule Browser.JS.Compile do
     seq(cs, env)
   end
 
+  # Each closure of `cs` in turn, for the values that a comma expression drops.
+  defp run_all([], _env), do: :ok
+
+  defp run_all([c | cs], env) do
+    c.(env)
+    run_all(cs, env)
+  end
+
   # The strings of a template, from left to right. Each value becomes a string before the
   # next part runs, as in `ev/2`, because `toString` can run user code.
   defp parts([], _env, acc), do: Enum.reverse(acc)
@@ -2076,8 +2084,11 @@ defmodule Browser.JS.Compile do
 
   # The completion of `return e` at a tail site, as `tail_value/2` gives it. A call gives
   # the pending call `{:tail, f, this, args}`, which the frame of the caller makes. A call
-  # of a name (which can be `eval`), a `super` call and an optional chain stay on the tree,
-  # and so do a comma expression and a logical operator.
+  # of a name (which can be `eval`), a `super` call and an optional chain stay on the tree.
+  # A comma expression runs its first operands and gives the tail of its last operand, and
+  # a logical operator gives its left value or the tail of its right operand, as in
+  # `tail_value/2`. (minified code has many of these: `return a && f(a)`,
+  # `return x = g(), h(x)`)
   defp tail({:call, callee, args, false} = e) do
     case target(callee) do
       {:ok, target} -> tail_call(target, list_code(args), callee)
@@ -2087,10 +2098,32 @@ defmodule Browser.JS.Compile do
 
   defp tail({:cond, c, a, b}), do: cbranch(c, tail(a), tail(b))
 
-  defp tail({:seq, _} = e), do: fallback_tail(e)
-  defp tail({:logical, _, _, _} = e), do: fallback_tail(e)
+  defp tail({:seq, es}), do: tail_seq(es)
+  defp tail({:logical, op, l, r}), do: tail_logical(op, l, r)
 
   defp tail(e), do: ret(opnd(e))
+
+  defp tail_seq(es) do
+    {init, [last]} = Enum.split(es, -1)
+    cs = Enum.map(init, &expr/1)
+    t = tail(last)
+
+    fn env ->
+      run_all(cs, env)
+      t.(env)
+    end
+  end
+
+  defp tail_logical(op, l, r) do
+    lo = opnd(l)
+    t = tail(r)
+
+    case op do
+      "&&" -> one(env, lo, lv, if(tru(lv), do: t.(env), else: {:ret, lv}))
+      "||" -> one(env, lo, lv, if(tru(lv), do: {:ret, lv}, else: t.(env)))
+      "??" -> one(env, lo, lv, if(lv == :undefined or lv == :null, do: t.(env), else: {:ret, lv}))
+    end
+  end
 
   # The completion `{:ret, value}`. A constant gives the same completion at each run, so
   # the completion is made once.

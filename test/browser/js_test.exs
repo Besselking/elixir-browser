@@ -2441,4 +2441,26 @@ defmodule Browser.JSTest do
     assert js(src) ==
              "2,5,2,,5,5 | 2,1,2, | 1,2,2 | 1,proto, | 1,9,9 | 7,7,1 | 0,1 | 6 | 3,a9 | undefined,1 | two | 4,2 || 1,7 | 1,1,1 | 2,2"
   end
+
+  # The compiled code gives the tail of the last operand of a comma expression and of the
+  # right operand of a logical operator. (only a strict function has tail sites)
+  test "a return of a comma expression or a logical operator gives the value of the tree" do
+    src = ~S"""
+    "use strict";
+    var out = [], log = [];
+    function g(x) { log.push(x); return 'g' + x }
+    function and(x) { return x && g(x) }
+    function or(x) { return x || g(x) }
+    function nc(x) { return x ?? g(x) }
+    function sq(x) { return log.push('a'), x = x + 1, g(x) }
+    function mix(x) { return x || (x = 1, g(x)) }
+    function deep(n) { return n > 0 ? deep(n - 1) && n : 'done' }
+    function d2(n) { return n === 0 || d2(n - 1) }
+    function d3(n) { return n > 0 && (log.length, d3(n - 1)) }
+    out.push(and(0), and(''), and(2), or(0), or(3), nc(null), nc(undefined), nc(0), nc(false), sq(1), mix(0), mix(5), deep(50), d2(3000), d3(3000));
+    out.join() + ' | ' + log.join()
+    """
+
+    assert js(src) == "0,,g2,g0,3,gnull,gundefined,0,false,g2,g1,5,50,true,false | 2,0,,,a,2,1"
+  end
 end
