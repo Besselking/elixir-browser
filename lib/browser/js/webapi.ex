@@ -451,10 +451,11 @@ defmodule Browser.JS.WebAPI do
     def("PerformanceObserver", function (cb) { this.observe = function () {}; this.disconnect = function () {}; this.takeRecords = function () { return []; }; });
     g.PerformanceObserver.supportedEntryTypes = [];
 
-    // ranges, the selection and execCommand are in priv/js/editing.js, loaded on first use
+    // ranges, the selection and execCommand are in priv/js/editing.js, loaded on first use in
+    // each realm (`__load_editing` runs it once for each document: its functions belong to the
+    // realm, see Browser.JS.Editing)
     var editing = (function () {
-      var loaded = false;
-      function load() { if (!loaded) { loaded = true; __load_editing(); } }
+      function load() { __load_editing(); }
       function lazy(obj, name, onGlobal) {
         Object.defineProperty(obj, name, { value: function () {
           load();
@@ -647,7 +648,7 @@ defmodule Browser.JS.WebAPI do
       return 4;
     });
     ["createRange", "execCommand", "queryCommandState", "queryCommandEnabled", "queryCommandValue", "queryCommandSupported", "queryCommandIndeterm", "getSelection"].forEach(function (n) { editing.lazy(DP, n, false); });
-    function Range() { editing.load(); return new g.Range(); }
+    function Range() { editing.load(); return new (curDoc().defaultView.Range)(); }
     function Selection() {}
     def("Range", Range); def("Selection", Selection);
     function defDoc(name, fn) { if (!(name in Object.getPrototypeOf(document))) Object.defineProperty(Object.getPrototypeOf(document), name, { get: fn, configurable: true }); }

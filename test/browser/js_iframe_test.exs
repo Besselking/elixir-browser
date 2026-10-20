@@ -706,4 +706,38 @@ defmodule Browser.JS.IframeTest do
                "g g 5 5 TypeError true undefined false 1 5"
            ]
   end
+
+  # The editing prelude (`Browser.JS.Editing`) runs in each realm that edits. A frame that
+  # edits and goes takes the functions of its prelude with it (`Browser.JS.Intrinsics`), so a
+  # later frame that edits gets the prelude again, for its own document. (Before, the first
+  # frame's prelude stayed loaded, its functions were restored away, and the stubs of the
+  # next frame called themselves until the stack was full.)
+  test "a frame that edits after another one went gets the editing functions of its own" do
+    {logs, errors} =
+      run(~S"""
+      const out = [];
+      const edit =
+        "<div id=e contenteditable>ab</div><script>" +
+        "var r = document.createRange(); r.selectNodeContents(document.getElementById('e'));" +
+        "getSelection().removeAllRanges(); getSelection().addRange(r);" +
+        "document.execCommand('bold');" +
+        "var n = new Range();" +
+        "parent.out.push(r.startContainer.ownerDocument === document, n.startContainer === document," +
+        " document.getElementById('e').innerHTML);<\/script>";
+      window.out = out;
+      const a = document.createElement("iframe");
+      a.srcdoc = edit;
+      a.onload = () => {
+        a.remove();
+        const b = document.createElement("iframe");
+        b.srcdoc = edit;
+        b.onload = () => console.log(out.join(" "));
+        document.body.appendChild(b);
+      };
+      document.body.appendChild(a);
+      """)
+
+    assert errors == []
+    assert logs == ["true true <b>ab</b> true true <b>ab</b>"]
+  end
 end

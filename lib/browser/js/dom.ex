@@ -855,6 +855,14 @@ defmodule Browser.JS.DOM do
   @doc "The document of the running realm."
   def current_doc, do: st().doc
 
+  @doc "The document of the running realm, or nil in a runtime with no document."
+  def current_doc_or_nil do
+    case Process.get(:dom) do
+      %{doc: d} -> d
+      _ -> nil
+    end
+  end
+
   @doc "The documents of every realm, the page's first."
   def realm_docs, do: [st().main | st().frames |> Map.values() |> Enum.sort()]
 
@@ -979,6 +987,11 @@ defmodule Browser.JS.DOM do
       _ ->
         :ok
     end
+
+    # (the functions of the editing prelude of the realm go back to their boot state, see
+    # `Browser.JS.Intrinsics`: the realm's document no longer has the prelude)
+    with %MapSet{} = loaded <- Process.get(:editing_loaded),
+         do: Process.put(:editing_loaded, MapSet.delete(loaded, doc))
 
     # All the host objects of the realm go: the window and the location, and also the history
     # and the storages. A wrapper is a root of the collector and holds a prototype of the

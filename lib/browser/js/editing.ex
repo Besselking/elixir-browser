@@ -25,10 +25,20 @@ defmodule Browser.JS.Editing do
     )
   end
 
-  @doc "Runs the editing prelude once in this runtime."
+  @doc """
+  Runs the editing prelude once in each realm of this runtime. The prelude belongs to the realm
+  it runs in: it keeps the realm's document, and the functions that it puts on the shared
+  prototypes (`Node.prototype.appendChild`, `document.execCommand`) are closures of that realm.
+  When a frame goes, these go back to their boot state (`Browser.JS.Intrinsics`), so the next
+  realm that edits runs the prelude again. The documents that have it are in
+  `:editing_loaded`.
+  """
   def load do
-    unless Process.get(:editing_loaded) do
-      Process.put(:editing_loaded, true)
+    doc = Browser.JS.DOM.current_doc_or_nil()
+    loaded = Process.get(:editing_loaded) || MapSet.new()
+
+    unless MapSet.member?(loaded, doc) do
+      Process.put(:editing_loaded, MapSet.put(loaded, doc))
 
       case program() do
         {:ok, ast} -> Interp.run_program(ast)
