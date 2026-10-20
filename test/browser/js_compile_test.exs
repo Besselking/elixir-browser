@@ -398,7 +398,30 @@ defmodule Browser.JS.CompileTest do
      ~S|async function af(){ var g = () => 1; await 0; var h = function(){}; let k; k = async () => 2; return [g.name, h.name, k.name, g(), await k()].join() } af().then(v => console.log(v))|},
     {"r17 fn step limit",
      ~S|function f(){ var g; for (var i = 0; i < 100000; i++) { g = () => i; var h = function(){ return g } } return g() } console.log(f())|,
-     max_steps: 500}
+     max_steps: 500},
+    # (r17) Object literals (design r16 4.9): the fast path with function values and
+    # methods (the name from the key, the home), and the other literals in source order:
+    # getters, setters, a spread, `__proto__`, computed keys, values that stay on the tree,
+    # keys that come two times, the order of the side effects, a value that throws.
+    {"r17 object methods",
+     ~S"function f(){ var base = {x: 'b', m(){ return 'base' }}; var p = {a: 1, m(){ return super.m() + this.a }, g(){ return this.a }, 'q-r'(){ return 2 }, 7(){ return 7 }}; Object.setPrototypeOf(p, base); var o = {x: 1, m(){ return super.m() + this.x }, n: 2, [Symbol.iterator](){ }, ['c' + 'd'](){ return 3 }}; Object.setPrototypeOf(o, base); var r = [p.m(), p.g(), p.m.name, p['q-r'].name, p[7].name, p.m.length, typeof p.m.prototype, String(p.g), Object.keys(p).join(), o.m(), o.m.name, o[Symbol.iterator].name, o.cd.name, o.cd(), Object.keys(o).join()]; try { new p.m() } catch (e) { r.push(e.constructor.name) } return r.join('|') } console.log(f())"},
+    {"r17 object fn values",
+     ~S"function f(k){ var s = Symbol('d'), s2 = Symbol(); var p = {a: function(){}, b: () => 2, c: 3, d: function named(){}}; var o = {f: function(){}, g: () => 1, h: function named(){}, c: class {}, *gen(){}, async am(){}, ag: async function(){}, [k]: function(){}, [k + 2]: () => 1, [s]: function(){}, [s2]: () => 2, [1 + 1]: function(){}, [k + 3]: class {}, x: 1}; return [p.a.name, p.b.name, p.d.name, p.b(), o.f.name, o.g.name, o.h.name, o.c.name, o.gen.name, o.am.name, o.ag.name, o[k].name, o[k + 2].name, o[s].name, o[s2].name, o[2].name, o[k + 3].name, Object.keys(o).join()].join() } console.log(f('k'))"},
+    {"r17 object accessors",
+     ~S"function f(k){ var log = []; var base = {get v(){ return 'bv' }}; var o = {a: 1, get g(){ return this.a + 1 }, set g(v){ this.a = v }, get [k](){ return super.v }, set [k + 'x'](v){ log.push(v) }, b: 2, get [Symbol('s')](){ return 1 }, set [Symbol()](v){}}; Object.setPrototypeOf(o, base); o.g = 5; o[k + 'x'] = 9; var d = Object.getOwnPropertyDescriptor(o, 'g'); var e = Object.getOwnPropertyDescriptor(o, k); var syms = Object.getOwnPropertySymbols(o); return [o.g, o[k], d.get.name, d.set.name, e.get.name, Object.getOwnPropertyDescriptor(o, k + 'x').set.name, Object.getOwnPropertyDescriptor(o, syms[0]).get.name, Object.getOwnPropertyDescriptor(o, syms[1]).set.name, Object.keys(o).join(), log.join(), typeof d.get.prototype, d.enumerable, d.configurable].join('|') } console.log(f('kk'))"},
+    {"r17 object spread proto order",
+     ~S"function f(){ var log = []; function t(x){ log.push(String(x)); return x } var p = {inh: 1}; var k = {toString(){ log.push('ks'); return 'kk' }}; var o = {a: t(1), ...t({s: 2, a: 3}), __proto__: t(p), [k]: t(4), ...t(null), ...t('xy'), b: t(5), a: t(6), m(){ return 1 }}; var q = {__proto__: null, z: 1}; var w = {__proto__: 5, y: function(){}}; var g = {get a(){ log.push('get'); return 7 }}; var c = {...g, ...[8, 9]}; return [JSON.stringify(o), Object.getPrototypeOf(o) === p, o.inh, Object.getPrototypeOf(q), Object.getPrototypeOf(w) === Object.prototype, w.y.name, JSON.stringify(c), log.join()].join('|') } console.log(f())"},
+    {"r17 object duplicates",
+     ~S"function f(){ var o = {a: 1, a: function(){}, get b(){ return 1 }, b: 2, c: 3, get c(){ return 4 }, m(){ }, m: 5, n: 6, n(){ return 6 }}; var p = {f: function(){}, g: 1, f: () => 2, h(){ return 1 }, h: 3}; var q = {g(){ return 1 }, x: 1, g(){ return 2 }}; var d = Object.getOwnPropertyDescriptor(o, 'c'); return [Object.keys(o).join(), o.a.name, o.b, typeof d.get, o.m, o.n.name, Object.keys(p).join(), p.f.name, p.f(), p.h, q.g(), Object.keys(q).join()].join('|') } console.log(f())"},
+    {"r17 object tree values",
+     ~S"function f(){ var o = {a: 3, m(){ return eval('this.a') }, get g(){ return eval('2') }, set g(v){ eval('this.a = v') }, n: function(){ return eval('1') }, [('k')]: function(){ return eval('4') }}; o.g = 5; return [o.m(), o.g, o.n(), o.k(), o.m.name, o.n.name, o.k.name, Object.getOwnPropertyDescriptor(o, 'g').get.name, Object.getOwnPropertyDescriptor(o, 'g').set.name].join() } console.log(f())"},
+    {"r17 object heap order",
+     ~S"function f(){ var r = []; for (var i = 0; i < 3; i++) { r.push({m(){ return i }, f: function(){}, x: {}}, {get g(){ return i }, y: [i]}, {a: () => i, b: {c: function(){}}}); var e = {}; r.push(e) } return r.length + ':' + r[0].m() + r[1].g + r[2].a() } console.log(f())"},
+    {"r17 object throws",
+     ~S"function f(){ var r = []; function g(){ throw new Error('v') } try { var o = {m(){ return 1 }, a: g(), b: 2} } catch (e) { r.push(e.message) } var z = {}; try { var p = {a: 1, [{toString(){ throw new Error('k') }}]: function(){}, b: 2} } catch (e) { r.push(e.message) } try { var q = {get x(){ return 1 }, y: g()} } catch (e) { r.push(e.message) } try { var w = {f: function(){}, ...g()} } catch (e) { r.push(e.message) } r.push(Object.keys({a: 1, ...{b: 2}}).join()); return r.join() } console.log(f())"},
+    {"r17 object step limit",
+     ~S|function f(){ var o; for (var i = 0; i < 100000; i++) { o = {m(){ return i }, f: () => i, get g(){ return i }, ...o} } return o } console.log(f())|,
+     max_steps: 400}
   ]
 
   # One snippet for each kind that the compiler handles, and one for each kind that falls

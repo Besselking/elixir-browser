@@ -61,8 +61,8 @@ defmodule Browser.JS.CompileCoverageTest do
 
   # The shells that stay on the tree (design r16 8.3): a statement with a block frame, a
   # call whose callee the tree reads by name, through `super` or through an optional chain,
-  # a private name, a literal with a spread or a method, a logical assignment, and the rare
-  # targets of an assignment.
+  # a private name, an array literal with a spread, a logical assignment, and the rare
+  # targets of an assignment. An object literal compiles (round 17).
   @allowed_shell MapSet.new(
                    [
                      {:switch, :framed},
@@ -77,7 +77,6 @@ defmodule Browser.JS.CompileCoverageTest do
                      {:call, :super_member},
                      {:member, :priv},
                      {:binary, :priv},
-                     :object,
                      :array
                    ] ++
                      for(
@@ -297,5 +296,20 @@ defmodule Browser.JS.CompileCoverageTest do
     assert {[], n} = tree_nodes(src)
     assert n > 1
     assert {[ev: :class], 1} = tree_nodes("function f() { var c = class {}; return c }")
+  end
+
+  test "an object literal compiles, with its functions, methods and accessors" do
+    # (r17, design r16 4.9) the fast path and the literal in source order; a class value
+    # and a generator method stay on the tree as values, not the literal around them
+    src =
+      "function f(o, k) { return [{a: 1, f: function () {}, g: () => 2, m() { return this.x }}, " <>
+        "{a: o, ...o, __proto__: o, [k]: function () {}, [k + 1]() {}, get b() { return 1 }, " <>
+        "set b(v) {}, get [k + 2]() { return 2 }, m() {}}] }"
+
+    assert {[], n} = tree_nodes(src)
+    assert n > 1
+
+    assert {nodes, _} = tree_nodes("function f() { return {c: class {}, *g() {}, k: 1} }")
+    assert Enum.sort(nodes) == [ev: :class, ev: :gen]
   end
 end

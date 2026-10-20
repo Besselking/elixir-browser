@@ -9669,7 +9669,11 @@ defmodule Browser.JS.Interp do
     [v | eval_list(rest, env)]
   end
 
-  defp spread_into(obj, src) do
+  # The spread `...src` in an object literal: the own enumerable properties of `src` as data
+  # properties of `obj`. A value that is not an object gives nothing.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def spread_into(obj, src) do
     unless nullish?(src) or not match?({:obj, _}, src),
       do:
         for(
@@ -9789,10 +9793,12 @@ defmodule Browser.JS.Interp do
   def ev_named(e, env, _), do: ev(e, env)
 
   # the name a function gets from the property key it is defined under
-  defp key_fn_name(k) when is_binary(k), do: k
-  defp key_fn_name({:symbol, _, desc}) when is_binary(desc), do: "[" <> desc <> "]"
-  defp key_fn_name({:symbol, _, _}), do: ""
-  defp key_fn_name(_), do: nil
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def key_fn_name(k) when is_binary(k), do: k
+  def key_fn_name({:symbol, _, desc}) when is_binary(desc), do: "[" <> desc <> "]"
+  def key_fn_name({:symbol, _, _}), do: ""
+  def key_fn_name(_), do: nil
 
   @doc false
   # names a class method or accessor from its key (`kind` is :method, :get or :set)
@@ -9809,7 +9815,10 @@ defmodule Browser.JS.Interp do
   defp method_node?({k, inner}) when k in [:gen, :async], do: method_node?(inner)
   defp method_node?(_), do: false
 
-  defp accessor_name({:obj, id}, name) do
+  # Gives the name `name` ("get k" or "set k") to a getter or a setter.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def accessor_name({:obj, id}, name) do
     case deref(id) do
       %{fun: {:closure, %{name: {:method, _}} = c}} = o ->
         store(id, %{o | fun: {:closure, %{c | name: {:method, name}}}})
@@ -9819,9 +9828,12 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp name_fn(f, nil), do: f
+  # Gives the name `name` to the function `f` when `f` has no name of its own.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def name_fn(f, nil), do: f
 
-  defp name_fn({:obj, id} = f, name) do
+  def name_fn({:obj, id} = f, name) do
     case deref(id) do
       %{fun: {:closure, %{name: {:method, n}} = c}} = o when not is_binary(n) ->
         store(id, %{o | fun: {:closure, %{c | name: {:method, name}}}})
