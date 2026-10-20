@@ -20,7 +20,7 @@ defmodule Browser.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :wx, :inets, :ssl, :public_key],
+      extra_applications: [:logger, :wx, :inets, :ssl, :public_key, :crypto],
       mod: {Browser.Application, []}
     ]
   end

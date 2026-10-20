@@ -77,7 +77,8 @@ defmodule Browser.WebSocket.Client do
         cookie: Cookies.header(http_url, cookie_opts)
       )
 
-    with {:ok, tcp} <- tcp(uri, port),
+    with :ok <- online(),
+         {:ok, tcp} <- tcp(uri, port),
          {:ok, sock} <- tls(tcp, uri),
          :ok <- send_data(sock, request),
          {:ok, status, headers, rest} <- read_head(sock, <<>>),
@@ -88,6 +89,13 @@ defmodule Browser.WebSocket.Client do
       {:error, _} = error ->
         error
     end
+  end
+
+  # a page archive is replayed without a network
+  defp online do
+    if Browser.Archive.mode() == :replay,
+      do: {:error, "no network while a page archive is replayed"},
+      else: :ok
   end
 
   defp cross_site?(nil, _url), do: false

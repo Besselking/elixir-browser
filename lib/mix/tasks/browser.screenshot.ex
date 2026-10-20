@@ -6,7 +6,7 @@ defmodule Mix.Tasks.Browser.Screenshot do
   into a PNG with headless Chromium when one is found (`CHROME` names the binary).
 
       mix browser.screenshot URL OUT.png [--width 1000] [--height 800] [--wx] [--js]
-          [--window 600 [--scroll 0]] [--box-scroll 0]
+          [--window 600 [--scroll 0]] [--box-scroll 0] [--archive FILE]
 
   With `--wx` the page is painted by the same code as the window, into a bitmap: its fonts,
   pictures and shadows. That needs an Erlang with wx and a display (`xvfb-run -a mix
@@ -18,6 +18,9 @@ defmodule Mix.Tasks.Browser.Screenshot do
   With `--wx` the scrollbars are drawn too. `--window 600` shows only a window of that height,
   `--scroll` px down the page (as the browser would, with the page's scrollbars), and
   `--box-scroll` scrolls every box that scrolls its content by that many px.
+
+  With `--archive FILE` the page loads from a page archive (see `mix browser.archive`) and the
+  network is not used.
 
   The window is not needed, so this works in CI and in cloud sessions. `--height` is the
   top part of the page to keep (default: all of it, at most 6000 px). The SVG is kept next
@@ -43,7 +46,8 @@ defmodule Mix.Tasks.Browser.Screenshot do
           js: :boolean,
           window: :integer,
           scroll: :integer,
-          box_scroll: :integer
+          box_scroll: :integer,
+          archive: :string
         ]
       )
 
@@ -51,6 +55,7 @@ defmodule Mix.Tasks.Browser.Screenshot do
 
     Application.put_env(:browser, :gui, false)
     Mix.Task.run("app.start")
+    if opts[:archive], do: Browser.Archive.replay!(opts[:archive])
 
     width = opts[:width] || 1000
 

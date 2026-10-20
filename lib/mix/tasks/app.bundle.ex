@@ -191,6 +191,12 @@ defmodule Mix.Tasks.App.Bundle do
       <key>CFBundleShortVersionString</key><string>#{version}</string>
       <key>NSHighResolutionCapable</key><true/>
       <key>LSMinimumSystemVersion</key><string>11.0</string>
+      <key>CFBundleDocumentTypes</key><array><dict>
+        <key>CFBundleTypeName</key><string>Page Archive</string>
+        <key>CFBundleTypeExtensions</key><array><string>ebarchive</string></array>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+        <key>LSHandlerRank</key><string>Owner</string>
+      </dict></array>
     </dict></plist>
     """
   end

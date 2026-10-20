@@ -12,6 +12,7 @@ defmodule Browser.Session do
   import Browser.UI, only: [wx: 1, wxMouse: 1, wxCommand: 1, wxSize: 1, wxList: 1]
 
   alias Browser.{
+    Archive,
     Download,
     Editing,
     Fetch,
@@ -31,6 +32,7 @@ defmodule Browser.Session do
     Visits
   }
 
+  @recording_status "Recording a page archive… uncheck Develop > Record Page Archive to save"
   @blink_ms 530
   # pixels per line of wheel scrolling (3 lines per 120-unit notch = the old 120px per notch)
   # how long the window must stay the same size before the page is laid out for it
@@ -46,6 +48,8 @@ defmodule Browser.Session do
   def init(_) do
     Process.put(:layout_serve, &__MODULE__.serve_layout/1)
     ui = UI.build()
+    # a file that the system opens with this app (Finder) arrives as `{:open_file, path}`
+    :wx.subscribe_events()
     cache = UI.new_measure_cache()
     # the same widths for a layout running in the background, which needs a DC of its own
     measure_bg = UI.measurer(ui, cache)
@@ -184,6 +188,22 @@ defmodule Browser.Session do
   # -- loading -------------------------------------------------------------
 
   defp load(state, url, mode, fetch_opts \\ []) do
+    case Archive.open(url) do
+      {:ok, start} ->
+        UI.set_status(state.ui, "Replaying #{Path.basename(URI.decode(url))}: no network")
+        UI.sync_archive_menu(state.ui)
+        load(state, start, mode, fetch_opts)
+
+      {:error, why} ->
+        UI.set_status(state.ui, "Cannot open the archive: #{why}")
+        state
+
+      :none ->
+        load_url(state, url, mode, fetch_opts)
+    end
+  end
+
+  defp load_url(state, url, mode, fetch_opts) do
     me = self()
     nonce = state.nonce + 1
     UI.set_status(state.ui, "Loading #{url}…")
@@ -258,7 +278,11 @@ defmodule Browser.Session do
 
     state = %{state | fresh_tab: false}
     UI.set_title(state.ui, (page.title || page.url) <> " — Elixir Browser")
-    UI.set_status(state.ui, "Done")
+
+    UI.set_status(
+      state.ui,
+      if(Archive.mode() == :record, do: @recording_status, else: "Done")
+    )
 
     state =
       state
@@ -453,6 +477,30 @@ defmodule Browser.Session do
 
   def handle_info(wx(id: 5220, event: wxCommand(type: :command_button_clicked)), state),
     do: {:noreply, clear_net(state)}
+
+  # Finder opens a page archive with this app
+  def handle_info({:open_file, file}, state) do
+    path = to_string(file)
+
+    if Path.extname(path) == Archive.extension(),
+      do: {:noreply, load(state, "file://" <> URI.encode(path), :push)},
+      else: {:noreply, state}
+  end
+
+  # Develop > Stop Replaying Archive
+  def handle_info(wx(id: 5203, event: wxCommand(type: :command_menu_selected)), state) do
+    if Archive.mode() == :replay do
+      Archive.stop()
+      UI.set_status(state.ui, "The network is used again")
+      UI.sync_archive_menu(state.ui)
+    end
+
+    {:noreply, state}
+  end
+
+  # Develop > Record Page Archive: on starts recording and loads the page again, off saves
+  def handle_info(wx(id: 5202, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, toggle_archive(state)}
 
   def handle_info(wx(id: 5221, event: wxCommand(type: :command_text_updated)), state),
     do: {:noreply, refilter_net(state)}
@@ -3518,6 +3566,45 @@ defmodule Browser.Session do
   # -- network panel -----------------------------------------------------------------
 
   # the window is made on first use; `rows` are the numbers of the entries in the list, top down
+  defp toggle_archive(state) do
+    bar = :wxFrame.getMenuBar(state.ui.frame)
+
+    cond do
+      Archive.mode() == :replay ->
+        :wxMenuBar.check(bar, 5202, false)
+        UI.set_status(state.ui, "A page archive is replayed (BROWSER_ARCHIVE): nothing to record")
+        state
+
+      :wxMenuBar.isChecked(bar, 5202) ->
+        Archive.record_start()
+
+        UI.set_status(
+          state.ui,
+          @recording_status
+        )
+
+        # the pictures of the page are kept between loads: fetch them again, to record them
+        state = %{state | images: %{}}
+        if state.url, do: load(state, state.url, :history, cache: :reload), else: state
+
+      true ->
+        me = self()
+        dir = Download.dir()
+
+        Task.start(fn ->
+          result =
+            case Archive.save_recording(dir) do
+              {:ok, path, count} -> {:ok, "#{path} (#{count} responses)"}
+              {:error, why} -> {:error, why}
+            end
+
+          send(me, {:downloaded, result})
+        end)
+
+        state
+    end
+  end
+
   defp open_net(%{net: nil} = state) do
     win = Browser.NetworkWindow.new(state.ui.frame)
     open_net(%{state | net: %{win: win, seq: 0, filter: "", rows: [], ticking: false}})
