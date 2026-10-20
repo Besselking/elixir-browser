@@ -215,6 +215,9 @@ defmodule Browser.JS.GC do
   # functions, which are roots anyway, and shape ids and positions, which are not heap
   # ids, see `Browser.JS.Interp`)
   defp classify_key(:js_arr_iter_pos, _, acc), do: acc
+  # (the chains of the misses of the host objects hold ids of prototypes and shape ids,
+  # see `Browser.JS.Interp`; a chain must not keep a prototype alive)
+  defp classify_key(:js_pmiss, _, acc), do: acc
   # (the parser's source table and the lexer's table hold the source, token offsets and
   # tokens: an offset that equals the id of a dead object must not keep it alive)
   defp classify_key(:js_srctab, _, acc), do: acc
@@ -330,6 +333,7 @@ defmodule Browser.JS.GC do
           {:js_shape_n, _}, roots -> roots
           {:js_shape_since, _}, roots -> roots
           {:js_arr_iter_pos, _}, roots -> roots
+          {:js_pmiss, _}, roots -> roots
           # (the parser's source table holds token offsets; an offset that equals the id of
           # an unreachable closure would make that garbage look live)
           {:js_srctab, _}, roots -> roots

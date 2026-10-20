@@ -2303,4 +2303,39 @@ defmodule Browser.JSTest do
     # (inside a function that is not an arrow, `arguments` is its own)
     assert js("class C { static { var f = function(){ var [a = arguments] = [] } } } 1") == 1.0
   end
+
+  # A read of a key that a host object and its prototypes do not have keeps the chain in
+  # `:js_pmiss` (`Interp.host_lookup/3`). Each change of the chain must show.
+  test "a missing key of a host object shows each later change of its prototype chain" do
+    src = ~S"""
+    var ta = new Int32Array(2), k = 'x' + 1, out = [];
+    function rd() { return String(ta[k]) }
+    out.push(rd(), rd());
+    Int32Array.prototype[k] = 1; out.push(rd());
+    delete Int32Array.prototype[k]; out.push(rd(), rd());
+    var tp = Object.getPrototypeOf(Int32Array.prototype);
+    tp[k] = 2; out.push(rd()); delete tp[k]; out.push(rd());
+    Object.prototype[k] = 3; out.push(rd()); delete Object.prototype[k]; out.push(rd());
+    Object.defineProperty(Object.prototype, k, {get: function () { return 'g' }, configurable: true});
+    out.push(rd()); delete Object.prototype[k]; out.push(rd());
+    var s = Symbol('s'); out.push(String(ta[s])); tp[s] = 's'; out.push(ta[s]); delete tp[s];
+    ta[k] = 'own'; out.push(rd()); delete ta[k]; out.push(rd());
+    tp[k] = undefined; out.push(rd(), rd()); tp[k] = 4; out.push(rd()); delete tp[k];
+    var mid = Object.create(Int32Array.prototype);
+    Object.setPrototypeOf(ta, mid); out.push(rd(), rd());
+    mid[k] = 5; out.push(rd()); delete mid[k]; out.push(rd());
+    Object.setPrototypeOf(mid, {[k]: 6}); out.push(rd());
+    var end = Object.create(null); Object.setPrototypeOf(ta, end); out.push(rd(), rd());
+    Object.setPrototypeOf(end, {[k]: 7}); out.push(rd());
+    var n = 0, px = new Proxy({}, {get: function () { return n++ ? 'p' : undefined }});
+    Object.setPrototypeOf(ta, px); out.push(rd(), rd());
+    Object.setPrototypeOf(ta, Int32Array.prototype);
+    for (var i = 0; i < 600; i++) ta['y' + i];
+    out.push(rd()); Int32Array.prototype[k] = 8; out.push(rd());
+    out.join()
+    """
+
+    assert js(src) ==
+             "undefined,undefined,1,undefined,undefined,2,undefined,3,undefined,g,undefined,undefined,s,own,undefined,undefined,undefined,4,undefined,undefined,5,undefined,6,undefined,undefined,7,undefined,p,undefined,8"
+  end
 end

@@ -2428,4 +2428,25 @@ defmodule Browser.JS.DOMTest do
       assert Runtime.dispatch(pid, {:control, 0}, "click").outbox == [open_tab: "http://t.test/x"]
     end
   end
+
+  # A read of a key that an element and its prototypes do not have keeps the chain of the
+  # prototypes (`Interp.host_lookup/3`). Each later change of a prototype must show.
+  test "a missing key of an element shows each later change of its prototype chain" do
+    src = ~S"""
+    var el = document.getElementById('a'), k = 'jq' + 1, out = [];
+    function rd() { return String(el[k]) }
+    out.push(rd(), rd());
+    var ps = [Object.getPrototypeOf(el), HTMLElement.prototype, Element.prototype, Node.prototype, EventTarget.prototype, Object.prototype];
+    for (var i = 0; i < ps.length; i++) { ps[i][k] = i; out.push(rd()); delete ps[i][k]; out.push(rd()); }
+    el[k] = 'own'; out.push(rd()); delete el[k]; out.push(rd());
+    var q = document.createElement('p'); out.push(String(q[k])); Node.prototype[k] = 'n'; out.push(String(q[k]), rd()); delete Node.prototype[k];
+    var arr = []; Object.setPrototypeOf(el, arr); out.push(String(el[0]), String(el[0])); arr.push(9); out.push(String(el[0]));
+    Object.setPrototypeOf(el, HTMLParagraphElement.prototype); out.push(rd(), el.nodeType, el.id);
+    console.log(out.join());
+    """
+
+    assert logs(run(src)) == [
+             "undefined,undefined,0,undefined,1,undefined,2,undefined,3,undefined,4,undefined,5,undefined,own,undefined,undefined,n,n,undefined,undefined,9,undefined,1,a"
+           ]
+  end
 end

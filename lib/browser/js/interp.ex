@@ -177,6 +177,8 @@ defmodule Browser.JS.Interp do
     # (the positions of the keys of the array iterators name the prototypes of an earlier
     # heap, see `array_record_pristine?/1`)
     :erlang.erase(:js_arr_iter_pos)
+    # (the chains of the misses of the host objects, see `host_lookup/3`)
+    :erlang.erase(:js_pmiss)
 
     # The switch of the fast records (`Browser.JS.Shape`): the application setting
     # `:js_shapes` set to `false` (`JS_SHAPES=0`, or `mix js.test262 --shapes off`) turns
@@ -2007,7 +2009,7 @@ defmodule Browser.JS.Interp do
         else
           case mod.host_get(data, key, {:obj, id}) do
             {:ok, v} -> v
-            :miss -> lookup(o, key, {:obj, id})
+            :miss -> host_lookup(o, key, {:obj, id})
           end
         end
 
@@ -2092,6 +2094,112 @@ defmodule Browser.JS.Interp do
         :undefined
     end
   end
+
+  # ── the misses of host objects ─────────────────────────────
+  # A read of a key that a host object does not have walks the prototype chain to its end.
+  # For a node of the DOM that is five records (the prototype of the tag, `HTMLElement`,
+  # `Node`, `EventTarget`, `Object`), and scripts do such reads very often: jQuery reads
+  # `elem[jQuery.expando]` of each element of a list when it cleans its data.
+  #
+  # The process key `:js_pmiss` holds a map of `{pid, key}` to the chain from the prototype
+  # `{:obj, pid}`: the list of `{id, sid}` of each record of the chain. A list is kept only
+  # when each record of the chain was a fast record that is not an array and did not hold
+  # `key`. A hit needs each prototype link to be the id of the list, up to the end of the
+  # chain, and each record there to have the shape `sid` still. This is exact for the same
+  # reasons as a cell of a prototype (see "The inline caches" in `Browser.JS.Shape`): a
+  # shape is immutable and a `sid` is never given two times in a process, so the record
+  # does not hold the key; a new key or a `delete` gives a new shape, and
+  # `Object.setPrototypeOf` changes a link. The shape of an array comes from the root of
+  # the arrays, so a record with the `sid` is not an array, which reads `length` and its
+  # elements in its own way. A proxy and a host object are not fast, so they never match.
+  # A freed id gives `:undefined`, which does not match, and a record of a new heap with
+  # the same id and `sid` holds the same keys. For such a record `lookup/3` reads only the
+  # own keys, so the read is `undefined` with no call. The own keys of the host object
+  # itself are read each time. The map holds at most `@pmiss_max` lists; the next list
+  # then starts a new map. The key is not a root of the collector (`Browser.JS.GC`): a
+  # list must not keep a prototype alive.
+  @pmiss_max 512
+
+  # The longest chain of a list of `:js_pmiss`.
+  @pmiss_depth 8
+
+  # `lookup/3` of the host object `o` after its `host_get` missed. A key that the chain
+  # holds costs only the search of the map more than `lookup/3`: the walk of a new list
+  # comes only after a read that gave `undefined`.
+  defp host_lookup(o, key, receiver) do
+    case :erlang.map_get(:proto, o) do
+      {:obj, pid} = link when not Obj.has_own?(o, key) ->
+        case :erlang.get(:js_pmiss) do
+          %{{^pid, ^key} => chain} ->
+            if pmiss_same?(link, chain),
+              do: :undefined,
+              else: pmiss_after(lookup(o, key, receiver), link, pid, key)
+
+          _ ->
+            pmiss_after(lookup(o, key, receiver), link, pid, key)
+        end
+
+      _ ->
+        lookup(o, key, receiver)
+    end
+  end
+
+  # The value `v` of a read; when it is `undefined`, a walk of the chain from `link` can
+  # give a new list for `{pid, key}` (`pmiss_learn/3`).
+  defp pmiss_after(:undefined, link, pid, key) do
+    pmiss_learn(link, pid, key)
+    :undefined
+  end
+
+  defp pmiss_after(v, _link, _pid, _key), do: v
+
+  defp pmiss_same?({:obj, pid}, [{pid2, sid} | rest]) when pid == pid2 do
+    case :erlang.get(pid) do
+      Obj.fast_record(^sid, _) = p -> pmiss_same?(:erlang.map_get(:proto, p), rest)
+      _ -> false
+    end
+  end
+
+  defp pmiss_same?(link, []), do: not is_tuple(link)
+  defp pmiss_same?(_link, _chain), do: false
+
+  # A walk of the chain from `link`: a new list for `{pid, key}` when the chain gives a list
+  # (`pmiss_chain/3`).
+  defp pmiss_learn(link, pid, key) do
+    case pmiss_chain(link, key, 0) do
+      nil ->
+        :ok
+
+      chain ->
+        m =
+          case :erlang.get(:js_pmiss) do
+            m when is_map(m) and map_size(m) < @pmiss_max -> m
+            _ -> %{}
+          end
+
+        :erlang.put(:js_pmiss, Map.put(m, {pid, key}, chain))
+        :ok
+    end
+  end
+
+  # The list of `{id, sid}` of the chain from `link` when each record there is a fast
+  # record that is not an array and does not hold `key`, or `nil`.
+  defp pmiss_chain({:obj, pid}, key, depth) when depth < @pmiss_depth do
+    case :erlang.get(pid) do
+      Obj.fast_record(sid, _) = p
+      when not Obj.has_own?(p, key) and :erlang.map_get(:class, p) != :array ->
+        case pmiss_chain(:erlang.map_get(:proto, p), key, depth + 1) do
+          nil -> nil
+          rest -> [{pid, sid} | rest]
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp pmiss_chain({:obj, _}, _key, _depth), do: nil
+  defp pmiss_chain(link, _key, _depth), do: if(is_tuple(link), do: nil, else: [])
 
   # spec lengths of the built-in functions, by name (a handful of names are shared
   # between objects with different arities; the common one wins)
