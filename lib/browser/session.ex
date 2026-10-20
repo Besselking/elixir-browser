@@ -32,6 +32,7 @@ defmodule Browser.Session do
     Visits
   }
 
+  @recording_status "Recording a page archive… uncheck Develop > Record Page Archive to save"
   @blink_ms 530
   # pixels per line of wheel scrolling (3 lines per 120-unit notch = the old 120px per notch)
   # how long the window must stay the same size before the page is laid out for it
@@ -259,7 +260,11 @@ defmodule Browser.Session do
 
     state = %{state | fresh_tab: false}
     UI.set_title(state.ui, (page.title || page.url) <> " — Elixir Browser")
-    UI.set_status(state.ui, "Done")
+
+    UI.set_status(
+      state.ui,
+      if(Archive.mode() == :record, do: @recording_status, else: "Done")
+    )
 
     state =
       state
@@ -3537,7 +3542,7 @@ defmodule Browser.Session do
 
         UI.set_status(
           state.ui,
-          "Recording a page archive… uncheck Develop > Record Page Archive to save"
+          @recording_status
         )
 
         if state.url, do: load(state, state.url, :history, cache: :reload), else: state
