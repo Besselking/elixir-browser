@@ -4384,6 +4384,11 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  @doc false
+  # `%Array%`, the constructor of the arrays of the realm, also when a script changed
+  # `Array.prototype.constructor` (`Browser.JS.Builtins` keeps it in `:js_array_species`).
+  def array_intrinsic, do: :erlang.element(1, :erlang.get(:js_array_species))
+
   # `species_record_plain?/1` with a search of the two keys. When the result is true and
   # the two records are fast, it keeps the positions for the next test.
   defp species_search?(o) do

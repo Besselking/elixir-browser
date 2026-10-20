@@ -2362,6 +2362,7 @@ defmodule Browser.JSTest do
     Object.defineProperty(Array, Symbol.species, desc); out.push(t());
     delete Array.prototype.constructor; out.push(t());
     Array.prototype.z1 = 1; Array.prototype.constructor = Array; delete Array.prototype.z1; out.push(t());
+    Array.prototype.constructor = B; out.push(t()); Array.prototype.constructor = Array; out.push(t());
     var c = [1, 2]; Object.setPrototypeOf(c, B.prototype); out.push(kind(c.map(function (x) { return x })));
     var log = [], pa = new Proxy([1], {get: function (t, k, r) { if (k === 'constructor') log.push('c'); return Reflect.get(t, k, r) }});
     Array.prototype.map.call(pa, function (x) { return x }); Array.prototype.slice.call(pa); [0].concat.call(pa); out.push(log.join(''));
@@ -2370,7 +2371,7 @@ defmodule Browser.JSTest do
     """
 
     assert js(src) ==
-             "B AAAAA MMMMM AAAAA BBB BBBBB AAAAA MMMMM AAAAA AAAAA AAAAA B ccc B"
+             "B AAAAA MMMMM AAAAA BBB BBBBB AAAAA MMMMM AAAAA AAAAA AAAAA BBBBB AAAAA B ccc B"
   end
 
   # `concat` of plain dense arrays joins their lists (`ArrayGeneric.concat/2`).

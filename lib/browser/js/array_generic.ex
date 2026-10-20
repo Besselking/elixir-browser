@@ -147,7 +147,7 @@ defmodule Browser.JS.ArrayGeneric do
         end
 
       cond do
-        c == :undefined or c == Interp.get(proto(:array), "constructor") ->
+        c == :undefined or c == Interp.array_intrinsic() ->
           array_create(n)
 
         not function?(c) ->

@@ -527,7 +527,7 @@ defmodule Browser.JS.Builtins do
         end
 
       cond do
-        c == :undefined or c == Interp.get(proto(:array), "constructor") ->
+        c == :undefined or c == Interp.array_intrinsic() ->
           nil
 
         not function?(c) ->
