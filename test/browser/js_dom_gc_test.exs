@@ -737,6 +737,31 @@ defmodule Browser.JS.DOMGCTest do
     end)
   end
 
+  # The editing prelude of a frame puts its function on `__ed.action`, which all the realms
+  # share. When the frame goes, it is given back, and the page of the frame is freed.
+  test "a frame that edits and goes is freed" do
+    page(fn ->
+      base = Interp.heap_size()
+
+      js(~S"""
+      var f = document.createElement('iframe');
+      f.srcdoc = '<p id=e contenteditable>ab</p><script>' +
+        'var big = []; for (var i = 0; i < 5000; i++) big.push({ i: i });' +
+        'document.createRange(); getSelection();' +
+        '<\/script>';
+      document.body.appendChild(f); 0
+      """)
+
+      timers()
+      GC.collect()
+      assert Interp.heap_size() > base + 5000
+
+      js("f.remove(); f = null; 0")
+      GC.collect()
+      assert Interp.heap_size() < base + 100
+    end)
+  end
+
   # `querySelector` and `querySelectorAll` give nothing at once for a tag that no element has
   # (`DOM.tag_absent?/2`). The tags of the state must then have the tag of each element in the
   # node table, after each way that makes elements: the parser, `createElement`, `innerHTML`

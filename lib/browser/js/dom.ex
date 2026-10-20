@@ -5868,6 +5868,10 @@ defmodule Browser.JS.DOM do
 
   defp ed_object do
     new_object([
+      # (`action` is the editing prelude's, see `ed_call/2`. It is there at boot, so that a
+      # frame that ran the prelude and went gives it back, see `Browser.JS.Intrinsics`: the
+      # function of the frame holds the frame's whole page)
+      {"action", :undefined},
       {"nid", native("nid", fn _this, args -> float(ensure_nid(nid_of(arg(args, 0)))) end)},
       {"node",
        native("node", fn _this, args ->
