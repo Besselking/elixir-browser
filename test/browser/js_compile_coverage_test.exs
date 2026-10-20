@@ -88,8 +88,6 @@ defmodule Browser.JS.CompileCoverageTest do
                      ) ++
                      [
                        :try,
-                       :forin,
-                       :forof,
                        :dowhile,
                        :var,
                        :destructure,
@@ -130,7 +128,10 @@ defmodule Browser.JS.CompileCoverageTest do
     "function f() { return new.target }",
     # (r16) the statement kinds that compiled in round 16, and their framed twins
     "function f(x) { switch (x) { case 'a': let y = 1; return y; case g(x): function h() {} return h } }",
-    "function f(x) { switch (x) { case 1: let y = x; return () => y; default: return 0 } }"
+    "function f(x) { switch (x) { case 1: let y = x; return () => y; default: return 0 } }",
+    "function f(o, a) { var k, m = {}; for (k in o) {} for (var j in o) {} for (const c in o) {} for (let [p] in o) {} for (m.p in o) {} return k + j }",
+    "function f(a) { for (const x of a) {} for (var y of a) {} for (let z of a) { if (z) break } for (a of a) {} for (const [p, q = 1] of a) {} return y }",
+    "function f(a) { for (const x of a) { a.push(() => x) } for (let k in a) { a.push(() => k) } return a }"
   ]
 
   # The programs of bench/js_runtime.exs. The script binds its program lists to variables,

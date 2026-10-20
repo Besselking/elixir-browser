@@ -55,7 +55,7 @@ defmodule Browser.JS.Compile do
     * property reads, calls, `new`, array literals and object literals;
     * assignments, compound assignments, `++` and `--` to a slot or to a property;
     * the statements `expr`, `return`, `if`, `block`, `var`, `let`, `const`, `for`,
-      `while`, `break`, `continue`, `throw`, `switch` and labels.
+      `while`, `break`, `continue`, `throw`, `switch`, `for-in`, `for-of` and labels.
 
   A parent reads a constant operand inline. It also reads a slot of its own frame inline.
   Thus these operands need no closure call. A binary operator and a test have one closure
@@ -94,8 +94,8 @@ defmodule Browser.JS.Compile do
 
   These nodes are shells:
 
-    * `try`, `for-in`, `for-of` and `do-while`;
-    * a block, a `for` or a `switch` that makes a block frame;
+    * `try` and `do-while`;
+    * a block, a `for`, a `for-in`, a `for-of` or a `switch` that makes a block frame;
     * a declaration with a pattern;
     * a literal with a spread or a method;
     * a call with a callee that the tree reads by name;
@@ -1913,6 +1913,12 @@ defmodule Browser.JS.Compile do
     end
   end
 
+  # (a for-in or a for-of whose head names a closure captures makes a frame for each item,
+  # which stays on the tree)
+  defp stmt_node({kind, decl, pat, obj, body, sc}, labels)
+       when kind in [:forin, :forof] and frameless(sc),
+       do: for_each(kind, opnd(obj), head(decl, pat), stmt(body, []), tdz_scope(sc), labels)
+
   # (a switch ignores its labels: a `break` with the label of the switch goes to the
   # labeled statement around it)
   defp stmt_node({:switch, disc, cases, sc}, _labels) when frameless(sc),
@@ -2220,6 +2226,201 @@ defmodule Browser.JS.Compile do
     end
   else
     defp switch_check(_consts, _v, _default, _i), do: :ok
+  end
+
+  # ── for-in and for-of ──────────────────────────────────────
+
+  # A frameless for-in or for-of, as `exec_for_each_frame/3` and `proto_loop/4` in `Interp`
+  # run it: the TDZ reset of the names of the head, the object, the source of the items,
+  # then for each item a step, the TDZ reset, the write of the item to the head, and the
+  # body. The completion of the body goes to the loop as in `for_loop/5`. A for-in skips a
+  # key that was deleted before its turn, with no step. A for-of over an array that the
+  # loop can read by index (`Interp.for_of_start/1`) reads the record at each step, so the
+  # loop sees a body that changes the array. A for-of over the iterator protocol writes
+  # the item and runs the body under a `try`, so that every way out closes the iterator.
+  #
+  # (a `return` in the body is `:plain` from the resolver, so the body gives no pending
+  # call that the loop must run before it closes the iterator)
+  defp for_each(:forin, oo, wc, bc, sc, labels) do
+    one(
+      env,
+      oo,
+      ov,
+      (
+        if sc, do: Interp.reset_tdz(env, sc)
+        target = Interp.for_in_object(ov)
+        keys = if Interp.nullish?(target), do: [], else: Interp.for_in_keys(target)
+        forin_loop(keys, target, wc, bc, sc, env, labels)
+      )
+    )
+  end
+
+  defp for_each(:forof, oo, wc, bc, sc, labels) do
+    one(
+      env,
+      oo,
+      ov,
+      (
+        if sc, do: Interp.reset_tdz(env, sc)
+
+        case Interp.for_of_start(ov) do
+          {:array, id} -> forof_array(id, 0, wc, bc, sc, env, labels)
+          {:proto, it, next} -> forof_proto(it, next, wc, bc, sc, env, labels)
+          {:list, items} -> forof_list(items, wc, bc, sc, env, labels)
+        end
+      )
+    )
+  end
+
+  # The scope of a head whose names go back to their dead zone at each round, or `nil` when
+  # the head has no such name.
+  defp tdz_scope(%{tdz: [_ | _]} = sc), do: sc
+  defp tdz_scope(_sc), do: nil
+
+  # The write of an item to the head of a for-in or a for-of, as `bind/4` writes it with
+  # the mode of the head (`:assign` when there is no declaration): an assignment to a
+  # slot tests the dead zone, a declaration of a slot writes it, and every other pattern
+  # goes to `Interp.bind_pattern/4`.
+  defp head(nil, {:slot, d, i, name}), do: {:assign, d, i, name}
+  defp head(_decl, {:slot, d, i, name}), do: {:decl, d, i, name}
+  defp head(decl, pat), do: {:bind, pat, decl || :assign}
+
+  defmacrop write_head(wc, v, env) do
+    quote do
+      env = unquote(env)
+      v = unquote(v)
+
+      case unquote(wc) do
+        {:assign, wd, wi, wn} -> Interp.assign_inline(up(env, wd), wi, wn, v)
+        {:decl, wd, wi, wn} -> put_decl(up(env, wd), wi, wn, v)
+        {:bind, wp, wm} -> Interp.bind_pattern(wp, v, env, wm)
+      end
+    end
+  end
+
+  # One round of a for-in or a for-of after its step: the TDZ reset, the write of the item
+  # and the body. It gives the completion of the body.
+  defmacrop round(wc, bc, sc, item, env) do
+    quote do
+      env = unquote(env)
+      if unquote(sc), do: Interp.reset_tdz(env, unquote(sc))
+      write_head(unquote(wc), unquote(item), env)
+      unquote(bc).(env)
+    end
+  end
+
+  # What a loop does with the completion `c` of its body: `next` runs the next round, a
+  # break to this loop gives `:ok`, and any other completion leaves the loop.
+  defmacrop after_round(c, labels, next) do
+    quote do
+      case unquote(c) do
+        :ok ->
+          unquote(next)
+
+        {:cont, l} = c ->
+          if l == nil or l in unquote(labels), do: unquote(next), else: leave(c)
+
+        {:brk, l} = c ->
+          if l == nil or l in unquote(labels), do: :ok, else: leave(c)
+
+        c ->
+          leave(c)
+      end
+    end
+  end
+
+  defp forin_loop([], _target, _wc, _bc, _sc, _env, _labels), do: :ok
+
+  defp forin_loop([k | rest], target, wc, bc, sc, env, labels) do
+    # (a key that was deleted before its turn is skipped)
+    if Interp.has_property?(target, k) do
+      Interp.tick()
+
+      after_round(
+        round(wc, bc, sc, k, env),
+        labels,
+        forin_loop(rest, target, wc, bc, sc, env, labels)
+      )
+    else
+      forin_loop(rest, target, wc, bc, sc, env, labels)
+    end
+  end
+
+  defp forof_array(id, i, wc, bc, sc, env, labels) do
+    case Interp.for_of_step(id, {:obj, id}, i) do
+      nil ->
+        :ok
+
+      {x, i} ->
+        Interp.tick()
+
+        after_round(
+          round(wc, bc, sc, x, env),
+          labels,
+          forof_array(id, i, wc, bc, sc, env, labels)
+        )
+    end
+  end
+
+  defp forof_list([], _wc, _bc, _sc, _env, _labels), do: :ok
+
+  defp forof_list([x | rest], wc, bc, sc, env, labels) do
+    Interp.tick()
+    after_round(round(wc, bc, sc, x, env), labels, forof_list(rest, wc, bc, sc, env, labels))
+  end
+
+  # The iterator protocol. The step comes before the `try`, so the step limit and an error
+  # of `next()` do not close the iterator. A throw in the write or in the body closes the
+  # iterator, and an error of its `return()` does not replace the throw. A break, a
+  # continue to an outer label and a return are normal exits: they close the iterator, an
+  # error of `return()` replaces them, and the result of `return()` must be an object.
+  defp forof_proto(it, next, wc, bc, sc, env, labels) do
+    case Interp.iter_step(it, next) do
+      :done ->
+        :ok
+
+      {:ok, x} ->
+        Interp.tick()
+        if sc, do: Interp.reset_tdz(env, sc)
+
+        c =
+          try do
+            write_head(wc, x, env)
+            bc.(env)
+          catch
+            # (a JS throw needs no stack trace)
+            :throw, e ->
+              Interp.iter_close(it, true)
+              throw(e)
+
+            kind, e ->
+              Interp.iter_close(it, true)
+              :erlang.raise(kind, e, __STACKTRACE__)
+          end
+
+        case c do
+          :ok ->
+            forof_proto(it, next, wc, bc, sc, env, labels)
+
+          {:cont, l} = c ->
+            if l == nil or l in labels,
+              do: forof_proto(it, next, wc, bc, sc, env, labels),
+              else: proto_exit(it, leave(c))
+
+          {:brk, l} = c ->
+            if l == nil or l in labels, do: proto_exit(it, :ok), else: proto_exit(it, leave(c))
+
+          c ->
+            proto_exit(it, leave(c))
+        end
+    end
+  end
+
+  # A normal exit of a loop over the iterator protocol: the close of the iterator, then the
+  # completion `c`.
+  defp proto_exit(it, c) do
+    Interp.iter_close(it, false)
+    c
   end
 
   # ── tail sites ─────────────────────────────────────────────

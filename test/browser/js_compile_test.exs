@@ -260,7 +260,46 @@ defmodule Browser.JS.CompileTest do
     {"r16 switch twenty numbers",
      ~S|function f(n){ var s = 0; for (var i = 0; i < n; i++) { switch (i % 21) { case 0: s += 1; break; case 1: s += 2; break; case 2: s += 3; break; case 3: s += 4; break; case 4: s += 5; break; case 5: s += 6; break; case 6: s += 7; break; case 7: s += 8; break; case 8: s += 9; break; case 9: s += 10; break; case 10: s += 11; break; case 11: s += 12; break; case 12: s += 13; break; case 13: s += 14; break; case 14: s += 15; break; case 15: s += 16; break; case 16: s += 17; break; case 17: s += 18; break; case 18: s += 19; break; case 19: s += 20; break; default: s -= 1 } } return s } console.log(f(100))|},
     {"r16 switch twelve strings",
-     ~S|function f(k){ switch (k) { case 'a': return 1; case 'b': return 2; case 'c': return 3; case 'd': return 4; case 'e': return 5; case 'f': return 6; case 'g': return 7; case 'h': return 8; case 'i': return 9; case 'j': return 10; case 'k': return 11; case 'l': return 12 } return 0 } console.log('abcdefghijklm'.split('').map(f).join())|}
+     ~S|function f(k){ switch (k) { case 'a': return 1; case 'b': return 2; case 'c': return 3; case 'd': return 4; case 'e': return 5; case 'f': return 6; case 'g': return 7; case 'h': return 8; case 'i': return 9; case 'j': return 10; case 'k': return 11; case 'l': return 12 } return 0 } console.log('abcdefghijklm'.split('').map(f).join())|},
+    # (r16) The compiled for-in and for-of (design r16 4.3, 4.4): the keys that change during
+    # the loop, inherited and shadowed keys, primitives and `null`, the heads of each kind
+    # (an assignment, a declaration, a mapped parameter, a member and a pattern, also with a
+    # default in its dead zone), labels and `return`; an array that the body changes, an
+    # array with its own iterator, the collections, a string, `arguments`, the close of an
+    # iterator on every way out, and the step limit.
+    {"r16 for-in keys change",
+     ~S|function f(){ var o = {a: 1, b: 2, c: 3}; var s = ''; for (var k in o) { s += k; delete o.b; o.d = 4 } var p = Object.create({x: 1, y: 2}); p.y = 3; p.z = 4; for (k in p) s += k + p[k]; return s } console.log(f())|},
+    {"r16 for-in primitives",
+     ~S|function f(v){ var s = ''; for (var k in v) s += k + ','; return s } console.log(f('ab'), f(12), f(null), f(undefined), f([5, 6]), f(true))|},
+    {"r16 for-in heads",
+     ~S|function f(o){ var r = []; for (const k in o) r.push(k); for (let k in o) r.push(() => k); var m = {}; for (m.p in o) r.push(m.p); var a, b; for ([a, b] in {xy: 1}) r.push(a + b); for ({length: a} in {abc: 1}) r.push(a); return r.map(x => typeof x == 'function' ? x() : x).join() } function g(a){ for (a in {q: 1}) {} return arguments[0] } console.log(f({u: 1, v: 2}), g(1))|},
+    {"r16 for-in tdz head",
+     ~S|function f(){ try { for (const [k = k] in {'': 1}) return k } catch (e) { return e.constructor.name } } function g(){ try { for (x in {a: 1}) {} } catch (e) { return e.message } let x } function h(){ var r = []; for (let [a = r.length] in {p: 1, q: 2}) r.push(a); return r.join() } console.log(f(), f(), g(), h())|},
+    {"r16 for-in labels return",
+     ~S|function f(o){ var s = ''; outer: for (var i = 0; i < 3; i++) { for (var k in o) { if (k == 'b') continue outer; if (i == 2) break outer; s += i + k } } return s } function g(o){ for (var k in o) { if (o[k] > 1) return k } return 'none' } function h(o){ var s = ''; l: for (var k in o) { for (var j in o) { if (j == 'b') continue l; s += k + j } } return s } console.log(f({a: 1, b: 2, c: 3}), g({a: 1, b: 2}), g({}), h({a: 1, b: 2}))|},
+    {"r16 for-of array changes",
+     ~S|function f(){ var a = [1, 2, 3], s = ''; for (var x of a) { s += x; if (x == 1) a.push(4); if (x == 2) a.length = 3 } var b = [1, , 3]; for (const y of b) s += y; var c = [1, 2]; Object.defineProperty(c, 1, {get(){ s += 'g'; return 9 }}); for (const z of c) s += z; return s } console.log(f())|},
+    {"r16 for-of own iterator",
+     ~S|function f(){ var a = [1, 2]; a[Symbol.iterator] = function* (){ yield 'x'; yield 'y' }; var s = ''; for (var v of a) s += v; Array.prototype[Symbol.iterator] = function* (){ yield 'p' }; try { for (v of [1, 2]) s += v } finally { delete Array.prototype[Symbol.iterator] } return s } console.log(f())|},
+    {"r16 for-of sources",
+     ~S|function f(){ var s = ''; for (const [k, v] of new Map([['a', 1], ['b', 2]])) s += k + v; var set = new Set([1, 2]); for (let x of set) { s += x; if (x == 1) set.add(3) } for (const c of 'a\u{1F600}b') s += c.length; (function(){ for (var a of arguments) s += a })(7, 8); for (var [p, q = 'd'] of [[1], [2, 3]]) s += p + q; return s } console.log(f())|},
+    {"r16 for-of not iterable",
+     ~S|function f(v){ try { for (const x of v) return x; return 'empty' } catch (e) { return e.constructor.name + ': ' + e.message } } console.log(f(null), f(undefined), f(1), f({}), f(''), f({[Symbol.iterator]: 1}), f({[Symbol.iterator]: () => ({next: () => 1})}))|},
+    {"r16 for-of close",
+     ~S|function mk(log, bad){ var i = 0; return {[Symbol.iterator](){ return this }, next(){ log.push('n'); return {value: i++, done: i > 3} }, return(){ log.push('r'); if (bad == 'throw') throw new Error('ret'); return bad == 'prim' ? 1 : {} }} } function run(bad, how){ var log = []; try { outer: for (var k = 0; k < 2; k++) { for (const x of mk(log, bad)) { if (how == 'break') break; if (how == 'return') return log.join() + ':ret'; if (how == 'throw') throw new Error('body'); if (how == 'cont') continue outer; if (how == 'contin') continue } } } catch (e) { log.push(e.message) } return log.join() } var r = []; for (const bad of ['ok', 'throw', 'prim']) for (const how of ['break', 'return', 'throw', 'cont', 'contin', 'end']) r.push(bad + '/' + how + '=' + run(bad, how)); console.log(r.join(' '))|},
+    {"r16 for-of generator close",
+     ~S|function* g(log){ try { yield 1; yield 2; yield 3 } finally { log.push('fin') } } function f(){ var log = []; for (const x of g(log)) { log.push(x); if (x == 2) break } for (const x of g(log)) { log.push(x) } try { for (const x of g(log)) { throw 'b' } } catch (e) { log.push(e) } return log.join() } console.log(f())|},
+    {"r16 for-of let head",
+     ~S|function f(){ var fs = [], s = ''; for (let x of [1, 2, 3]) { s += x } for (let [a, b] of [[1, 2]]) s += a + b; let y; for (y of [4, 5]) s += y; try { for (const [k = k] of [[]]) s += k } catch (e) { s += e.constructor.name } return s + y } console.log(f())|},
+    {"r16 for-of step limit body",
+     ~S|function f(){ var it = {[Symbol.iterator](){ return this }, next(){ return {value: 1, done: false} }, return(){ console.log('closed'); return {} }}; for (const x of it) { for (;;) {} } } f()|,
+     max_steps: 3000},
+    {"r16 for-of step limit next",
+     ~S|function f(){ var n = 0; var it = {[Symbol.iterator](){ return this }, next(){ for (var i = 0; i < 100; i++) n++; return {value: n, done: false} }, return(){ console.log('closed'); return {} }}; for (const x of it) { n++ } } f()|,
+     max_steps: 3000},
+    {"r16 for-of array steps",
+     ~S|function f(a){ var s = 0; for (const x of a) s += x; for (var k in a) s += a[k]; return s } var a = []; for (var i = 0; i < 16; i++) a.push(i); console.log(f(a))|,
+     max_steps: 2000}
   ]
 
   # One snippet for each kind that the compiler handles, and one for each kind that falls
