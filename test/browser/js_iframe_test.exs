@@ -601,4 +601,66 @@ defmodule Browser.JS.IframeTest do
              "content=null,fragment=null,html=null,import=null,shadow=null"
            ]
   end
+
+  # A read of a global name in a function (`{:gref}`) takes the value of a variable of the
+  # global scope at once (`Interp.ev_gref/2`), and any other name by the walk. Each read must
+  # see the last write, by any path: a property of the window, `delete`, `defineProperty`, a
+  # getter, `var`, `let` and `const` of another script, eval, `with`, and the other realm.
+  test "a read of a global name sees each write to the global scope and the window" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const log = [];
+        function rd() { try { return String(gx) } catch (e) { return e.name } }
+        function ry() { try { return String(gy) } catch (e) { return e.name } }
+        function rz() { try { return String(gz) } catch (e) { return e.name } }
+        function rv() { return gv }
+        function rs() { var gv = "local"; return gv }
+        log.push(rd());
+        window.gx = 1; log.push(rd());
+        window.gx = 2; log.push(rd());
+        Object.defineProperty(window, "gy", { value: 3, configurable: true, writable: true });
+        log.push(ry());
+        delete window.gy; log.push(ry());
+        var n = 0;
+        Object.defineProperty(window, "gz", { get: function () { return "g" + ++n }, configurable: true });
+        log.push(rz(), rz());
+        delete window.gz; log.push(rz());
+        log.push(early, rl(), rc(), rv());
+        gv = "v2"; log.push(rv());
+        window.gv = "v3"; log.push(rv());
+        eval("gv = 'v4'"); log.push(rv());
+        eval("var ge = 'e1'"); function re() { return ge } log.push(re());
+        eval("ge = 'e2'"); log.push(re());
+        with ({ gv: "w" }) { log.push(gv, rv()) }
+        log.push(rs(), rv());
+        const f = document.createElement("iframe");
+        f.srcdoc = "<script>var gv = 'frame'; function fr() { return gv }<\/script>";
+        f.onload = () => {
+          const w = f.contentWindow;
+          log.push(w.fr(), rv());
+          w.gv = "frame2"; gv = "page2";
+          log.push(w.fr(), rv(), w.eval("parent.rv()"), rl(), rc());
+          console.log(log.join(" "));
+        };
+        document.body.appendChild(f);
+        let gl = "l2"; const gc = "c2";
+        """,
+        ~S"""
+        <script>
+        var gv = "v1";
+        function rl() { try { return gl } catch (e) { return e.name } }
+        function rc() { try { return gc } catch (e) { return e.name } }
+        var early = rl();
+        </script>
+        """
+      )
+
+    assert errors == []
+
+    assert logs == [
+             "ReferenceError 1 2 3 ReferenceError g1 g2 ReferenceError ReferenceError " <>
+               "ReferenceError ReferenceError v1 v2 v3 v4 e1 e2 w v4 local v4 frame v4 frame2 page2 page2 l2 c2"
+           ]
+  end
 end

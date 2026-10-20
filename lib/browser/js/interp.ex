@@ -5983,6 +5983,26 @@ defmodule Browser.JS.Interp do
     end
   end
 
+  # The read of a name in the global scope `g` of its realm (a `{:gref}`). Most such names
+  # are variables of the global scope with a value (`document`, the built-ins, the top-level
+  # `var`s of a classic script). Their value is read at once from the scope, with no walk
+  # of `lookup_var/2`. There is no cache, so a write to the scope cannot leave a stale value.
+  # The other cases take `ev_id/2`: a name that the scope does not have (a property of the
+  # global object, an element with that id), an alias of a module, a binding in its temporal
+  # dead zone, and `undefined` (whose read clears `:js_with_gone`).
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def ev_gref({:id, name} = id, g) do
+    case :erlang.get(g) do
+      %{vars: %{^name => v}}
+      when v != :undefined and v != :tdz and (not is_tuple(v) or elem(v, 0) != :alias) ->
+        v
+
+      _ ->
+        ev_id(id, g)
+    end
+  end
+
   # `arguments` is only built when a function body asks for it: an object of its own with
   # the indices, `length`, `callee` (a poison pill in strict code) and the array iterator
   defp lazy_arguments(env) do
@@ -8387,7 +8407,7 @@ defmodule Browser.JS.Interp do
 
   def ev({:gref, name} = form, env) do
     if @check, do: check_landing(form, env)
-    ev_id({:id, name}, root(env))
+    ev_gref({:id, name}, root(env))
   end
 
   def ev({:mref, d, name} = form, env) do
