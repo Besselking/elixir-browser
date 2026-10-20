@@ -1125,9 +1125,35 @@ defmodule Browser.JS.Compile do
     end
   end
 
+  # (a comma expression of two to four parts is one closure, with no walk of the list)
   defp expr_node({:seq, es}) do
     cs = Enum.map(es, &expr/1)
-    fn env -> seq(cs, env) end
+
+    case cs do
+      [c1, c2] ->
+        fn env ->
+          c1.(env)
+          c2.(env)
+        end
+
+      [c1, c2, c3] ->
+        fn env ->
+          c1.(env)
+          c2.(env)
+          c3.(env)
+        end
+
+      [c1, c2, c3, c4] ->
+        fn env ->
+          c1.(env)
+          c2.(env)
+          c3.(env)
+          c4.(env)
+        end
+
+      _ ->
+        fn env -> seq(cs, env) end
+    end
   end
 
   # (as `ev/2`: the special forms of `typeof` read a name that can be missing)
@@ -2186,6 +2212,45 @@ defmodule Browser.JS.Compile do
       c = unquote(c)
       if @check and c != :ok, do: Interp.check_completion(c, unquote(s))
       c
+    end
+  end
+
+  # An expression statement is its own link: the link runs the expression and goes on,
+  # with no closure of the statement between them and no completion case (an expression
+  # completes normally or throws). Not in check mode, where each statement passes the
+  # completion check.
+  if not @check do
+    defp link(loc, {:expr, e}, rest) do
+      count()
+      ec = expr(e)
+
+      case {loc, rest} do
+        {nil, nil} ->
+          fn env ->
+            ec.(env)
+            :ok
+          end
+
+        {nil, rest} ->
+          fn env ->
+            ec.(env)
+            rest.(env)
+          end
+
+        {loc, nil} ->
+          fn env ->
+            :erlang.put(:js_pos, loc)
+            ec.(env)
+            :ok
+          end
+
+        {loc, rest} ->
+          fn env ->
+            :erlang.put(:js_pos, loc)
+            ec.(env)
+            rest.(env)
+          end
+      end
     end
   end
 

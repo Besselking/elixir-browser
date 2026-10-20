@@ -421,7 +421,31 @@ defmodule Browser.JS.CompileTest do
      ~S"function f(){ var r = []; function g(){ throw new Error('v') } try { var o = {m(){ return 1 }, a: g(), b: 2} } catch (e) { r.push(e.message) } var z = {}; try { var p = {a: 1, [{toString(){ throw new Error('k') }}]: function(){}, b: 2} } catch (e) { r.push(e.message) } try { var q = {get x(){ return 1 }, y: g()} } catch (e) { r.push(e.message) } try { var w = {f: function(){}, ...g()} } catch (e) { r.push(e.message) } r.push(Object.keys({a: 1, ...{b: 2}}).join()); return r.join() } console.log(f())"},
     {"r17 object step limit",
      ~S|function f(){ var o; for (var i = 0; i < 100000; i++) { o = {m(){ return i }, f: () => i, get g(){ return i }, ...o} } return o } console.log(f())|,
-     max_steps: 400}
+     max_steps: 400},
+    # (r18) An expression statement is its own link of a statement list, and a comma
+    # expression of two to four parts is one closure: the positions of the statements, a
+    # throw from an expression statement, the completion value of a script and of eval code
+    # that end with an expression statement, and comma expressions of 2, 3, 4 and 5 parts.
+    {"r18 expr statement positions",
+     ~S|function f(){ var o = {a: 1}, s = '';
+  s += 'a'; o.a++;
+  s += o.a
+  ; g(s); s += 'b'
+  return s } function g(x){ console.log(x, new Error('p').stack.split('\n')[1]) } function h(){ g(1) } console.log(f()); h()|},
+    {"r18 expr statement throws",
+     ~S|function f(k){ var r = []; r.push(1)
+  if (k == 1) null.x
+  r.push(2); k == 2 && undefinedName; r.push(3)
+  k == 3 && (r.push(4), r.x.y.z)
+  return r.join() } for (const k of [0, 1, 2, 3]) { try { console.log(f(k)) } catch (e) { console.log(e.constructor.name, e.message, e.stack.split('\n')[1]) } }|},
+    {"r18 expr statement completion",
+     ~S|function f(){ return [eval('1; 2; var x = 3; x + 1'), eval('var y = 5; y++;'), eval('if (true) { 7; } else 8'), eval('9; ;'), eval('10; function q(){}'), eval('do { 11; break } while (0)'), eval('(function(){ a = 1; b = 2 })(); a + b'), eval('var z; z = 12;'), eval('13, 14'), typeof eval('')].join() } function g(){ 15 } function h(){ 'x'; 16; return } console.log(f(), g(), h()); f(); g(); 'end', 17|},
+    {"r18 expr statement completion last", ~S|function f(){ var n = 0; n++; n++ } f(); f()|},
+    {"r18 comma parts",
+     ~S|function f(){ var log = [], a, b, c, d; function t(x){ log.push(x); return x } a = (t(1), t(2)); b = (t(3), t(4), t(5), t(6)); c = (t(7), t(8), t(9), t(10), t(11)); d = (t('x'), t('y'), t('z')); t(12), t(13); t(14), t(15), t(16), t(17), t(18); for (var i = 0, j = 10; i < j; i++, j--) ; try { (t(19), null.x, t(20)) } catch (e) { log.push(e.constructor.name) } try { t(21), t(22), t(23), undefinedName, t(24) } catch (e) { log.push(e.message) } try { (t(25), t(26), t(27), t(28), t(29), null.y) } catch (e) { log.push(e.constructor.name) } var e = (a++, b++, a + b); return [a, b, c, d, e, i, j, log.join()].join(';') } console.log(f())|},
+    {"r18 comma steps",
+     ~S|function f(){ var s = 0, i = 0; while (i < 1000) s++, s++, i++; for (;;) s++, s--, i--, i++, s++ } f()|,
+     max_steps: 600}
   ]
 
   # One snippet for each kind that the compiler handles, and one for each kind that falls
