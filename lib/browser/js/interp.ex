@@ -1144,7 +1144,9 @@ defmodule Browser.JS.Interp do
   # A closure must not be made in a level 1 frame, also not through a map scope under it
   # (a class scope or a self-name scope): the leaf frame is freed on return whatever the
   # closure count says. This proves the level 1 rule of the resolver.
-  defp check_closure_env(env) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_closure_env(env) do
     check_live(env)
 
     case :erlang.get(env) do
@@ -1188,6 +1190,23 @@ defmodule Browser.JS.Interp do
   defp check_name(rec), do: inspect(rec.kind)
 
   defp check_fail(msg), do: raise(ArgumentError, "resolve check: " <> msg)
+
+  # A self slot exists only for a named function expression (`named?`). A parameter or a
+  # declaration of the same name shadows the self name, which then has no slot.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_self_slot(%Info{self: self}, name, named?) do
+    if self != nil and not named?,
+      do: check_fail("self slot #{inspect(self)} of #{inspect(name)} without a self name")
+  end
+
+  # The root of the scope chain of a new function object is a global scope.
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def check_root(root, name) do
+    unless match?(%{parent: nil}, :erlang.get(root)),
+      do: check_fail("the root of #{inspect(name)} is #{inspect(root)}, no global scope")
+  end
 
   # A frameless scope keeps its `let` and `const` names in slots of the frame. At each entry
   # of the statement the slots go back to the temporal dead zone, so a loop body sees its
@@ -5795,6 +5814,23 @@ defmodule Browser.JS.Interp do
     Enum.any?(funs, fn {_, f} -> match?({:fn, _, _, _, _, %Info{rewritten: true}}, f) end)
   end
 
+  @doc false
+  # The closure record of a rewritten function, as one map literal: the keys `fields` and,
+  # when the body compiled already (step 5), the code and the frame maker of the cache entry
+  # `key` (`{:jsc, uid}`, see "The cache" in `Browser.JS.Compile`). A function object that
+  # gets its code here does not read the cache at its first call. `make_fn/3` and the
+  # compiled creation of `Browser.JS.Compile` use this macro, so the two make the same
+  # record. (each branch builds its map at once: a merge would cost one more call per
+  # function object)
+  defmacro closure_map(fields, key) do
+    quote do
+      case :erlang.get(unquote(key)) do
+        {code, mk} -> %{unquote_splicing(fields), code: code, mk: mk}
+        _ -> %{unquote_splicing(fields)}
+      end
+    end
+  end
+
   defp make_fn(node, env), do: make_fn(node, env, true)
 
   # `named?`: a function expression's own name is a binding inside it (a declaration's is not)
@@ -5818,12 +5854,8 @@ defmodule Browser.JS.Interp do
     rewritten? = match?(%Info{rewritten: true}, info)
     named? = named? and is_binary(name) and mode == false
 
-    # (a self slot exists only for a named function expression; a parameter or a
-    # declaration of the same name shadows the self name, which then has no slot)
     if @check, do: check_closure_env(env)
-
-    if @check and rewritten? and info.self != nil and not named?,
-      do: check_fail("self slot #{inspect(info.self)} of #{inspect(name)} without a self name")
+    if @check and rewritten?, do: check_self_slot(info, name, named?)
 
     # A rewritten function keeps its own name in a slot of its frame (`info.self`), so it
     # must not get the self-name scope: one more map scope would shift every hop count.
@@ -5850,45 +5882,23 @@ defmodule Browser.JS.Interp do
         # (the frame size minus the header, the hidden slots and the template). Both are
         # computed once per function object here, not on every call.
         root = root_of(env)
-
-        if @check and not match?(%{parent: nil}, :erlang.get(root)),
-          do: check_fail("the root of #{inspect(name)} is #{inspect(root)}, no global scope")
-
+        if @check, do: check_root(root, name)
         nnames = info.size - 5 - length(info.hidden) - length(info.template)
 
-        # A function whose body compiled already (step 5) gives its code to each new
-        # function object, so that the first call of the object does not read the cache.
-        # The key and the value are those of `Browser.JS.Compile`. (each branch builds its
-        # map at once: a merge would cost one more call per function object)
-        case :erlang.get({:jsc, info.uid}) do
-          {code, mk} ->
-            %{
-              name: name,
-              params: params,
-              body: body,
-              mode: mode,
-              scope: env,
-              src: src,
-              info: info,
-              root: root,
-              nnames: nnames,
-              code: code,
-              mk: mk
-            }
-
-          _ ->
-            %{
-              name: name,
-              params: params,
-              body: body,
-              mode: mode,
-              scope: env,
-              src: src,
-              info: info,
-              root: root,
-              nnames: nnames
-            }
-        end
+        closure_map(
+          [
+            name: name,
+            params: params,
+            body: body,
+            mode: mode,
+            scope: env,
+            src: src,
+            info: info,
+            root: root,
+            nnames: nnames
+          ],
+          {:jsc, info.uid}
+        )
       else
         %{name: name, params: params, body: body, mode: mode, scope: env, src: src, info: info}
       end

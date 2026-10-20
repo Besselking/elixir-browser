@@ -128,7 +128,9 @@ defmodule Browser.JS.CompileCoverageTest do
     "function f(o) { const {a, b: [c = 1] = []} = o; let {[o.k]: d, ...e} = o, g; var [h, , ...i] = o; ({a: o.x, b: o[o.k] = 2} = o); return [a, c, d, e, g, h, i] }",
     "function f(o) { const g = function () {}, h = () => 1; let k = class {}; var {m = function () {}} = o; return [g, h, k, m] }",
     "function f(o, k) { 'use strict'; delete o[k]; delete o.a; return delete o[k + 1] }",
-    "function f(x) { do { x-- } while (x > 0); if (x) ; else ; for (;;) ; return [arguments, typeof q, typeof arguments, /a/g] }"
+    "function f(x) { do { x-- } while (x > 0); if (x) ; else ; for (;;) ; return [arguments, typeof q, typeof arguments, /a/g] }",
+    # (r17) the creation of a function expression or an arrow, also with a name hint
+    "function f(o) { var g = function () {}, {h = () => 1} = o; let k; k = () => 2; return [g, h, k, x => x, function n() { return n }] }"
   ]
 
   # The programs of bench/js_runtime.exs. The script binds its program lists to variables,
@@ -272,8 +274,8 @@ defmodule Browser.JS.CompileCoverageTest do
 
   test "the bench programs keep no hot kind on the tree" do
     # The nine programs, the async programs and the step 3 programs use only kinds that
-    # compile: the functions and the classes that they make are the only nodes on the
-    # tree.
+    # compile: the classes, the generators and the async functions that they make are the
+    # only nodes on the tree. A function expression and an arrow compile (round 17).
     nodes =
       for src <- bench(),
           {how, _} = n <- elem(tree_nodes(src), 0),
@@ -281,7 +283,19 @@ defmodule Browser.JS.CompileCoverageTest do
           uniq: true,
           do: n
 
-    assert Enum.sort(nodes) --
-             [{:ev, :class}, {:ev, :fn}, {:ev, :gen}, {:ev, :async}] == []
+    assert Enum.sort(nodes) -- [{:ev, :class}, {:ev, :gen}, {:ev, :async}] == []
+  end
+
+  test "a rewritten function expression or arrow compiles, also with the name of its binding" do
+    # (r17, design r16 4.8) a declaration, an assignment to a slot, a pattern, an argument
+    # and a named function expression; a class value keeps `ev_named/3` on the tree
+    src =
+      "function f(o) { var g = function () {}; let h = () => 1; const k = function () {}, " <>
+        "{m = 1} = o, [n] = [function () {}]; var p; p = () => 2; o.q = function () {}; " <>
+        "o.r(x => x, function s() { return s }); return [g, h, k, m, n, p] }"
+
+    assert {[], n} = tree_nodes(src)
+    assert n > 1
+    assert {[ev: :class], 1} = tree_nodes("function f() { var c = class {}; return c }")
   end
 end

@@ -375,7 +375,30 @@ defmodule Browser.JS.CompileTest do
     {"r16 arguments value",
      ~S|function f(a, b){ var x = arguments; a = 5; var y = arguments; return [x === y, x[0], y.length, g(arguments), arguments[1]].join() } function g(args){ return Array.prototype.join.call(args, '+') } function h(a){ 'use strict'; a = 9; return g(arguments) } function k(){ return [typeof arguments, arguments.length] } function m(a){ a = 2; return g(arguments) } console.log(f(1, 2), f(), h(1), k(1, 2).join(), m(1))|},
     {"r16 typeof global",
-     ~S|var gv = 1; function f(){ return [typeof gv, typeof undefinedName, typeof Math, typeof parseInt, typeof globalThis, typeof NaN].join() } console.log(f()); function g(){ try { return typeof lateLet } catch (e) { return e.constructor.name } } console.log(g()); let lateLet = 1; console.log(g())|}
+     ~S|var gv = 1; function f(){ return [typeof gv, typeof undefinedName, typeof Math, typeof parseInt, typeof globalThis, typeof NaN].join() } console.log(f()); function g(){ try { return typeof lateLet } catch (e) { return e.constructor.name } } console.log(g()); let lateLet = 1; console.log(g())|},
+    # (r17) The compiled creation of a function expression or an arrow (design r16 4.8):
+    # the name, the length, the prototype and the source text of the object, a named
+    # expression that calls itself, the names from a binding (a slot, a pattern, a member),
+    # the heap order, the code cache before and after the first call, the step limit.
+    {"r17 fn object",
+     ~S"function f(){ var a = function(x, y){ return x + y }; var b = (p, q = 1, ...r) => p; var d = x => x * 2; var e = async () => 1; var r = [a.name, a.length, typeof a.prototype, a.prototype.constructor === a, b.name, b.length, b.prototype, d.name, String(a), String(d), String(function /* c */ (z) { return z }), Object.getOwnPropertyNames(a).join(), Object.getOwnPropertyNames(d).join(), e.name, typeof e]; var C = function(){ this.x = 1 }; C.prototype.m = 2; var o = new C(); r.push(o.x, o.m, o instanceof C, new (function(){ this.y = 3 })().y); return r.join('|') } console.log(f())"},
+    {"r17 fn named self",
+     ~S|function f(){ var fact = function fact(n){ return n <= 1 ? 1 : n * fact(n - 1) }; var g = function h(){ h = 1; return typeof h }; var k = function k2(k2){ return k2 }; var m = function m2(){ var m2 = 5; return m2 }; var s = function s2(){ 'use strict'; try { s2 = 1 } catch (e) { return e.constructor.name } return 'no' }; return [fact(5), fact.name, g(), g.name, k(7), k.name, m(), s()].join() } console.log(f())|},
+    {"r17 fn hints",
+     ~S"function f(o){ var a = function(){}; let b = () => 1; const c = function(){}, d = async () => 1; var e; e = function(){}; var {p = function(){}} = o; var [q] = [function(){}]; var {r} = {r: function(){}}; var [t = () => 1] = []; var g = (function(){}); o.m = function(){}; o['n'] = () => 1; var h = class {}; var k; k = () => 2; var w = function* (){}; var x = function x2(){}; var y; y = function y2(){}; var z = a; return [a.name, b.name, c.name, d.name, e.name, p.name, q.name, r.name, t.name, g.name, o.m.name, o.n.name, h.name, k.name, w.name, x.name, y.name, z.name].join() } function s(){ 'use strict'; var u; u = function(){}; let v; v = () => 1; return [u.name, v.name].join() } console.log(f({}), s())"},
+    {"r17 fn heap order",
+     ~S|function f(){ var r = []; for (var i = 0; i < 3; i++) { var o = {i: i}; var g = function(){ return o.i }; r.push(g, {}, () => g); let h = () => i; r.push(h, [h]) } return r.length + ':' + r[0]() + r[2]()() } console.log(f())|},
+    {"r17 fn closures",
+     ~S|function f(){ var fs = []; for (let i = 0; i < 3; i++) fs.push(() => i); for (var j = 0; j < 3; j++) fs.push(function(){ return j }); for (const k of [7, 8]) fs.push(() => k); { let b = 'b'; fs.push(() => b) } return fs.map(g => g()).join() } console.log(f())|},
+    {"r17 fn code cache",
+     ~S|function f(){ var mk = function(){ return function(x){ return x + 1 } }; var a = mk(); var r1 = a(1); var b = mk(); var c = mk(); return [r1, b(2), a === b, a(3), c(4), b.name, String(c)].join() } console.log(f(), f())|},
+    {"r17 fn nested",
+     ~S|function f(n){ var add = function(a){ return function(b){ return (c) => a + b + c + n } }; var self = this; var t = () => this === self; var args = () => arguments.length; return [add(1)(2)(3), t(), args(), (function(){ return typeof this }).call(5), (function(){ 'use strict'; return typeof this })()].join() } console.log(f.call({}, 4, 5), f(1))|},
+    {"r17 fn async",
+     ~S|async function af(){ var g = () => 1; await 0; var h = function(){}; let k; k = async () => 2; return [g.name, h.name, k.name, g(), await k()].join() } af().then(v => console.log(v))|},
+    {"r17 fn step limit",
+     ~S|function f(){ var g; for (var i = 0; i < 100000; i++) { g = () => i; var h = function(){ return g } } return g() } console.log(f())|,
+     max_steps: 500}
   ]
 
   # One snippet for each kind that the compiler handles, and one for each kind that falls

@@ -54,6 +54,9 @@ defmodule Browser.JS.Compile do
     * the unary operators, `typeof` of a global name, `delete` of a property and the
       binary operators;
     * property reads, calls, `new`, array literals and object literals;
+    * the creation of a function expression or an arrow that the resolver rewrote, also
+      with the name that a declaration or an assignment to a slot gives it (see "Function
+      creation");
     * assignments, compound assignments, `++` and `--` to a slot or to a property;
     * destructuring assignments and declarations with a pattern, which give the pattern
       with compiled expressions to `Interp.bind_pattern/4`;
@@ -114,7 +117,8 @@ defmodule Browser.JS.Compile do
   Every other node stays on the tree walker with all the nodes in it. Its closure gives the
   node to `Interp.ev/2`, `Interp.fstmt/3` or `Interp.tail_value/2`. These nodes are:
 
-    * functions and classes;
+    * classes, generators, async functions and the functions that the resolver did not
+      rewrite;
     * the reads and writes of a name that the resolver did not put in a slot;
     * `typeof` of a name that is not global, and `delete` of a name;
     * `super` and `import`;
@@ -127,6 +131,18 @@ defmodule Browser.JS.Compile do
   frame of a call, the operators, the property reads and writes, and the slot writes.
   Thus a compiled body and the tree walker give the same values, errors, steps and heap
   ids.
+
+  ## Function creation
+
+  At each creation of a function object, `make_fn/3` in `Interp` finds some facts of the
+  function node: the `Info` of the resolver, the number of the parameter name slots and
+  the key of the cache. A compiled creation finds these facts once, when the body that
+  holds the node compiles. When it runs, it adds one to the closure count, reads the root
+  of the frame and the cache, and makes the record of `make_fn/3` with one `alloc/1`
+  (`Interp.closure_map/2`). On the tree, `ev_named/3` and `name_fn/2` write the name of
+  the binding into the record after the creation. A compiled creation puts that name into
+  the record before the `alloc/1`. Thus the record, the heap ids and the steps are the
+  same as on the tree.
 
   ## Which functions compile
 
@@ -303,6 +319,7 @@ defmodule Browser.JS.Compile do
   alias Browser.JS.{Async, Awaits, Interp, Num}
   require Async
   require Interp
+  require Browser.JS.Obj, as: Obj
   alias Browser.JS.Resolve.Info
   require Browser.JS.Fast, as: Fast
 
@@ -585,7 +602,8 @@ defmodule Browser.JS.Compile do
 
   # The node shapes that take the name of the binding that they are assigned to (as the
   # guard of the same name in `Interp`). An assignment of such a value names it through
-  # `Interp.ev_named/3`, so it stays on the tree.
+  # `Interp.ev_named/3`, so it stays on the tree. A function that the resolver rewrote
+  # compiles with its name instead (`hinted?/2`).
   defguardp nameable(e)
             when (elem(e, 0) in [:fn, :class] and elem(e, 1) == nil) or
                    elem(e, 0) in [:gen, :async]
@@ -952,12 +970,18 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr_node({kind, "=", {:slot, d, i, name}, value} = node)
+  # (a function value takes the name of the slot, as `ev_named/3` names it on the tree)
+  defp expr_node({kind, "=", {:slot, d, i, name} = target, value} = node)
        when kind in [:assign, :sassign] do
-    if nameable(value) do
-      fallback(node)
-    else
-      one(env, opnd(value), v, assign_slot(env, d, i, name, v))
+    cond do
+      hinted?(value, target) ->
+        one(env, {:f, hinted(value, name)}, v, assign_slot(env, d, i, name, v))
+
+      nameable(value) ->
+        fallback(node)
+
+      true ->
+        one(env, opnd(value), v, assign_slot(env, d, i, name, v))
     end
   end
 
@@ -1230,7 +1254,96 @@ defmodule Browser.JS.Compile do
   defp expr_node({:cps_leaf, i}),
     do: fn _env -> :erlang.element(i + 1, :erlang.get(:js_cps_vals)) end
 
+  # A function expression or an arrow that the resolver rewrote (see "Function creation").
+  # Every other function stays on the tree.
+  defp expr_node({:fn, name, _, _, _, %Info{rewritten: true}} = node), do: creation(node, name)
+
   defp expr_node(node), do: fallback(node)
+
+  # ── function creation ──────────────────────────────────────
+
+  # The creation of a function expression or an arrow that the resolver rewrote (design
+  # r16 4.8). At each creation, `make_fn/3` in `Interp` finds the `Info` in the place of the
+  # source text, the number of the parameter name slots and the key of the cache. The
+  # compiled creation finds these facts once, when the body that holds the node compiles.
+  # When it runs, it does the remaining work of `make_fn/3` in the same order: the checks
+  # of check mode, the closure count, the root of the frame, the read of the cache and one
+  # `alloc/1` of the same record (`Interp.closure_map/2`). A rewritten function keeps its
+  # own name in a slot of its frame, so it gets no scope for its name. The closure keeps
+  # only syntax, the `Info` and constants (the capture rule).
+  #
+  # `name` is the name of the function object: the name of the node, or the name that the
+  # tree gives with `ev_named/3` and `name_fn/2` after the creation. The record is then the
+  # same, with one write less.
+  defp creation({:fn, node_name, params, body, mode, %Info{} = info}, name) do
+    src = info.src
+    named? = is_binary(node_name) and mode == false
+    nnames = info.size - 5 - length(info.hidden) - length(info.template)
+    key = {:jsc, info.uid}
+
+    fn env ->
+      if @check do
+        Interp.check_closure_env(env)
+        Interp.check_self_slot(info, node_name, named?)
+      end
+
+      # (the closure count only goes up, see `make_fn/3`)
+      :erlang.put(:js_fns, :erlang.get(:js_fns) + 1)
+      root = Interp.root(env)
+      if @check, do: Interp.check_root(root, node_name)
+
+      c =
+        Interp.closure_map(
+          [
+            name: name,
+            params: params,
+            body: body,
+            mode: mode,
+            scope: env,
+            src: src,
+            info: info,
+            root: root,
+            nnames: nnames
+          ],
+          key
+        )
+
+      {:obj,
+       Interp.alloc(
+         Obj.function_record(
+           class: :function,
+           fun: {:closure, c},
+           proto: Interp.proto(:function)
+         )
+       )}
+    end
+  end
+
+  # True when the value `e` of a declaration or an assignment to the target `target`
+  # compiles with its name: an anonymous function that the resolver rewrote, and a slot
+  # with a name or a pattern. A pattern gives no name (`ev_named/3` evaluates the value with
+  # `ev/2`), so the value compiles with no name.
+  defp hinted?({:fn, nil, _, _, _, %Info{rewritten: true}}, target) do
+    case target do
+      {:slot, _, _, name} -> is_binary(name)
+      {:objpat, _, _} -> true
+      {:arrpat, _} -> true
+      _ -> false
+    end
+  end
+
+  defp hinted?(_e, _target), do: false
+
+  # The name that the target gives to a function value, or `nil`.
+  defp hint({:slot, _, _, name}), do: name
+  defp hint(_pat), do: nil
+
+  # The compiled creation of the function value `e` with the name `name` (a node of the
+  # body, so it counts for the memory bound).
+  defp hinted({:fn, nil, _, _, _, _} = e, name) do
+    count()
+    creation(e, name)
+  end
 
   # The operand form of `e` (see the section on operands). A negative number and `void` of
   # a number are constants, as in `expr/1`. The markers `{:in_tdz}` and `{:unnamed}` do
@@ -2076,7 +2189,11 @@ defmodule Browser.JS.Compile do
   defp decl_form(kind, pat, init), do: {:bind, cpat(pat), kind, decl_value(pat, init)}
 
   defp decl_value(_pat, nil), do: {:k, :undefined}
-  defp decl_value(pat, init) when nameable(init), do: {:f, named(init, pat)}
+
+  defp decl_value(pat, init) when nameable(init) do
+    if hinted?(init, pat), do: {:f, hinted(init, hint(pat))}, else: {:f, named(init, pat)}
+  end
+
   defp decl_value(_pat, init), do: opnd(init)
 
   # The write of a declaration, with the checks of check mode. A frame below the size of
