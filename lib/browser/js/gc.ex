@@ -250,6 +250,10 @@ defmodule Browser.JS.GC do
   defp classify_key(:dom_forced_rects, _, acc), do: acc
   defp classify_key(:dom_forced, _, acc), do: acc
   defp classify_key(:dom_forced_spent, _, acc), do: acc
+  # (the documents of the realms that run, and of those that went while they ran, see
+  # `Browser.JS.DOM.in_realm/2`: node ids, not heap ids)
+  defp classify_key(:dom_stack, _, acc), do: acc
+  defp classify_key(:dom_dead, _, acc), do: acc
   # (an identity mark of each shared built-in object, compared only, see `Browser.JS.Intrinsics`)
   defp classify_key(:js_boot_marks, _, acc), do: acc
   # (the document's state is read in `collect/0`, see `Browser.JS.DOM.gc_begin/2`)

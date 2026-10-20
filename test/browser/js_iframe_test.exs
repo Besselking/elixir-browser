@@ -536,6 +536,36 @@ defmodule Browser.JS.IframeTest do
     assert dom.realms |> Map.keys() |> Enum.sort() == dom.frames |> Map.values() |> Enum.sort()
   end
 
+  # A frame's script takes its own `<iframe>` away, through a function of the page (so the
+  # realm of the page runs while the frame's realm waits for it). The code after the removal
+  # runs to its end, and then the realm goes.
+  test "a frame's script that takes its own iframe away runs to its end, then its realm goes" do
+    {raw, _} =
+      ~S"""
+      <body><script>
+      const f = document.createElement("iframe");
+      f.srcdoc = "<script>Array.prototype.myp = function () { return 1; }; var P = parent; P.out = ['pre'];" +
+        "P.document.querySelector('iframe').remove(); P.out.push('post', [].myp());<\/script>";
+      document.body.appendChild(f);
+      setTimeout(() => console.log(window.out.join(" ")), 20);
+      </script></body>
+      """
+      |> Browser.HTML.parse()
+      |> Browser.Forms.index()
+
+    info = %{url: "http://t.test/", width: 800, height: 600, fetch: fn _ -> {:error, "404"} end}
+    pid = Runtime.start(raw, info)
+    r = Runtime.run_scripts(pid)
+    logs = for({:log, t} <- r.console, do: t) ++ collect(pid)
+    {:dictionary, dict} = Process.info(pid, :dictionary)
+    Runtime.stop(pid)
+    dom = Keyword.fetch!(dict, :dom)
+
+    assert logs == ["pre post 1"]
+    assert dom.frames == %{} and dom.realms == %{}
+    assert Keyword.get(dict, :dom_dead, []) == [] and Keyword.get(dict, :dom_stack, []) == []
+  end
+
   # The `<iframe>`s come into a frame's document (that has none before) and into the page by
   # `innerHTML` in the frame, `importNode` of a template's content, the template's content
   # itself, a fragment that the frame's document made, and a shadow root of an element of the

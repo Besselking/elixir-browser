@@ -808,16 +808,26 @@ defmodule Browser.JS.DOM do
     end
   end
 
+  # The documents of the realms that were entered and run now, the last first, are in
+  # `:dom_stack`. A frame can go while its realm is on it: a script of the frame took its own
+  # `<iframe>` away (also through a function of the page). Then the realm's entry stays in the
+  # table until the last run of the realm ends, so that the code after the removal runs to its
+  # end (`destroy_realm/1` puts the document in `:dom_dead`).
   defp enter_realm(doc, fun) do
     prev = swap_realm(doc)
+    stack = Process.get(:dom_stack, [])
+    Process.put(:dom_stack, [doc | stack])
 
     try do
       fun.()
     after
+      Process.put(:dom_stack, stack)
       swap_realm(prev)
-      # a script that took its own frame away: what it left in the table goes with it
-      if Process.get(:dom_dead) == doc do
-        Process.delete(:dom_dead)
+      # (the realm went while it ran: what it left in the table goes with it)
+      dead = Process.get(:dom_dead, [])
+
+      if doc in dead and doc not in stack do
+        Process.put(:dom_dead, List.delete(dead, doc))
         put_st(%{st() | realms: Map.delete(st().realms, doc)})
       end
     end
@@ -975,8 +985,10 @@ defmodule Browser.JS.DOM do
       if Browser.JS.Intrinsics.restore(global) > 0, do: Browser.JS.Editing.restored()
     end
 
-    realms = if s.doc == doc, do: s.realms, else: Map.delete(s.realms, doc)
-    if s.doc == doc, do: Process.put(:dom_dead, doc)
+    # (a realm that runs now keeps its entry until its run ends, see `enter_realm/2`)
+    running? = s.doc == doc or doc in Process.get(:dom_stack, [])
+    realms = if running?, do: s.realms, else: Map.delete(s.realms, doc)
+    if running?, do: Process.put(:dom_dead, [doc | Process.get(:dom_dead, [])])
 
     # The timers of the realm go with it. A timer holds its callback, and the callback holds
     # the global scope of the realm: the whole page stays alive while the timer is there.
