@@ -3534,7 +3534,12 @@ defmodule Browser.Session do
 
       :wxMenuBar.isChecked(bar, 5202) ->
         Archive.record_start()
-        UI.set_status(state.ui, "Recording a page archive…")
+
+        UI.set_status(
+          state.ui,
+          "Recording a page archive… uncheck Develop > Record Page Archive to save"
+        )
+
         if state.url, do: load(state, state.url, :history, cache: :reload), else: state
 
       true ->
@@ -3544,7 +3549,7 @@ defmodule Browser.Session do
         Task.start(fn ->
           result =
             case Archive.save_recording(dir) do
-              {:ok, path, _count} -> {:ok, path}
+              {:ok, path, count} -> {:ok, "#{path} (#{count} responses)"}
               {:error, why} -> {:error, why}
             end
 
