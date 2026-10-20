@@ -92,9 +92,12 @@ defmodule Browser.JS.DomCostTest do
   end
 
   test "a search by attribute value does not walk the tree" do
-    # (the first search makes the index of the name, with one pass over the node table)
+    # The first search makes the index of the name, with one pass over the node table. That
+    # pass is linear in the size of the document, so it runs before the measure: with it in
+    # the measure, a fall of the fixed cost of a query moves the ratio to 2.
+    first = ~s|document.querySelector('[data-id="0"]')|
+
     lookups = ~s"""
-    document.querySelector('[data-id="0"]');
     for (let i = 0; i < 200; i++) {
       document.querySelector('[data-id="last"]');
       document.querySelectorAll('li[data-id="' + (i % 20) + '"]');
@@ -105,6 +108,7 @@ defmodule Browser.JS.DomCostTest do
       for n <- [50, 5000] do
         items = Enum.map_join(0..(div(n, 2) - 1), &~s(<li data-id="#{&1}"><span>x</span></li>))
         pid = start("<ul>" <> items <> ~s(</ul><p data-id="last"></p>))
+        Runtime.eval(pid, first)
         cost = cost(pid, lookups)
         assert value(pid, ~s{document.querySelectorAll('[data-id="7"]').length}) == ["1"]
         Runtime.stop(pid)
