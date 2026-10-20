@@ -2826,6 +2826,12 @@ defmodule Browser.JS.DOM do
   defp hget({:style, nid}, key, _self), do: style_get(nid, key)
   defp hget({:style, nid, :computed}, key, _self), do: computed_get(nid, key)
   defp hget({:dataset, nid}, key, _self), do: dataset_get(nid, key)
+  # (a property that `defineProperty` put on the window itself comes before a variable of the
+  # same name: a `let` binding stays as it is, see `Browser.JS.Global.define_var/2`)
+  defp hget(:window, key, {:obj, id}) when is_binary(key) do
+    if Obj.has_own?(deref(id), key), do: :miss, else: window_get(key)
+  end
+
   defp hget(:window, key, _self), do: window_get(key)
   defp hget(:location, key, _self), do: location_get(key)
   defp hget({:usp, k}, key, _self), do: usp_get(k, key)
@@ -8277,6 +8283,13 @@ defmodule Browser.JS.DOM do
     declare(scope, "history", hist_host())
     declare(scope, "localStorage", storage_host(:local))
     declare(scope, "sessionStorage", storage_host(:session))
+    # (`delete` and `defineProperty` leave these, see `Browser.JS.Global.define_var/2`)
+    fixed = Process.get(:js_global_fixed) || MapSet.new()
+
+    Process.put(
+      :js_global_fixed,
+      MapSet.union(fixed, MapSet.new(Browser.JS.Global.unforgeable()))
+    )
 
     for {name, v} <- [
           {"innerWidth", float(st().width)},

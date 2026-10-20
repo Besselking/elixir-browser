@@ -763,4 +763,24 @@ defmodule Browser.JS.IframeTest do
     assert errors == []
     assert logs == ["true true true"]
   end
+
+  test "delete and defineProperty on the window leave its unforgeable names and let bindings" do
+    {logs, errors} =
+      run(
+        ~S"""
+        const out = [];
+        out.push(delete window.document, typeof document);
+        try { Object.defineProperty(window, "location", { value: 1 }); out.push("defined"); } catch (e) { out.push(e.name); }
+        out.push(typeof location, delete window.top, window.top === window);
+        out.push(delete window.lx, lx);
+        Object.defineProperty(window, "cx", { value: 7, configurable: true });
+        out.push(cx, window.cx);
+        console.log(out.join(" "));
+        """,
+        "<script>let lx = 1; const cx = 3;</script>"
+      )
+
+    assert errors == []
+    assert logs == ["false object TypeError object false true true 1 3 7"]
+  end
 end

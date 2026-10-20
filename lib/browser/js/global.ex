@@ -7,6 +7,11 @@ defmodule Browser.JS.Global do
   alias Browser.JS.Interp
   require Browser.JS.Obj, as: Obj
 
+  @unforgeable ~w(window document location top)
+
+  @doc "The names of a window that a script cannot delete or define (`[LegacyUnforgeable]`)."
+  def unforgeable, do: @unforgeable
+
   def new, do: Interp.new_host(__MODULE__, :global, Interp.proto(:object))
 
   def host_get(:global, key, self) when is_binary(key) do
@@ -53,14 +58,18 @@ defmodule Browser.JS.Global do
     scope = Interp.global()
     s = Interp.deref(scope)
 
-    if Map.has_key?(s.vars, key) and not MapSet.member?(s.consts, key) and
+    # (a `let`, `const` or class binding is no property: only an own property can go)
+    if Map.has_key?(s.vars, key) and not Interp.global_lexical?(key) and
+         not MapSet.member?(s.consts, key) and
          not Interp.global_fixed?(key) do
       Interp.store(scope, %{s | vars: Map.delete(s.vars, key)})
       # a property of the same name that `defineProperty` put on the object goes too
       if own_defined?(Map.get(s.vars, :this), key), do: :default, else: true
     else
       # what is no variable may be a property defined on the object itself
-      if Map.has_key?(s.vars, key), do: false, else: :default
+      if Map.has_key?(s.vars, key) and not Interp.global_lexical?(key),
+        do: false,
+        else: :default
     end
   end
 
@@ -85,6 +94,15 @@ defmodule Browser.JS.Global do
       key in ["NaN", "Infinity", "undefined"] or not Map.has_key?(s.vars, key) or
           Interp.global_lexical?(key) ->
         desc
+
+      # (`window`, `document`, `location` and `top` of a window are accessors that are not
+      # configurable: a define cannot change them)
+      key in @unforgeable and Interp.global_fixed?(key) ->
+        if Enum.any?([:value, :writable, :get, :set], &Map.has_key?(desc, &1)) or
+             Map.get(desc, :configurable) == true or Map.get(desc, :enumerable) == false,
+           do: Interp.throw_error("TypeError", "Cannot redefine property: #{key}")
+
+        :ok
 
       Interp.global_fixed?(key) ->
         if Map.has_key?(desc, :get) or Map.has_key?(desc, :set) or

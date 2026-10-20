@@ -6502,7 +6502,9 @@ defmodule Browser.JS.Interp do
   # The names that a classic script of a page declares with `var` or `function` are
   # properties of the window that are not configurable: `delete window.x` leaves them, and
   # `defineProperty` cannot make them accessors (`global_fixed?/1`). As in `declare_globals/2`,
-  # a `var` of a name that is already there leaves that property as it is.
+  # a `var` of a name that is already there leaves that property as it is. A new `let`,
+  # `const` or class name is no property of the window (`global_lexical?/1`): `delete` and
+  # `defineProperty` on the window do not touch the binding.
   defp fix_globals(stmts, names) do
     fun_names = Enum.map(fundecls(stmts), &elem(&1, 0))
     g = deref(global())
@@ -6523,6 +6525,17 @@ defmodule Browser.JS.Interp do
     if fresh != [] do
       fixed = Process.get(:js_global_fixed) || MapSet.new()
       Process.put(:js_global_fixed, MapSet.union(fixed, MapSet.new(fresh)))
+    end
+
+    lex =
+      for n <- Enum.flat_map(stmts, &lexical_names/1),
+          is_binary(n),
+          not (Map.has_key?(g.vars, n) or (before != nil and Obj.has_own?(before, n))),
+          do: n
+
+    if lex != [] do
+      lexset = Process.get(:js_global_lex) || MapSet.new()
+      Process.put(:js_global_lex, MapSet.union(lexset, MapSet.new(lex)))
     end
   end
 
