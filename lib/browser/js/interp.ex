@@ -6121,7 +6121,9 @@ defmodule Browser.JS.Interp do
   # and `map_scope` (the frame), and the `:args` slot takes `{:mapped, aid}`, so that a
   # write to a parameter finds the object (see `sync_mapped/3`). The object and the two
   # slots are written with one `put` of the frame.
-  defp build_arguments(frame, i, fid) do
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def build_arguments(frame, i, fid) do
     f = :erlang.get(frame)
     info = :erlang.element(2, f)
     args_slot = :erlang.map_get(:args, info.slots)
@@ -9598,14 +9600,16 @@ defmodule Browser.JS.Interp do
     end
   end
 
-  defp delete_base_check(base, key) when base in [:null, :undefined],
+  # It is public because the closure compiler (`Browser.JS.Compile`) calls it.
+  @doc false
+  def delete_base_check(base, key) when base in [:null, :undefined],
     do:
       throw_error(
         "TypeError",
         "Cannot convert undefined or null to object (delete #{to_str(key)})"
       )
 
-  defp delete_base_check(_, _), do: :ok
+  def delete_base_check(_, _), do: :ok
 
   @doc false
   # The name of a callee node in an error text. It is public because the closure compiler

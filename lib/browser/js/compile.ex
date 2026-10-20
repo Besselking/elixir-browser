@@ -48,17 +48,18 @@ defmodule Browser.JS.Compile do
 
   These node kinds have closures of their own:
 
-    * constants, slot reads and `this`;
+    * constants, slot reads, `this`, `arguments` and regular expressions;
     * the reads of a name in the global scope or in a map scope (`{:gref}`, `{:mref}`);
     * `?:`, `&&`, `||`, `??`, the comma operator, templates and optional chains;
-    * the unary operators and the binary operators;
+    * the unary operators, `typeof` of a global name, `delete` of a property and the
+      binary operators;
     * property reads, calls, `new`, array literals and object literals;
     * assignments, compound assignments, `++` and `--` to a slot or to a property;
     * destructuring assignments and declarations with a pattern, which give the pattern
       with compiled expressions to `Interp.bind_pattern/4`;
     * the statements `expr`, `return`, `if`, `block`, `var`, `let`, `const`, `for`,
-      `while`, `break`, `continue`, `throw`, `switch`, `for-in`, `for-of`, `try` and
-      labels.
+      `while`, `do`-`while`, `break`, `continue`, `throw`, `switch`, `for-in`, `for-of`,
+      `try`, labels and the empty statement.
 
   A parent reads a constant operand inline. It also reads a slot of its own frame inline.
   Thus these operands need no closure call. A binary operator and a test have one closure
@@ -97,17 +98,16 @@ defmodule Browser.JS.Compile do
 
   These nodes are shells:
 
-    * `do-while`;
     * a block, a `for`, a `for-in`, a `for-of`, a `switch` or a `catch` that makes a block
       frame;
     * a literal with a spread or a method;
     * a call with a callee that the tree reads by name;
     * some rare forms of assignment and of `delete`.
 
-  Thus the order of `try` and `finally`, the close of iterators, the copies of a loop scope
-  and the block frames have one implementation, in `Interp`. A shell keeps the functions
-  and the classes as they are, because the heap keeps these nodes. A shell also keeps the
-  callee of a call as it is, because the text of an error names the callee.
+  Thus the copies of a loop scope for each round and the block frames have one
+  implementation, in `Interp`. A shell keeps the functions and the classes as they are,
+  because the heap keeps these nodes. A shell also keeps the callee of a call as it is,
+  because the text of an error names the callee.
 
   ## Nodes on the tree
 
@@ -116,8 +116,8 @@ defmodule Browser.JS.Compile do
 
     * functions and classes;
     * the reads and writes of a name that the resolver did not put in a slot;
-    * the special forms of `typeof` and `delete`;
-    * `super`, `import` and regular expressions;
+    * `typeof` of a name that is not global, and `delete` of a name;
+    * `super` and `import`;
     * the strings of a tagged template.
 
   ## Same results
@@ -1107,7 +1107,13 @@ defmodule Browser.JS.Compile do
   defp expr_node({:unary, "typeof", {k, _, _}} = node) when k in [:aslot, :mref],
     do: fallback(node)
 
-  defp expr_node({:unary, "typeof", {k, _}} = node) when k in [:gref, :id], do: fallback(node)
+  # (the clause of `ev/2` for a name that is not in a slot, from the root)
+  defp expr_node({:unary, "typeof", {:gref, name}}) do
+    node = {:unary, "typeof", {:id, name}}
+    fn env -> Interp.ev(node, Interp.root(env)) end
+  end
+
+  defp expr_node({:unary, "typeof", {:id, _}} = node), do: fallback(node)
 
   # (a constant operand gives the same value at each run, so the value is computed once)
   defp expr_node({:unary, "-", {:num, n}}) do
@@ -1119,6 +1125,40 @@ defmodule Browser.JS.Compile do
 
   defp expr_node({:unary, op, e}) when op in ["-", "+", "~", "typeof", "void"],
     do: unary(op, opnd(e))
+
+  # `delete o[k]`, as `ev/2` does it: the object, the key (a constant key is the string,
+  # any other key is its value with no conversion), the test of a nullish object, then
+  # the delete. Strict code throws when the delete gives false.
+  defp expr_node({:unary, "delete", {:member, o, k, _}}) when elem(k, 0) != :priv do
+    pair(
+      env,
+      opnd(o),
+      key_code(k),
+      ov,
+      key,
+      (
+        Interp.delete_base_check(ov, key)
+        Interp.delete(ov, key)
+      )
+    )
+  end
+
+  defp expr_node({:unary, "sdelete", {:member, o, k, _}}) when elem(k, 0) != :priv do
+    pair(
+      env,
+      opnd(o),
+      key_code(k),
+      ov,
+      key,
+      (
+        Interp.delete_base_check(ov, key)
+
+        if Interp.delete(ov, key) == false,
+          do: Interp.throw_error("TypeError", "Cannot delete property '#{Interp.to_str(key)}'"),
+          else: true
+      )
+    )
+  end
 
   defp expr_node({:unary, d, {:member, _, _, _} = target}) when d in ["delete", "sdelete"],
     do: shell({:unary, d, cmember(target)})
@@ -1153,6 +1193,22 @@ defmodule Browser.JS.Compile do
 
   # (the marker only keeps a name from the value, see `ev_named/3`)
   defp expr_node({:unnamed, e}), do: expr(e)
+
+  defp expr_node({:regex, source, flags}), do: fn _env -> Browser.JS.RegExp.new(source, flags) end
+
+  # `arguments` as a value, as `ev/2` reads it: the first read builds the object into the
+  # slot, which holds `{:unbuilt, id}` until then.
+  defp expr_node({:aslot, d, i} = form) do
+    fn env ->
+      if @check, do: Interp.check_landing(form, env)
+      frame = up(env, d)
+
+      case :erlang.element(i, :erlang.get(frame)) do
+        {:unbuilt, fid} -> Interp.build_arguments(frame, i, fid)
+        v -> v
+      end
+    end
+  end
 
   # (as `ev/2`: the value, then the bind of the pattern as an assignment)
   defp expr_node({:destructure, pat, right}) do
@@ -1895,6 +1951,13 @@ defmodule Browser.JS.Compile do
     fn env -> while_loop(tc, bc, env, labels) end
   end
 
+  defp stmt_node({:dowhile, body, c}, labels) do
+    {bc, tc} = {stmt(body, []), ctest(c)}
+    fn env -> do_loop(tc, bc, env, labels) end
+  end
+
+  defp stmt_node({:empty}, _labels), do: fn _env -> :ok end
+
   # A break to this label ends the labeled statement normally, as in `fstmt/3`.
   defp stmt_node({:labeled, l, s}, labels) do
     sc = stmt(s, [l | labels])
@@ -1954,9 +2017,9 @@ defmodule Browser.JS.Compile do
   defp stmt_node({:switch, disc, cases, sc}, _labels) when frameless(sc),
     do: switch(opnd(disc), cases, sc)
 
-  # The statements below stay on the tree with compiled children, so that the order of
-  # `try`/`finally`, the closing of iterators, the copies of a loop scope for each round
-  # and the block frames keep one implementation, in `Interp`.
+  # The statements below make a block frame. They stay on the tree with compiled children,
+  # so that the copies of a loop scope for each round and the block frames keep one
+  # implementation, in `Interp`.
   defp stmt_node({:switch, disc, cases, sc}, labels) do
     cases =
       for {t, body} <- cases,
@@ -1972,8 +2035,6 @@ defmodule Browser.JS.Compile do
 
   defp stmt_node({kind, decl, pat, obj, body, sc}, labels) when kind in [:forin, :forof],
     do: shell_stmt({kind, decl, pat, cc(obj), cs(body), sc}, labels)
-
-  defp stmt_node({:dowhile, body, c}, labels), do: shell_stmt({:dowhile, cs(body), cc(c)}, labels)
 
   defp stmt_node({:block, stmts, sc}, labels),
     do: shell_stmt({:block, [{:cc, list(stmts)}], sc}, labels)
@@ -2134,6 +2195,24 @@ defmodule Browser.JS.Compile do
       end
     else
       :ok
+    end
+  end
+
+  # The rounds of a `do`-`while`, as `fstmt/3` runs them: the body with no step before it,
+  # then the rounds of `while_loop/4` (the test, a step, the body).
+  defp do_loop(tc, bc, env, labels) do
+    case bc.(env) do
+      :ok ->
+        while_loop(tc, bc, env, labels)
+
+      {:cont, l} = c ->
+        if l == nil or l in labels, do: while_loop(tc, bc, env, labels), else: leave(c)
+
+      {:brk, l} = c ->
+        if l == nil or l in labels, do: :ok, else: leave(c)
+
+      c ->
+        leave(c)
     end
   end
 

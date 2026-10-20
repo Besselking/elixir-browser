@@ -347,7 +347,28 @@ defmodule Browser.JS.CompileTest do
      ~S|function f(a){ var s = 0; for (var i = 0; i < a.length; i++) { const {x, y = 1} = a[i]; let [p, q] = [x, y]; s += p * q } return s } var a = []; for (var i = 0; i < 20; i++) a.push(i % 2 ? {x: i} : {x: i, y: 2}); console.log(f(a))|,
      max_steps: 5000},
     {"r16 pattern args",
-     ~S|function f(a, b){ var {x: a} = {x: 5}; var [b = arguments.length] = []; return [a, b, arguments[0], arguments[1]].join() } function g(){ var {arguments: z} = {arguments: 1}; return z } console.log(f(1, 2), f(1), g())|}
+     ~S|function f(a, b){ var {x: a} = {x: 5}; var [b = arguments.length] = []; return [a, b, arguments[0], arguments[1]].join() } function g(){ var {arguments: z} = {arguments: 1}; return z } console.log(f(1, 2), f(1), g())|},
+    # (r16) The small kinds (design r16 4.2, 4.7, 4.10): do-while, `delete o[k]`, the empty
+    # statement, regular expressions, `arguments` as a value and `typeof` of a global.
+    {"r16 do-while",
+     ~S|function f(n){ var log = []; var i = 0; do { i++; if (i == 2) continue; log.push(i) } while ((log.push('t' + i), i < n)); return log.join() } function g(){ var s = ''; outer: do { var j = 0; do { j++; if (j == 2) continue outer; if (j > 5) break outer; s += j } while (true) } while (s.length < 3); return s } function h(){ var k = 0; lab: do { k++; break lab } while (true); do ; while (k++ < 5); return k } console.log(f(3), f(0), g(), h())|},
+    {"r16 do-while steps",
+     ~S|function f(n){ var i = 0; do { i++ } while (i < n); return i } console.log(f(1), f(0), f(50))|,
+     max_steps: 300},
+    {"r16 do-while return",
+     ~S|function f(a){ var i = 0; do { if (a[i] == 'x') return i } while (++i < a.length); return -1 } function g(){ var i = 0; try { do { i++ } while (i < 3 && h(i)) } catch (e) { return e.message + i } } function h(i){ if (i == 2) throw new Error('t'); return true } console.log(f(['a', 'x']), f([]), g())|},
+    {"r16 delete",
+     ~S|function f(){ var r = []; var log = []; var o = {a: 1, b: 2, 1: 3}; var k = {toString(){ log.push('ts'); return 'a' }}; r.push(delete o[k], delete o[1], delete o['b'], delete o.zz, Object.keys(o).length, log.join()); var fr = Object.freeze({x: 1}); r.push(delete fr.x, delete fr['x']); var a = [1, 2, 3]; r.push(delete a[1], a.length, 1 in a); try { var n = null; delete n[k] } catch (e) { r.push(e.message) } try { var u; delete u.p } catch (e) { r.push(e.message) } return r.join() } console.log(f())|},
+    {"r16 delete strict",
+     ~S|function f(){ 'use strict'; var r = []; var o = {a: 1}; var k = 'a'; r.push(delete o[k], delete o.a); var fr = Object.freeze({x: 1, 2: 0}); try { delete fr[k = 'x'] } catch (e) { r.push(e.constructor.name, e.message) } try { delete fr[2] } catch (e) { r.push(e.message) } try { delete [].length } catch (e) { r.push(e.message) } try { delete null[k] } catch (e) { r.push(e.message) } var p = new Proxy({}, {deleteProperty(){ return false }}); try { delete p.q } catch (e) { r.push(e.message) } return r.join() } console.log(f())|},
+    {"r16 empty statement",
+     ~S|function f(x){ if (x) ; else ; for (var i = 0; i < 3; i++) ; while (x-- > 0) ; label: ; return x } console.log(f(3), f(0))|},
+    {"r16 regex",
+     ~S|function f(s){ var r = []; for (var i = 0; i < 2; i++) { var re = /a(b)?/g; r.push(re.lastIndex, re.exec(s) && re.lastIndex, re.test(s)) } var a = /x/, b = /x/; r.push(a === b, /^[0-9]+$/.test(s), 'a.b.c'.replace(/\./g, '-'), /(?<n>\d+)/.exec('ab12').groups.n); return r.join() } console.log(f('xab'), f('123'))|},
+    {"r16 arguments value",
+     ~S|function f(a, b){ var x = arguments; a = 5; var y = arguments; return [x === y, x[0], y.length, g(arguments), arguments[1]].join() } function g(args){ return Array.prototype.join.call(args, '+') } function h(a){ 'use strict'; a = 9; return g(arguments) } function k(){ return [typeof arguments, arguments.length] } function m(a){ a = 2; return g(arguments) } console.log(f(1, 2), f(), h(1), k(1, 2).join(), m(1))|},
+    {"r16 typeof global",
+     ~S|var gv = 1; function f(){ return [typeof gv, typeof undefinedName, typeof Math, typeof parseInt, typeof globalThis, typeof NaN].join() } console.log(f()); function g(){ try { return typeof lateLet } catch (e) { return e.constructor.name } } console.log(g()); let lateLet = 1; console.log(g())|}
   ]
 
   # One snippet for each kind that the compiler handles, and one for each kind that falls
