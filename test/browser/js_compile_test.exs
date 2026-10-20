@@ -299,6 +299,35 @@ defmodule Browser.JS.CompileTest do
      max_steps: 3000},
     {"r16 for-of array steps",
      ~S|function f(a){ var s = 0; for (const x of a) s += x; for (var k in a) s += a[k]; return s } var a = []; for (var i = 0; i < 16; i++) a.push(i); console.log(f(a))|,
+     max_steps: 2000},
+    # (r16) The compiled try (design r16 4.5): a parameter that is a pattern, with defaults
+    # and a read in its dead zone, no parameter, a throw from the handler, a finalizer that
+    # overrides each outcome, the step limit and the depth limit in the block, and the
+    # position after the statement.
+    {"r16 try param pattern",
+     ~S|function f(v){ try { throw v } catch ({a, b = a + 1, c: [d = 'd'] = []}) { return [a, b, d].join() } } function g(){ try { throw [] } catch ([x = y, y]) { return x } } function h(){ try { throw {} } catch ({m = (() => 1)()}) { return m } } var r = [f({a: 1}), f({a: 2, b: 0, c: ['e']})]; try { g() } catch (e) { r.push(e.constructor.name) } try { f(null) } catch (e) { r.push(e.constructor.name) } r.push(h()); console.log(r.join())|},
+    {"r16 try no param",
+     ~S|function f(x){ var s = ''; try { if (x) throw 1; s += 'b' } catch { s += 'c' } try { s += 't' } catch (e) { s += 'never' } return s } console.log(f(0), f(1))|},
+    {"r16 try handler throws",
+     ~S|function f(){ var log = []; try { try { throw new Error('a') } catch (e) { log.push(e.message); throw new Error('b') } finally { log.push('fin') } } catch (e) { log.push(e.message) } return log.join() } console.log(f())|},
+    {"r16 try finally overrides",
+     ~S|function f(how, where){ var log = []; outer: for (var i = 0; i < 2; i++) { inner: for (var j = 0; j < 2; j++) { try { try { if (where == 'block') throw new Error('t'); log.push('b' + i + j); if (where == 'ret') return 'block-ret' } catch (e) { log.push('h'); if (where == 'block') throw new Error('h') } finally { log.push('f'); if (how == 'return') return 'fin-ret'; if (how == 'break') break inner; if (how == 'continue') continue outer; if (how == 'throw') throw new Error('fin') } } catch (e) { log.push(e.message); return log.join() } } } return log.join() } var r = []; for (const how of ['none', 'return', 'break', 'continue', 'throw']) for (const where of ['none', 'block', 'ret']) r.push(how + '/' + where + '=' + f(how, where)); console.log(r.join(' '))|},
+    {"r16 try finally value",
+     ~S|function f(){ try { return 'block' } finally { console.log('fin') } } function g(){ try { throw 'x' } catch (e) { return 'handler ' + e } finally { console.log('fin2') } } function h(){ var i = 0; while (true) { try { i++; if (i > 3) break; continue } finally { console.log('f' + i) } } return i } console.log(f(), g(), h())|},
+    {"r16 try step limit",
+     ~S|function f(){ try { for (;;) {} } catch (e) { console.log('caught') } } function g(){ try { for (;;) {} } finally { console.log('fin') } } try { f() } catch (e) {} g()|,
+     max_steps: 3000},
+    {"r16 try step limit override",
+     ~S|function f(){ for (var k = 0; k < 2; k++) { try { for (;;) {} } finally { return 'fin' } } } console.log(f())|,
+     max_steps: 3000},
+    {"r16 try depth limit",
+     ~S|function r(n){ try { return r(n + 1) } finally { } } function s(n){ try { return s(n + 1) } catch (e) { return e.message + n } } try { r(0) } catch (e) { console.log(e.constructor.name, e.message) } console.log(s(0))|},
+    {"r16 try position",
+     ~S|function f(){ try { null.x } catch (e) { return e.stack.split('\n').slice(0, 2).join(';') } } function g(){ try {
+  throw new Error('p') } catch (e) { var q = 1 }
+  return new Error('after').stack.split('\n')[1] } console.log(f(), g())|},
+    {"r16 try in loop",
+     ~S|function f(a){ var s = 0; for (var i = 0; i < a.length; i++) { try { s += a[i].v } catch (e) { s += 100 } } return s } console.log(f([{v: 1}, null, {v: 2}, undefined]))|,
      max_steps: 2000}
   ]
 

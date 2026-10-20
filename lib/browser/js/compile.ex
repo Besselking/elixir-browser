@@ -55,7 +55,8 @@ defmodule Browser.JS.Compile do
     * property reads, calls, `new`, array literals and object literals;
     * assignments, compound assignments, `++` and `--` to a slot or to a property;
     * the statements `expr`, `return`, `if`, `block`, `var`, `let`, `const`, `for`,
-      `while`, `break`, `continue`, `throw`, `switch`, `for-in`, `for-of` and labels.
+      `while`, `break`, `continue`, `throw`, `switch`, `for-in`, `for-of`, `try` and
+      labels.
 
   A parent reads a constant operand inline. It also reads a slot of its own frame inline.
   Thus these operands need no closure call. A binary operator and a test have one closure
@@ -94,8 +95,9 @@ defmodule Browser.JS.Compile do
 
   These nodes are shells:
 
-    * `try` and `do-while`;
-    * a block, a `for`, a `for-in`, a `for-of` or a `switch` that makes a block frame;
+    * `do-while`;
+    * a block, a `for`, a `for-in`, a `for-of`, a `switch` or a `catch` that makes a block
+      frame;
     * a declaration with a pattern;
     * a literal with a spread or a method;
     * a call with a callee that the tree reads by name;
@@ -1919,6 +1921,20 @@ defmodule Browser.JS.Compile do
        when kind in [:forin, :forof] and frameless(sc),
        do: for_each(kind, opnd(obj), head(decl, pat), stmt(body, []), tdz_scope(sc), labels)
 
+  # (a catch whose names a closure captures makes a catch frame, which stays on the tree)
+  defp stmt_node({:try, block, param, handler, finalizer, sc}, _labels) when frameless(sc) do
+    pw = param && head(:let, param)
+    sc = if match?(%{tdz: [], hoist: []}, sc), do: nil, else: sc
+
+    try_code(
+      stmt(block, []),
+      pw,
+      handler && stmt(handler, []),
+      finalizer && stmt(finalizer, []),
+      sc
+    )
+  end
+
   # (a switch ignores its labels: a `break` with the label of the switch goes to the
   # labeled statement around it)
   defp stmt_node({:switch, disc, cases, sc}, _labels) when frameless(sc),
@@ -2421,6 +2437,76 @@ defmodule Browser.JS.Compile do
   defp proto_exit(it, c) do
     Interp.iter_close(it, false)
     c
+  end
+
+  # ── try ────────────────────────────────────────────────────
+
+  # A frameless `try`, as `try_statement/6` in `Interp` runs it. The handler catches a JS
+  # throw only (the step limit and the errors of the engine go past it). It runs in the
+  # `catch` clause, outside the `try` of the block, so a throw from the handler goes to the
+  # finalizer: the entry of the scope (the names of the parameter go to their dead zone),
+  # the write of the parameter, then the handler. With a finalizer, the outcome of the
+  # block and the handler is kept: a completion, a throw, or an error of the engine with
+  # its stack trace. The finalizer runs after each of them. When it completes normally,
+  # the outcome comes back. Any other completion of the finalizer replaces the outcome,
+  # also a throw or the step limit.
+  #
+  # (a `return` in the block or in the handler is `:plain` from the resolver, so they give
+  # no pending call that must run inside the `try`)
+  defp try_code(bc, pw, hc, nil, sc), do: fn env -> catch_part(bc, pw, hc, sc, env) end
+
+  defp try_code(bc, _pw, nil, fc, _sc) do
+    fn env ->
+      outcome =
+        try do
+          {:done, bc.(env)}
+        catch
+          :throw, v -> {:thrown, v}
+          kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+        end
+
+      finally_part(outcome, fc, env)
+    end
+  end
+
+  defp try_code(bc, pw, hc, fc, sc) do
+    fn env ->
+      outcome =
+        try do
+          {:done, catch_part(bc, pw, hc, sc, env)}
+        catch
+          :throw, v -> {:thrown, v}
+          kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+        end
+
+      finally_part(outcome, fc, env)
+    end
+  end
+
+  defp catch_part(bc, pw, hc, sc, env) do
+    try do
+      bc.(env)
+    catch
+      {:js_error, v} ->
+        if @check, do: Interp.check_link(env)
+        if sc, do: Interp.enter_frameless(env, sc)
+        if pw, do: write_head(pw, v, env)
+        hc.(env)
+    end
+  end
+
+  defp finally_part(outcome, fc, env) do
+    case fc.(env) do
+      :ok ->
+        case outcome do
+          {:done, c} -> c
+          {:thrown, v} -> throw(v)
+          {:raised, kind, reason, st} -> :erlang.raise(kind, reason, st)
+        end
+
+      c ->
+        c
+    end
   end
 
   # ── tail sites ─────────────────────────────────────────────
