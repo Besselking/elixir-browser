@@ -690,6 +690,45 @@ defmodule Browser.JS.DOMGCTest do
     end)
   end
 
+  # The realms share the built-in objects. A frame that goes gives back what its functions
+  # changed on them (`Browser.JS.Intrinsics`): a later page sees the built-ins of the boot,
+  # and the page of the frame is freed. What the page's own realm changed stays.
+  test "a frame that goes gives the shared built-in objects back their boot state" do
+    page(fn ->
+      base = Interp.heap_size()
+
+      js(~S"""
+      Map.prototype.fromPage = function () { return 'page' };
+      var f = document.createElement('iframe');
+      f.srcdoc = '<script>' +
+        'var big = []; for (var i = 0; i < 5000; i++) big.push({ i: i });' +
+        'Function.prototype.toString = function () { return "frame " + big.length };' +
+        'Set.prototype.foo = function () { return big };' +
+        'Object.defineProperty(Element.prototype, "bar", { get: function () { return big }, configurable: true });' +
+        'Map.prototype.fromPage = Map.prototype.fromPage;' +
+        '<\/script>';
+      document.body.appendChild(f); 0
+      """)
+
+      timers()
+
+      assert js(
+               "[Function.prototype.toString.call(Math.max), typeof Set.prototype.foo, " <>
+                 "'bar' in document.body].join()"
+             ) == "frame 5000,function,true"
+
+      js("f.remove(); f = null; 0")
+      GC.collect()
+      assert Interp.heap_size() < base + 100
+
+      assert js("""
+             var d = Object.getOwnPropertyDescriptor(Function.prototype, 'toString');
+             [Function.prototype.toString.call(Math.max), d.value.name, d.enumerable, d.writable,
+              'foo' in Set.prototype, 'bar' in Element.prototype, new Map().fromPage()].join()
+             """) == "function max() { [native code] },toString,false,true,false,false,page"
+    end)
+  end
+
   # A timer of a frame that has gone does not run, and an interval of it is not set again.
   # (A frame that goes takes its timers with it, see `DOM.destroy_realm/1`. The timer here
   # stands for one that stays in the list: it gets the id of a document that is not there.)

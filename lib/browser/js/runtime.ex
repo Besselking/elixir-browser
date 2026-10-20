@@ -210,6 +210,9 @@ defmodule Browser.JS.Runtime do
     # what a frame's global scope starts with: the built-ins and the page's own window-level
     # names (`DOM.declare_window/1` gives it its own `window`, `document` and so on)
     Process.put(:rt_base_vars, Interp.deref(Interp.global()).vars)
+    # (the shared built-in objects as they are now: a frame that goes gives back what it
+    # changed on them, see `Browser.JS.Intrinsics`)
+    Browser.JS.Intrinsics.snapshot()
     Process.put(:rt_load_frame, &load_frame/3)
     Process.put(:rt_blank_frame, &blank_frame/1)
   end

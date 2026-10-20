@@ -932,7 +932,11 @@ defmodule Browser.JS.DOM do
         _ -> nil
       end
 
-    if is_integer(global), do: Browser.JS.Compile.drop_realm(global)
+    if is_integer(global) do
+      Browser.JS.Compile.drop_realm(global)
+      # (the functions of the realm leave the built-in objects that all realms share)
+      Browser.JS.Intrinsics.restore(global)
+    end
 
     realms = if s.doc == doc, do: s.realms, else: Map.delete(s.realms, doc)
     if s.doc == doc, do: Process.put(:dom_dead, doc)

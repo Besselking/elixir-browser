@@ -250,6 +250,8 @@ defmodule Browser.JS.GC do
   defp classify_key(:dom_forced_rects, _, acc), do: acc
   defp classify_key(:dom_forced, _, acc), do: acc
   defp classify_key(:dom_forced_spent, _, acc), do: acc
+  # (an identity mark of each shared built-in object, compared only, see `Browser.JS.Intrinsics`)
+  defp classify_key(:js_boot_marks, _, acc), do: acc
   # (the document's state is read in `collect/0`, see `Browser.JS.DOM.gc_begin/2`)
   defp classify_key(:dom, v, acc) when is_map(v), do: acc
   # (the process keys of a node are walked when the node is live)
