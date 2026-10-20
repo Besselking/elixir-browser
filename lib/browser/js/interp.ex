@@ -80,6 +80,7 @@ defmodule Browser.JS.Interp do
 
   # The key of the well-known symbol `Symbol.iterator`.
   @iterator_key {:symbol, :iterator, "Symbol.iterator"}
+  @species_key {:symbol, :species, "Symbol.species"}
 
   @doc false
   # The call depth of a chain in `:js_stack` (step 2f). The depth of the current call is in
@@ -177,6 +178,10 @@ defmodule Browser.JS.Interp do
     # (the positions of the keys of the array iterators name the prototypes of an earlier
     # heap, see `array_record_pristine?/1`)
     :erlang.erase(:js_arr_iter_pos)
+    # (the chains of the misses of the host objects, see `host_lookup/3`)
+    :erlang.erase(:js_pmiss)
+    # (the positions of `species_plain?/1` name the records of an earlier heap)
+    :erlang.erase(:js_species_pos)
 
     # The switch of the fast records (`Browser.JS.Shape`): the application setting
     # `:js_shapes` set to `false` (`JS_SHAPES=0`, or `mix js.test262 --shapes off`) turns
@@ -2007,7 +2012,7 @@ defmodule Browser.JS.Interp do
         else
           case mod.host_get(data, key, {:obj, id}) do
             {:ok, v} -> v
-            :miss -> lookup(o, key, {:obj, id})
+            :miss -> host_lookup(o, key, {:obj, id})
           end
         end
 
@@ -2092,6 +2097,112 @@ defmodule Browser.JS.Interp do
         :undefined
     end
   end
+
+  # ── the misses of host objects ─────────────────────────────
+  # A read of a key that a host object does not have walks the prototype chain to its end.
+  # For a node of the DOM that is five records (the prototype of the tag, `HTMLElement`,
+  # `Node`, `EventTarget`, `Object`), and scripts do such reads very often: jQuery reads
+  # `elem[jQuery.expando]` of each element of a list when it cleans its data.
+  #
+  # The process key `:js_pmiss` holds a map of `{pid, key}` to the chain from the prototype
+  # `{:obj, pid}`: the list of `{id, sid}` of each record of the chain. A list is kept only
+  # when each record of the chain was a fast record that is not an array and did not hold
+  # `key`. A hit needs each prototype link to be the id of the list, up to the end of the
+  # chain, and each record there to have the shape `sid` still. This is exact for the same
+  # reasons as a cell of a prototype (see "The inline caches" in `Browser.JS.Shape`): a
+  # shape is immutable and a `sid` is never given two times in a process, so the record
+  # does not hold the key; a new key or a `delete` gives a new shape, and
+  # `Object.setPrototypeOf` changes a link. The shape of an array comes from the root of
+  # the arrays, so a record with the `sid` is not an array, which reads `length` and its
+  # elements in its own way. A proxy and a host object are not fast, so they never match.
+  # A freed id gives `:undefined`, which does not match, and a record of a new heap with
+  # the same id and `sid` holds the same keys. For such a record `lookup/3` reads only the
+  # own keys, so the read is `undefined` with no call. The own keys of the host object
+  # itself are read each time. The map holds at most `@pmiss_max` lists; the next list
+  # then starts a new map. The key is not a root of the collector (`Browser.JS.GC`): a
+  # list must not keep a prototype alive.
+  @pmiss_max 512
+
+  # The longest chain of a list of `:js_pmiss`.
+  @pmiss_depth 8
+
+  # `lookup/3` of the host object `o` after its `host_get` missed. A key that the chain
+  # holds costs only the search of the map more than `lookup/3`: the walk of a new list
+  # comes only after a read that gave `undefined`.
+  defp host_lookup(o, key, receiver) do
+    case :erlang.map_get(:proto, o) do
+      {:obj, pid} = link when not Obj.has_own?(o, key) ->
+        case :erlang.get(:js_pmiss) do
+          %{{^pid, ^key} => chain} ->
+            if pmiss_same?(link, chain),
+              do: :undefined,
+              else: pmiss_after(lookup(o, key, receiver), link, pid, key)
+
+          _ ->
+            pmiss_after(lookup(o, key, receiver), link, pid, key)
+        end
+
+      _ ->
+        lookup(o, key, receiver)
+    end
+  end
+
+  # The value `v` of a read; when it is `undefined`, a walk of the chain from `link` can
+  # give a new list for `{pid, key}` (`pmiss_learn/3`).
+  defp pmiss_after(:undefined, link, pid, key) do
+    pmiss_learn(link, pid, key)
+    :undefined
+  end
+
+  defp pmiss_after(v, _link, _pid, _key), do: v
+
+  defp pmiss_same?({:obj, pid}, [{pid2, sid} | rest]) when pid == pid2 do
+    case :erlang.get(pid) do
+      Obj.fast_record(^sid, _) = p -> pmiss_same?(:erlang.map_get(:proto, p), rest)
+      _ -> false
+    end
+  end
+
+  defp pmiss_same?(link, []), do: not is_tuple(link)
+  defp pmiss_same?(_link, _chain), do: false
+
+  # A walk of the chain from `link`: a new list for `{pid, key}` when the chain gives a list
+  # (`pmiss_chain/3`).
+  defp pmiss_learn(link, pid, key) do
+    case pmiss_chain(link, key, 0) do
+      nil ->
+        :ok
+
+      chain ->
+        m =
+          case :erlang.get(:js_pmiss) do
+            m when is_map(m) and map_size(m) < @pmiss_max -> m
+            _ -> %{}
+          end
+
+        :erlang.put(:js_pmiss, Map.put(m, {pid, key}, chain))
+        :ok
+    end
+  end
+
+  # The list of `{id, sid}` of the chain from `link` when each record there is a fast
+  # record that is not an array and does not hold `key`, or `nil`.
+  defp pmiss_chain({:obj, pid}, key, depth) when depth < @pmiss_depth do
+    case :erlang.get(pid) do
+      Obj.fast_record(sid, _) = p
+      when not Obj.has_own?(p, key) and :erlang.map_get(:class, p) != :array ->
+        case pmiss_chain(:erlang.map_get(:proto, p), key, depth + 1) do
+          nil -> nil
+          rest -> [{pid, sid} | rest]
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp pmiss_chain({:obj, _}, _key, _depth), do: nil
+  defp pmiss_chain(link, _key, _depth), do: if(is_tuple(link), do: nil, else: [])
 
   # spec lengths of the built-in functions, by name (a handful of names are shared
   # between objects with different arities; the common one wins)
@@ -4230,6 +4341,78 @@ defmodule Browser.JS.Interp do
   end
 
   @doc false
+  # Whether ArraySpeciesCreate of `v` gives a new plain array with no step that a script
+  # can see: `v` is an array that is not a proxy, its prototype is `Array.prototype` and it
+  # has no own `constructor`, the `constructor` of `Array.prototype` is the data value
+  # `%Array%`, and the `@@species` of `%Array%` is its own built-in getter. Then
+  # `constructor` gives `%Array%`, `@@species` gives `%Array%` with no step of a script, and
+  # `Construct(%Array%, n)` gives an array with `Array.prototype` (the `prototype` of
+  # `%Array%` cannot change), as `ArrayCreate(n)` does. The callers then make the result
+  # as a plain array. A false result costs only speed: the caller takes the steps of the
+  # spec.
+  #
+  # As for `array_record_pristine?/1`, the process key `:js_species_pos` keeps the ids of
+  # `Array.prototype` and `%Array%`, the `sid` of each one and the position of the key in
+  # it, from the last test that found the two values. A record with a new shape or in
+  # dictionary mode takes the search again. A new heap and a new realm erase the key. The
+  # two records are roots anyway (`{:proto, :array}` and `:js_array_species`), so the
+  # collector does not read the key (`Browser.JS.GC`).
+  def species_plain?({:obj, id}) do
+    case :erlang.get(id) do
+      %{class: :array} = o when not is_map_key(o, :proxy) -> species_record_plain?(o)
+      _ -> false
+    end
+  end
+
+  def species_plain?(_), do: false
+
+  defp species_record_plain?(o) do
+    with {apid, s1, p1, ctor, cid, s2, p2, getter} <- :erlang.get(:js_species_pos),
+         {:obj, ^apid} <- :erlang.map_get(:proto, o),
+         Obj.fast_record(^s1, v1) <- :erlang.get(apid),
+         Obj.fast_record(^s2, v2) <- :erlang.get(cid) do
+      # (the root shape of an array, `sid` -1, has no key, and most arrays have it)
+      case o do
+        Obj.fast_record(-1, _) -> true
+        _ -> not Obj.has_own?(o, "constructor")
+      end and
+        :erlang.element(p1, v1) == ctor and
+        :erlang.element(p2, v2) == {:accessor, getter, :undefined}
+    else
+      {:obj, _} -> false
+      _ -> species_search?(o)
+    end
+  end
+
+  @doc false
+  # `%Array%`, the constructor of the arrays of the realm, also when a script changed
+  # `Array.prototype.constructor` (`Browser.JS.Builtins` keeps it in `:js_array_species`).
+  def array_intrinsic, do: :erlang.element(1, :erlang.get(:js_array_species))
+
+  # `species_record_plain?/1` with a search of the two keys. When the result is true and
+  # the two records are fast, it keeps the positions for the next test.
+  defp species_search?(o) do
+    with {:obj, apid} = ap <- :erlang.get({:proto, :array}),
+         {{:obj, cid} = ctor, getter} <- :erlang.get(:js_array_species),
+         true <- :erlang.map_get(:proto, o) == ap and not Obj.has_own?(o, "constructor"),
+         apr = :erlang.get(apid),
+         cr = :erlang.get(cid),
+         true <-
+           Obj.own_value(apr, "constructor") == ctor and
+             Obj.own_value(cr, @species_key) == {:accessor, getter, :undefined} do
+      with {p1, _} <- Obj.fast_slot(apr, "constructor"),
+           {p2, _} <- Obj.fast_slot(cr, @species_key),
+           s1 = Obj.shape_id(apr),
+           s2 = Obj.shape_id(cr),
+           do: :erlang.put(:js_species_pos, {apid, s1, p1, ctor, cid, s2, p2, getter})
+
+      true
+    else
+      _ -> false
+    end
+  end
+
+  @doc false
   # the iteration protocol itself, with no shortcut for arrays (a patched iterator is seen)
   def iterate_protocol_list(v), do: iterate_protocol(v)
 
@@ -5933,6 +6116,63 @@ defmodule Browser.JS.Interp do
     end
 
     a
+  end
+
+  @doc false
+  # A read of `arguments[key]` through the form `{:aslot, d, i}` (`arguments.length`,
+  # `arguments[0]`, `arguments[i]`), for `ev/2` and the compiled code. While the slot holds
+  # `{:unbuilt, fid}`, the object is not built, and no code changed it: each change of the
+  # object reads the slot first, which builds the object. Then `length` is the count of the
+  # arguments, and an index below it gives the argument, or the value of its parameter when
+  # the element is mapped (a mapped element shows the current value of its parameter, as
+  # `build_arguments/3` copies it). These are own data properties, so the read is exact
+  # with no object. Every other key, and an index at or after the count (which the
+  # prototype chain answers), builds the object and reads it as before. The key is a
+  # constant or a slot (the callers allow no other key), so its evaluation cannot see
+  # that the object is built after it.
+  def args_get(env, d, i, key) do
+    frame = hop(env, d)
+    f = :erlang.get(frame)
+
+    case :erlang.element(i, f) do
+      {:unbuilt, fid} ->
+        case args_read(f, key) do
+          {:ok, v} -> v
+          :build -> get(build_arguments(frame, i, fid), key)
+        end
+
+      a ->
+        get(a, key)
+    end
+  end
+
+  defp args_read(f, key) do
+    info = :erlang.element(2, f)
+
+    case :erlang.element(:erlang.map_get(:args, info.slots), f) do
+      args when is_list(args) and key == "length" ->
+        {:ok, length(args) * 1.0}
+
+      args when is_list(args) ->
+        case index(key) do
+          k when is_integer(k) and k < length(args) ->
+            case info.argmap do
+              %{} = argmap when map_size(argmap) > 0 ->
+                if :lists.keymember(k, 2, :maps.to_list(argmap)),
+                  do: {:ok, unbox(:erlang.element(@frame_base + k, f))},
+                  else: {:ok, :lists.nth(k + 1, args)}
+
+              _ ->
+                {:ok, :lists.nth(k + 1, args)}
+            end
+
+          _ ->
+            :build
+        end
+
+      _ ->
+        :build
+    end
   end
 
   # index to name for the mapped parameters: only the indices below the argument count
@@ -8740,6 +8980,14 @@ defmodule Browser.JS.Interp do
 
   def ev({:supdate, op, prefix?, {:mref, d, name}}, env),
     do: ev({:supdate, op, prefix?, {:id, name}}, hop(env, d))
+
+  # (`arguments.length` and `arguments[k]` read the arguments list while the object is not
+  # built, see `args_get/4`)
+  def ev({:member, {:aslot, d, i} = form, k, false}, env)
+      when elem(k, 0) in [:num, :str, :slot] do
+    if @check, do: check_landing(form, env)
+    args_get(env, d, i, ev(k, env))
+  end
 
   def ev({:member, o, k, opt}, env) do
     ov = ev(o, env)

@@ -10,6 +10,7 @@ defmodule Browser.JS.ArrayGeneric do
   import Browser.JS.Args
   alias Browser.JS.{Builtins, Interp, Props, Proxy}
   require Browser.JS.Elems, as: Elems
+  require Browser.JS.Obj, as: Obj
 
   @max 9_007_199_254_740_991
   @max_array 4_294_967_295
@@ -124,6 +125,12 @@ defmodule Browser.JS.ArrayGeneric do
 
   # ArraySpeciesCreate
   defp species_create(o, n) do
+    if Interp.species_plain?(o),
+      do: array_create(n),
+      else: species_create_get(o, n)
+  end
+
+  defp species_create_get(o, n) do
     if Proxy.is_array(o) do
       c = Interp.get(o, "constructor")
 
@@ -140,7 +147,7 @@ defmodule Browser.JS.ArrayGeneric do
         end
 
       cond do
-        c == :undefined or c == Interp.get(proto(:array), "constructor") ->
+        c == :undefined or c == Interp.array_intrinsic() ->
           array_create(n)
 
         not function?(c) ->
@@ -703,6 +710,55 @@ defmodule Browser.JS.ArrayGeneric do
   # (`Elems.replace/2`) and needs no map. A result that is not plain gets each value with
   # `create!/3`, and `acc` does not change.
   def concat(o, args) do
+    case concat_lists(o, args) do
+      nil -> concat_steps(o, args)
+      lists -> {:obj, alloc(Elems.new(:lists.append(lists), proto(:array)))}
+    end
+  end
+
+  # The lists of the parts of `concat`, in order, when the steps of the spec read
+  # nothing that a script can see: ArraySpeciesCreate gives a plain array
+  # (`Interp.species_plain?/1`), and each part is a value that is not an object (one
+  # element) or an array that is not a proxy and not an arguments object, with
+  # `Array.prototype` as its prototype and only data values with no hole (a dense record),
+  # and no record of the chain `o`, `Array.prototype`, `Object.prototype` holds
+  # `@@isConcatSpreadable`. Then Get of `@@isConcatSpreadable` gives `undefined` with no
+  # call, IsArray is true, Get of `length` gives the count of the elements, and each
+  # element is a data value. Else `nil`, and the caller takes the steps.
+  defp concat_lists(o, args) do
+    ap = proto(:array)
+
+    with true <- Interp.species_plain?(o),
+         {:obj, apid} <- ap,
+         %{proto: {:obj, opid} = op} = apr <- deref(apid),
+         true <- op == proto(:object),
+         %{proto: op_proto} = opr <- deref(opid),
+         false <- is_tuple(op_proto) or Obj.has_own?(apr, @spreadable),
+         false <- Obj.has_own?(opr, @spreadable) do
+      concat_parts([o | args], ap, [], 0)
+    else
+      _ -> nil
+    end
+  end
+
+  defp concat_parts([{:obj, id} | rest], ap, acc, n) do
+    case :erlang.get(id) do
+      %{class: :array, proto: ^ap} = r
+      when Elems.dense?(r) and not is_map_key(r, :proxy) and not is_map_key(r, :arguments) and
+             not Obj.has_own?(r, @spreadable) ->
+        list = Elems.to_list(r)
+        concat_parts(rest, ap, [list | acc], n + length(list))
+
+      _ ->
+        nil
+    end
+  end
+
+  defp concat_parts([v | rest], ap, acc, n), do: concat_parts(rest, ap, [[v] | acc], n + 1)
+  defp concat_parts([], _ap, acc, n) when n <= @max_array, do: :lists.reverse(acc)
+  defp concat_parts([], _ap, _acc, _n), do: nil
+
+  defp concat_steps(o, args) do
     a = species_create(o, 0)
     plain? = fresh_array?(a)
 

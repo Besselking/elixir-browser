@@ -294,6 +294,30 @@ defmodule Browser.JSGCTest do
     |> Task.await(30_000)
   end
 
+  # `:js_pmiss` holds the ids of the prototypes of the chains of the misses of host
+  # objects (`Interp.host_lookup/3`). It is not a root.
+  test "the chains of the misses of host objects keep no prototype alive" do
+    Task.async(fn ->
+      Interp.init(10_000_000)
+      Builtins.install()
+
+      {:ok, p} =
+        Parser.parse("""
+        var ta = new Int32Array(1), mid = Object.create(Int32Array.prototype);
+        Object.setPrototypeOf(ta, mid); ta.nope;
+        Object.setPrototypeOf(ta, Int32Array.prototype); mid = null;
+        """)
+
+      Interp.run_program(p)
+      assert [mid] = for({{pid, "nope"}, _} <- Process.get(:js_pmiss), do: pid)
+      assert is_map(:erlang.get(mid))
+
+      GC.collect()
+      assert :erlang.get(mid) == :undefined
+    end)
+    |> Task.await(30_000)
+  end
+
   # `Browser.JS.DOM.gc_root/1` leaves out the fields that hold no JS value. The fields that
   # can hold one stay roots: in the running realm and in the saved fields and keys of a
   # realm that does not run.

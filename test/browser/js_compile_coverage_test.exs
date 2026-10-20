@@ -55,9 +55,9 @@ defmodule Browser.JS.CompileCoverageTest do
   # `return` of the old path, and a `for` with a head that has no known shape.
   @allowed_fstmt MapSet.new([:classdecl, :using, :return])
 
-  # Tail sites on the tree: a comma expression, a logical operator, and a call whose callee
-  # `call_target/2` reads by name, through `super` or through an optional chain.
-  @allowed_tail MapSet.new([:seq, :logical, {:call, :id}, {:call, :super}, {:call, :chain}])
+  # Tail sites on the tree: a call whose callee `call_target/2` reads by name, through
+  # `super` or through an optional chain.
+  @allowed_tail MapSet.new([{:call, :id}, {:call, :super}, {:call, :chain}])
 
   # One snippet for each compiled kind and for each kind with compiled children.
   @snippets [
@@ -83,6 +83,9 @@ defmodule Browser.JS.CompileCoverageTest do
     "function f(x) { return /a/.test(x) }",
     "function f(x) { 'use strict'; x.a = 1; x.b += 1; x.c++; return x }",
     "function f(x) { return x ? g(x) : (x, h(x)) }",
+    "function f(x) { return x && g(x) }",
+    "function f(x) { return x || (x = 1, g(x)) }",
+    "function f(x) { return x ?? (g(x), x.h(x)) }",
     "function f() { return arguments.length }",
     "function f() { return this.a }",
     "function f() { return new.target }"

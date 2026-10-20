@@ -446,6 +446,62 @@ defmodule Browser.JS.DomBatchTest do
            }
   end
 
+  # Parsed HTML with no `<template>` is made on a small state (`build_list_fast/3`), HTML with
+  # one by `build_list/3`. A template at the end of the HTML makes the second path make the same
+  # nodes first: they must have the same ids, fields, indexes and counts.
+  test "parsed HTML with and without a template gives the same nodes" do
+    html =
+      ~S|<li id="a" class="x  y" data-id="0" @z="1" @click="go()">t<!-- c --><b>1</b></li>\n| <>
+        ~S|<li data-id="1"><i id="a">2</i><!--d--></li>text<iframe></iframe><svg><circle r="1"/></svg>|
+
+    [a, b] =
+      for tail <- ["", "<template></template>"] do
+        # (the box is not in the document: the reply gives numbers to new elements of the
+        # document, and the iframe does not load)
+        {pid, [], []} =
+          start("", ~S"""
+          document.querySelector('[data-id="0"]');
+          window.box = document.createElement("ul");
+          """)
+
+        Runtime.eval(pid, "box.innerHTML = '#{html}' + '#{tail}'; 1")
+        s = state(pid)
+        Runtime.stop(pid)
+        s
+      end
+
+    assert_indexes(a)
+    assert_indexes(b)
+    assert length(a.ids["a"]) == 2
+    assert Map.keys(a.aidx["data-id"]) == ["0", "1"]
+    # (the template and its content)
+    assert b.next == a.next + 2
+    assert {b.ids, b.aidx} == {a.ids, a.aidx}
+    assert map_size(b.iframes) == map_size(a.iframes) and map_size(a.iframes) > 0
+    # (the template: 4 writes as it is made, 2 as it goes into the fragment, 4 as it moves)
+    assert b.rev == a.rev + 10
+    # (only the kids of the box are not the same)
+    [box] = for {nid, n} <- a.nodes, b.nodes[nid] != n, do: nid
+    assert b.nodes[box].kids == a.nodes[box].kids ++ [a.next]
+    assert b.nodes[a.next].tag == "template"
+  end
+
+  test "a template below other elements in innerHTML keeps its content apart" do
+    {logs, errors} =
+      run(~s(<div id="box"></div>), ~S"""
+      const box = document.getElementById("box");
+      box.innerHTML = '<div><p><template id="t"><b id="x" class="k">t</b></template></p></div>';
+      const t = document.getElementById("t");
+      console.log([document.getElementById("x"), box.querySelectorAll("b").length,
+        box.getElementsByTagName("b").length, document.getElementsByClassName("k").length,
+        t.childNodes.length, t.content.firstChild.id, t.content.firstChild.parentNode === t.content,
+        t.innerHTML].join());
+      """)
+
+    assert errors == []
+    assert logs == [~S|,0,0,0,0,x,true,<b id="x" class="k">t</b>|]
+  end
+
   # The counts that one `innerHTML` adds, as one node at a time gives them: the fragment and
   # each node are new (`next`); `rev` counts each write of a node.
   test "innerHTML adds the same counts as one node at a time" do

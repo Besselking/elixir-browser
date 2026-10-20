@@ -2303,4 +2303,165 @@ defmodule Browser.JSTest do
     # (inside a function that is not an arrow, `arguments` is its own)
     assert js("class C { static { var f = function(){ var [a = arguments] = [] } } } 1") == 1.0
   end
+
+  # A read of a key that a host object and its prototypes do not have keeps the chain in
+  # `:js_pmiss` (`Interp.host_lookup/3`). Each change of the chain must show.
+  test "a missing key of a host object shows each later change of its prototype chain" do
+    src = ~S"""
+    var ta = new Int32Array(2), k = 'x' + 1, out = [];
+    function rd() { return String(ta[k]) }
+    out.push(rd(), rd());
+    Int32Array.prototype[k] = 1; out.push(rd());
+    delete Int32Array.prototype[k]; out.push(rd(), rd());
+    var tp = Object.getPrototypeOf(Int32Array.prototype);
+    tp[k] = 2; out.push(rd()); delete tp[k]; out.push(rd());
+    Object.prototype[k] = 3; out.push(rd()); delete Object.prototype[k]; out.push(rd());
+    Object.defineProperty(Object.prototype, k, {get: function () { return 'g' }, configurable: true});
+    out.push(rd()); delete Object.prototype[k]; out.push(rd());
+    var s = Symbol('s'); out.push(String(ta[s])); tp[s] = 's'; out.push(ta[s]); delete tp[s];
+    ta[k] = 'own'; out.push(rd()); delete ta[k]; out.push(rd());
+    tp[k] = undefined; out.push(rd(), rd()); tp[k] = 4; out.push(rd()); delete tp[k];
+    var mid = Object.create(Int32Array.prototype);
+    Object.setPrototypeOf(ta, mid); out.push(rd(), rd());
+    mid[k] = 5; out.push(rd()); delete mid[k]; out.push(rd());
+    Object.setPrototypeOf(mid, {[k]: 6}); out.push(rd());
+    var end = Object.create(null); Object.setPrototypeOf(ta, end); out.push(rd(), rd());
+    Object.setPrototypeOf(end, {[k]: 7}); out.push(rd());
+    var n = 0, px = new Proxy({}, {get: function () { return n++ ? 'p' : undefined }});
+    Object.setPrototypeOf(ta, px); out.push(rd(), rd());
+    Object.setPrototypeOf(ta, Int32Array.prototype);
+    for (var i = 0; i < 600; i++) ta['y' + i];
+    out.push(rd()); Int32Array.prototype[k] = 8; out.push(rd());
+    out.join()
+    """
+
+    assert js(src) ==
+             "undefined,undefined,1,undefined,undefined,2,undefined,3,undefined,g,undefined,undefined,s,own,undefined,undefined,undefined,4,undefined,undefined,5,undefined,6,undefined,undefined,7,undefined,p,undefined,8"
+  end
+
+  # ArraySpeciesCreate gives a plain array with no step when nothing changed
+  # (`Interp.species_plain?/1`); each change must show.
+  test "the species of an array shows each change of the constructor and of the species" do
+    src = ~S"""
+    var out = [];
+    class B extends Array {}
+    function Mk(n) { this.mk = n }
+    function kind(r) { return r.mk !== undefined ? 'M' : r instanceof B ? 'B' : Array.isArray(r) && Object.getPrototypeOf(r) === Array.prototype ? 'A' : '?' }
+    var b0 = B.from([1, 2]); out.push(kind(b0.map(function (x) { return x })));
+    var a = [1, 2, 3];
+    function ks(l) { var s = ''; for (var i = 0; i < l.length; i++) s += kind(l[i]); return s }
+    function t() { return ks([a.map(function (x) { return x }), a.filter(Boolean), a.slice(1), a.concat([4]), a.splice(0, 0)]) }
+    out.push(t());
+    function Other() {} Other[Symbol.species] = Mk;
+    Array.prototype.constructor = Other; out.push(t());
+    Array.prototype.constructor = Array; out.push(t());
+    var b = B.from([1, 2]); out.push(ks([b.map(function (x) { return x }), b.slice(0), b.concat([])]));
+    a.constructor = B; out.push(t()); delete a.constructor; out.push(t());
+    var desc = Object.getOwnPropertyDescriptor(Array, Symbol.species);
+    Object.defineProperty(Array, Symbol.species, {get: function () { return Mk }, configurable: true}); out.push(t());
+    Object.defineProperty(Array, Symbol.species, desc); out.push(t());
+    delete Array.prototype.constructor; out.push(t());
+    Array.prototype.z1 = 1; Array.prototype.constructor = Array; delete Array.prototype.z1; out.push(t());
+    Array.prototype.constructor = B; out.push(t()); Array.prototype.constructor = Array; out.push(t());
+    var c = [1, 2]; Object.setPrototypeOf(c, B.prototype); out.push(kind(c.map(function (x) { return x })));
+    var log = [], pa = new Proxy([1], {get: function (t, k, r) { if (k === 'constructor') log.push('c'); return Reflect.get(t, k, r) }});
+    Array.prototype.map.call(pa, function (x) { return x }); Array.prototype.slice.call(pa); [0].concat.call(pa); out.push(log.join(''));
+    var e = [1]; e.constructor = B; out.push(kind(e.map(function (x) { return x })));
+    out.join(' ')
+    """
+
+    assert js(src) ==
+             "B AAAAA MMMMM AAAAA BBB BBBBB AAAAA MMMMM AAAAA AAAAA AAAAA BBBBB AAAAA B ccc B"
+  end
+
+  # `concat` of plain dense arrays joins their lists (`ArrayGeneric.concat/2`).
+  test "concat takes the steps of the spec for holes, spreadable keys and other objects" do
+    src = ~S"""
+    var out = [], sp = Symbol.isConcatSpreadable;
+    function s(v) { return JSON.stringify(v) + ':' + v.length }
+    out.push(s([1, 2].concat([3], 4, [[5]])));
+    var h = [1, , 3].concat([4]); out.push(h.length + ',' + (1 in h) + ',' + h[1]);
+    Object.prototype[1] = 'p'; var h2 = [1, , 3].concat([4]); out.push((1 in h2) + ',' + h2[1] + ',' + h2.hasOwnProperty(1)); delete Object.prototype[1];
+    Array.prototype[sp] = false; out.push(s([1].concat([2]))); delete Array.prototype[sp];
+    Object.prototype[sp] = false; out.push(s([1].concat([2]))); delete Object.prototype[sp];
+    var o = [2, 3]; o[sp] = false; out.push(s([1].concat(o)));
+    var t = [1]; t[sp] = false; out.push(s(t.concat([2])));
+    (function () { out.push(s([1].concat(arguments))) })(7, 8);
+    (function () { Object.setPrototypeOf(arguments, Array.prototype); out.push(s([1].concat(arguments))) })(7, 8);
+    (function () { 'use strict'; Object.setPrototypeOf(arguments, Array.prototype); out.push(s([1].concat(arguments))) })(7, 8);
+    var q = [9], pq = Object.create(Array.prototype); pq[sp] = false; Object.setPrototypeOf(q, pq); out.push(s([1].concat(q)));
+    var o2 = {length: 2, 0: 'a', 1: 'b'}; out.push(s([1].concat(o2))); o2[sp] = true; out.push(s([1].concat(o2)));
+    var g = [1, 2]; Object.defineProperty(g, 0, {get: function () { return 'got' }}); out.push(s([0].concat(g)));
+    var r = [1]; var c = r.concat(); c.push(2); out.push(r.length + ',' + c.length + ',' + (r !== c));
+    out.join(' ')
+    """
+
+    assert js(src) ==
+             ~S'[1,2,3,4,[5]]:5 4,false,undefined true,p,true [[1],[2]]:2 [[1],[2]]:2 [1,[2,3]]:2 [[1],2]:2 [1,{"0":7,"1":8}]:2 [1,{"0":7,"1":8}]:2 [1,{"0":7,"1":8}]:2 [1,[9]]:2 [1,{"0":"a","1":"b","length":2}]:2 [1,"a","b"]:3 [0,"got",2]:3 1,2,true'
+  end
+
+  # `arguments.length` and `arguments[k]` read the list of the arguments while the object
+  # is not built (`Interp.args_get/4`).
+  test "a read of arguments before the object is built gives the values of the object" do
+    src = ~S"""
+    var out = [];
+    function a1(x, y){ x = 5; return [arguments.length, arguments[0], arguments[1], arguments[2], arguments['0'], arguments[-0]].join(); }
+    out.push(a1(1, 2));
+    function a2(x, y){ 'use strict'; x = 5; return [arguments.length, arguments[0], arguments[1], arguments[2]].join(); }
+    out.push(a2(1, 2));
+    function a3(x, x){ return [arguments[0], arguments[1], x].join(); }
+    out.push(a3(1, 2));
+    Object.prototype[2] = 'proto';
+    function a4(){ return [arguments.length, arguments[2], arguments[1]].join(); }
+    out.push(a4(1));
+    delete Object.prototype[2];
+    function a5(x){ var i = 0; var r = arguments[i]; x = 9; return r + ',' + arguments[i] + ',' + arguments[0]; }
+    out.push(a5(1));
+    function a6(x){ arguments[0] = 7; return x + ',' + arguments[0] + ',' + arguments.length; }
+    out.push(a6(1));
+    function a7(x){ arguments.length = 0; return arguments.length + ',' + arguments[0]; }
+    out.push(a7(1));
+    function a8(){ var f = () => arguments[1] + arguments.length; return f(); }
+    out.push(a8(3, 4));
+    function a9(x){ var s = 'length'; return arguments[s] + ',' + arguments.callee.name; }
+    out.push(a9(1, 2, 3));
+    function a10(x, y){ y = 'w'; return arguments[1] + ',' + arguments.length; }
+    out.push(a10(1));
+    function a11(x){ let k = 1; return arguments[k]; }
+    out.push(String(a11(1, 'two')));
+    function a12(x = 1){ return arguments[0] + ',' + arguments.length; }
+    out.push(a12(4, 5));
+    out.join(' | ');
+    ;
+    function b1(x) { 'use strict'; arguments[0] = 7; return x + ',' + arguments[0] }
+    function b2(x) { var r = arguments.length; arguments[5] = 1; return r + ',' + arguments.length + ',' + arguments[5] }
+    function b3(x) { x = 2; var a = arguments; return arguments[0] + ',' + a[0] }
+    out.join(' | ') + ' || ' + [b1(1), b2(1), b3(1)].join(' | ')
+    """
+
+    assert js(src) ==
+             "2,5,2,,5,5 | 2,1,2, | 1,2,2 | 1,proto, | 1,9,9 | 7,7,1 | 0,1 | 6 | 3,a9 | undefined,1 | two | 4,2 || 1,7 | 1,1,1 | 2,2"
+  end
+
+  # The compiled code gives the tail of the last operand of a comma expression and of the
+  # right operand of a logical operator. (only a strict function has tail sites)
+  test "a return of a comma expression or a logical operator gives the value of the tree" do
+    src = ~S"""
+    "use strict";
+    var out = [], log = [];
+    function g(x) { log.push(x); return 'g' + x }
+    function and(x) { return x && g(x) }
+    function or(x) { return x || g(x) }
+    function nc(x) { return x ?? g(x) }
+    function sq(x) { return log.push('a'), x = x + 1, g(x) }
+    function mix(x) { return x || (x = 1, g(x)) }
+    function deep(n) { return n > 0 ? deep(n - 1) && n : 'done' }
+    function d2(n) { return n === 0 || d2(n - 1) }
+    function d3(n) { return n > 0 && (log.length, d3(n - 1)) }
+    out.push(and(0), and(''), and(2), or(0), or(3), nc(null), nc(undefined), nc(0), nc(false), sq(1), mix(0), mix(5), deep(50), d2(3000), d3(3000));
+    out.join() + ' | ' + log.join()
+    """
+
+    assert js(src) == "0,,g2,g0,3,gnull,gundefined,0,false,g2,g1,5,50,true,false | 2,0,,,a,2,1"
+  end
 end
