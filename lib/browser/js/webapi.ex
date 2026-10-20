@@ -687,6 +687,14 @@ defmodule Browser.JS.WebAPI do
     // ── window ───────────────────────────────────────────────
     def("cancelAnimationFrame", function (id) { clearTimeout(id); });
     def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = curLoc().origin; e.source = g; g.dispatchEvent(e); }, 0); });
+    // noModule reflects the nomodule attribute. A page asks `"noModule" in
+    // HTMLScriptElement.prototype` to know that the browser runs modules; a script with it is
+    // not run (see Runtime.script_info)
+    Object.defineProperty(HTMLScriptElement.prototype, "noModule", {
+      get: function () { return this.hasAttribute("nomodule"); },
+      set: function (v) { if (v) this.setAttribute("nomodule", ""); else this.removeAttribute("nomodule"); },
+      enumerable: true, configurable: true
+    });
     // <dialog>: shown while it has the open attribute; showModal() puts it in the top layer
     // (see Browser.Modal) and makes the rest of the page inert
     if (typeof HTMLDialogElement === "function") {

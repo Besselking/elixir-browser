@@ -1130,6 +1130,27 @@ defmodule Browser.JS.DOMTest do
       assert logs(r) == ["classic", "module"]
     end
 
+    # `noModule` reflects the attribute: a page asks for it on the prototype to know that the
+    # browser runs modules, and a script that a page makes with it set does not run.
+    test "noModule of a script reflects the nomodule attribute" do
+      r =
+        run("""
+        var s = document.createElement('script');
+        var before = ['noModule' in HTMLScriptElement.prototype, s.noModule];
+        s.noModule = true;
+        before.push(s.hasAttribute('nomodule'), s.noModule);
+        s.textContent = "console.log('ran')";
+        document.body.appendChild(s);
+        s = document.createElement('script');
+        s.noModule = true; s.noModule = false;
+        before.push(s.hasAttribute('nomodule'));
+        console.log(before.join(' '));
+        """)
+
+      assert errors(r) == []
+      assert logs(r) == ["true false true true false"]
+    end
+
     test "a mouse event says where it is in the page and in the element" do
       r =
         run(
