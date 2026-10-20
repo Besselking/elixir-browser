@@ -191,6 +191,7 @@ defmodule Browser.Session do
     case Archive.open(url) do
       {:ok, start} ->
         UI.set_status(state.ui, "Replaying #{Path.basename(URI.decode(url))}: no network")
+        UI.sync_archive_menu(state.ui)
         load(state, start, mode, fetch_opts)
 
       {:error, why} ->
@@ -491,6 +492,7 @@ defmodule Browser.Session do
     if Archive.mode() == :replay do
       Archive.stop()
       UI.set_status(state.ui, "The network is used again")
+      UI.sync_archive_menu(state.ui)
     end
 
     {:noreply, state}

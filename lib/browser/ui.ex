@@ -104,6 +104,7 @@ defmodule Browser.UI do
     :wxMenu.append(develop, 5201, Browser.NetworkWindow.menu_label())
     :wxMenu.appendCheckItem(develop, 5202, ~c"Record Page Archive")
     :wxMenu.append(develop, 5203, ~c"Stop Replaying Archive")
+    :wxMenu.enable(develop, 5203, Browser.Archive.mode() == :replay)
     :wxMenuBar.append(menubar, develop, ~c"Develop")
     :wxFrame.setMenuBar(frame, menubar)
 
@@ -1744,6 +1745,11 @@ defmodule Browser.UI do
   def tabs_width(%{tabs: tabs}), do: tabs |> :wxWindow.getClientSize() |> elem(0)
 
   def set_title(%{frame: f}, title), do: :wxFrame.setTitle(f, String.to_charlist(title))
+  @doc "Enables Develop > Stop Replaying Archive only while an archive is replayed."
+  def sync_archive_menu(%{frame: f}) do
+    :wxMenuBar.enable(:wxFrame.getMenuBar(f), 5203, Browser.Archive.mode() == :replay)
+  end
+
   def set_status(%{frame: f}, text), do: :wxFrame.setStatusText(f, String.to_charlist(text))
   def enable(widget, bool), do: :wxWindow.enable(widget, enable: bool)
   def refresh(%{panel: p}), do: :wxWindow.refresh(p)
