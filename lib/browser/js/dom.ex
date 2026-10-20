@@ -937,6 +937,22 @@ defmodule Browser.JS.DOM do
     realms = if s.doc == doc, do: s.realms, else: Map.delete(s.realms, doc)
     if s.doc == doc, do: Process.put(:dom_dead, doc)
 
+    # The timers of the realm go with it. A timer holds its callback, and the callback holds
+    # the global scope of the realm: the whole page stays alive while the timer is there.
+    case Process.get(:js_timers) do
+      timers when is_list(timers) ->
+        Process.put(:js_timers, Enum.reject(timers, &(&1[:realm] == doc)))
+
+      _ ->
+        :ok
+    end
+
+    # All the host objects of the realm go: the window and the location, and also the history
+    # and the storages. A wrapper is a root of the collector and holds a prototype of the
+    # realm, thus the realm's global scope. (A storage wrapper holds no data: its items are in
+    # the state of the page.)
+    dead_aux = for {{:aux, d} = k, _} <- s.wrappers, aux_doc(d) == doc, do: k
+
     # The maps without the nodes of the document (`ids`). When the document has most of the
     # nodes (a frame that held a whole app), a map is made again from the entries that stay:
     # one walk, not one removal for each node.
@@ -958,7 +974,7 @@ defmodule Browser.JS.DOM do
         ids: id_index,
         aidx: aidx,
         iframes: :maps.filter(fn e, _ -> not gone?.(e) end, s.iframes),
-        wrappers: drop.(s.wrappers, [{:aux, {:window, doc}}, {:aux, {:location, doc}}]),
+        wrappers: drop.(s.wrappers, dead_aux),
         listeners: drop.(s.listeners, [{:window, doc}]),
         realms: realms,
         frames: frames,
@@ -969,6 +985,14 @@ defmodule Browser.JS.DOM do
 
     :ok
   end
+
+  # the document of the frame that the host object `data` of a window, a location, a history
+  # or a storage belongs to; nil for the page's own and for other data
+  defp aux_doc({:window, d}), do: d
+  defp aux_doc({:location, d}), do: d
+  defp aux_doc({:history, d}), do: d
+  defp aux_doc({:storage, _, d}), do: d
+  defp aux_doc(_), do: nil
 
   # what the host object `data` belongs to: the realm to run in, and the data as that realm
   # knows it (`:window` stands for the window of the running realm)
