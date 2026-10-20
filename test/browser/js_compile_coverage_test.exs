@@ -88,8 +88,6 @@ defmodule Browser.JS.CompileCoverageTest do
                      ) ++
                      [
                        :dowhile,
-                       :var,
-                       :destructure,
                        {:unary, "delete"},
                        {:unary, "sdelete"}
                      ]
@@ -132,7 +130,9 @@ defmodule Browser.JS.CompileCoverageTest do
     "function f(a) { for (const x of a) {} for (var y of a) {} for (let z of a) { if (z) break } for (a of a) {} for (const [p, q = 1] of a) {} return y }",
     "function f(a) { for (const x of a) { a.push(() => x) } for (let k in a) { a.push(() => k) } return a }",
     "function f(a) { try { g(a) } catch (e) { a = e } try { g(a) } catch { a = 1 } finally { a++ } try { g(a) } catch ({m, n = 1}) { a = m + n } return a }",
-    "function f(a) { try { g(a) } catch (e) { a = () => e } return a }"
+    "function f(a) { try { g(a) } catch (e) { a = () => e } return a }",
+    "function f(o) { const {a, b: [c = 1] = []} = o; let {[o.k]: d, ...e} = o, g; var [h, , ...i] = o; ({a: o.x, b: o[o.k] = 2} = o); return [a, c, d, e, g, h, i] }",
+    "function f(o) { const g = function () {}, h = () => 1; let k = class {}; var {m = function () {}} = o; return [g, h, k, m] }"
   ]
 
   # The programs of bench/js_runtime.exs. The script binds its program lists to variables,

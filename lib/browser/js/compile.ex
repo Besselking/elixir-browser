@@ -54,6 +54,8 @@ defmodule Browser.JS.Compile do
     * the unary operators and the binary operators;
     * property reads, calls, `new`, array literals and object literals;
     * assignments, compound assignments, `++` and `--` to a slot or to a property;
+    * destructuring assignments and declarations with a pattern, which give the pattern
+      with compiled expressions to `Interp.bind_pattern/4`;
     * the statements `expr`, `return`, `if`, `block`, `var`, `let`, `const`, `for`,
       `while`, `break`, `continue`, `throw`, `switch`, `for-in`, `for-of`, `try` and
       labels.
@@ -98,7 +100,6 @@ defmodule Browser.JS.Compile do
     * `do-while`;
     * a block, a `for`, a `for-in`, a `for-of`, a `switch` or a `catch` that makes a block
       frame;
-    * a declaration with a pattern;
     * a literal with a spread or a method;
     * a call with a callee that the tree reads by name;
     * some rare forms of assignment and of `delete`.
@@ -1153,7 +1154,20 @@ defmodule Browser.JS.Compile do
   # (the marker only keeps a name from the value, see `ev_named/3`)
   defp expr_node({:unnamed, e}), do: expr(e)
 
-  defp expr_node({:destructure, pat, right}), do: shell({:destructure, pat, cc(right)})
+  # (as `ev/2`: the value, then the bind of the pattern as an assignment)
+  defp expr_node({:destructure, pat, right}) do
+    cp = cpat(pat)
+
+    one(
+      env,
+      opnd(right),
+      v,
+      (
+        Interp.bind_pattern(cp, v, env, :assign)
+        v
+      )
+    )
+  end
 
   # A hole of a compiled lift template (step 5c): the value of the leaf `i`, which
   # `Async.lifted/5` keeps in the process key `:js_cps_vals` while the template runs.
@@ -1831,26 +1845,26 @@ defmodule Browser.JS.Compile do
     enter(sc, bc)
   end
 
+  # (a name that the resolver did not put in a slot can meet a `with` object, which only
+  # the tree reads)
   defp stmt_node({:var, kind, decls}, labels) do
-    if Enum.all?(decls, &slot_decl?/1) do
-      # (a `var` without a value does nothing, as in `exec/3`)
-      ds =
-        for {{:slot, d, i, name}, init} <- decls,
-            not (init == nil and kind == :var),
-            do: {d, i, name, if(init, do: opnd(init), else: {:k, :undefined})}
-
-      case ds do
-        [{d, i, name, io}] -> decl_one(d, i, name, io)
-        _ -> fn env -> decls(ds, env) end
-      end
-    else
-      # (an initializer that takes a name keeps its node: `ev_named/3` names it after the
-      # pattern)
+    if Enum.any?(decls, &match?({{:id, _}, _}, &1)) do
       decls =
         for {pat, init} <- decls,
             do: {pat, if(init == nil or nameable(init), do: init, else: cc(init))}
 
       shell_stmt({:var, kind, decls}, labels)
+    else
+      # (a `var` without a value does nothing, as in `exec/3`)
+      ds =
+        for {pat, init} <- decls,
+            not (init == nil and kind == :var),
+            do: decl_form(kind, pat, init)
+
+      case ds do
+        [{d, i, name, io}] when is_integer(d) -> decl_one(d, i, name, io)
+        _ -> fn env -> decls(ds, env) end
+      end
     end
   end
 
@@ -1992,9 +2006,17 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  # A declaration whose pattern is a slot and whose value takes no name.
-  defp slot_decl?({{:slot, _, _, _}, init}), do: init == nil or not nameable(init)
-  defp slot_decl?(_), do: false
+  # A declaration of a `var`, `let` or `const`, as `exec/3` runs it: the value (with
+  # `ev_named/3`, which names a function or a class after the binding), then the write as
+  # `bind/4` writes it. A slot is `{d, i, name, value form}`, and every other pattern is
+  # `{:bind, pattern, kind, value form}`. A `let` or a `const` with no value binds
+  # `undefined`.
+  defp decl_form(_kind, {:slot, d, i, name} = pat, init), do: {d, i, name, decl_value(pat, init)}
+  defp decl_form(kind, pat, init), do: {:bind, cpat(pat), kind, decl_value(pat, init)}
+
+  defp decl_value(_pat, nil), do: {:k, :undefined}
+  defp decl_value(pat, init) when nameable(init), do: {:f, named(init, pat)}
+  defp decl_value(_pat, init), do: opnd(init)
 
   # The write of a declaration, with the checks of check mode. A frame below the size of
   # the boxes (`Interp.box_min/0`) holds no box, so the write is a plain write of the tuple.
@@ -2014,6 +2036,12 @@ defmodule Browser.JS.Compile do
   # The declarations of a `var`, `let` or `const`, from left to right, as `bind/4` writes
   # them: the value, then the write with the checks of check mode.
   defp decls([], _env), do: :ok
+
+  defp decls([{:bind, pat, kind, io} | rest], env) do
+    v = av(io, env)
+    Interp.bind_pattern(pat, v, env, kind)
+    decls(rest, env)
+  end
 
   defp decls([{d, i, name, io} | rest], env) do
     v = av(io, env)
@@ -2299,7 +2327,7 @@ defmodule Browser.JS.Compile do
   # goes to `Interp.bind_pattern/4`.
   defp head(nil, {:slot, d, i, name}), do: {:assign, d, i, name}
   defp head(_decl, {:slot, d, i, name}), do: {:decl, d, i, name}
-  defp head(decl, pat), do: {:bind, pat, decl || :assign}
+  defp head(decl, pat), do: {:bind, cpat(pat), decl || :assign}
 
   defmacrop write_head(wc, v, env) do
     quote do
@@ -3067,6 +3095,37 @@ defmodule Browser.JS.Compile do
   # children, and every other target keeps its node.
   defp ctarget({:member, _, _, _} = m), do: cmember(m)
   defp ctarget(t), do: t
+
+  # A pattern for `Interp.bind_pattern/4`, with compiled expressions: a default value, a
+  # computed key and the object and key of a member target. `bind/4` runs each of them
+  # with `ev/2` or `ev_key/2`, as it runs the nodes that they replace. A default that takes
+  # a name keeps its node, because `ev_named/3` names it after its target. Every other
+  # target keeps its node.
+  defp cpat({:default, pat, e}) do
+    e = if nameable(e), do: e, else: cc(e)
+    {:default, cpat(pat), e}
+  end
+
+  defp cpat({:arrpat, elems}) do
+    {:arrpat,
+     Enum.map(elems, fn
+       nil -> nil
+       {:rest, p} -> {:rest, cpat(p)}
+       p -> cpat(p)
+     end)}
+  end
+
+  defp cpat({:objpat, props, rest}) do
+    props = for {key, p} <- props, do: {ckey(key), cpat(p)}
+    {:objpat, props, rest && cpat(rest)}
+  end
+
+  defp cpat({:member, _, _, _} = m), do: cmember(m)
+  defp cpat(pat), do: pat
+
+  # The value of `init`, a function or a class that takes the name of the binding `pat`
+  # through `Interp.ev_named/3`, on the tree.
+  defp named(init, pat), do: trace(:ev, init, fn env -> Interp.ev_named(init, env, pat) end)
 
   # S4: in check mode a compiled child may not be in a node that the heap keeps
   # (`make_fn/3`, `Classes.define/2`) or in the callee of a call, whose node names the

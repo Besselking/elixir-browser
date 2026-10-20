@@ -328,7 +328,26 @@ defmodule Browser.JS.CompileTest do
   return new Error('after').stack.split('\n')[1] } console.log(f(), g())|},
     {"r16 try in loop",
      ~S|function f(a){ var s = 0; for (var i = 0; i < a.length; i++) { try { s += a[i].v } catch (e) { s += 100 } } return s } console.log(f([{v: 1}, null, {v: 2}, undefined]))|,
-     max_steps: 2000}
+     max_steps: 2000},
+    # (r16) Declarations with a pattern and destructuring assignments (design r16 4.6): a
+    # computed key, the order of the key, the read and the default, a rest, an iterator
+    # that a pattern leaves early, the names of function and class values, member targets,
+    # and the dead zone of the names of a pattern.
+    {"r16 pattern order",
+     ~S|function f(){ var log = []; var o = { get a(){ log.push('get a'); return undefined }, get b(){ log.push('get b'); return 2 } }; function k(n){ log.push('key ' + n); return n } function d(n){ log.push('dflt ' + n); return n } const {[k('a')]: x = d(1), [k('b')]: y = d(2), ...rest} = o; let {c = d(3)} = {}; var {length} = 'abc'; return [x, y, c, length, Object.keys(rest).join('+'), log.join()].join(';') } console.log(f())|},
+    {"r16 pattern iterator",
+     ~S|function f(){ var log = []; var it = {[Symbol.iterator](){ return this }, i: 0, next(){ log.push('n'); return {value: this.i++, done: this.i > 5} }, return(){ log.push('r'); return {} }}; const [a, , b] = it; let [c, ...d] = [1, 2, 3]; var [e = 'e', [g] = ['g']] = []; try { const [h = (() => { throw new Error('x') })()] = it } catch (err) { log.push(err.message) } return [a, b, c, d.join('+'), e, g, log.join()].join(';') } console.log(f())|},
+    {"r16 pattern names",
+     ~S|function f(){ const {g = function(){}, h = () => 1, C = class {}, n = function named(){}} = {}; const k = function(){}, l = () => 2; let m = class {}; var [p = function(){}] = []; var q; ({q = function(){}} = {}); var r = {}; ({s: r.s = function(){}} = {}); return [g.name, h.name, C.name, n.name, k.name, l.name, m.name, p.name, q.name, r.s.name].join() } console.log(f())|},
+    {"r16 pattern targets",
+     ~S|function f(){ var log = []; var o = { set a(v){ log.push('set a ' + v) } }; function k(){ log.push('key'); return 'b' } function obj(){ log.push('obj'); return o } var src = [1, 2]; [obj().a, obj()[k()]] = src; var x, y; var r = ({x, y = 5} = {x: 3}); ({a: o.c, ...o.d} = {a: 7, e: 8}); return [log.join(), o.b, x, y, r.x, o.c, JSON.stringify(o.d)].join(';') } console.log(f())|},
+    {"r16 pattern tdz",
+     ~S|function f(){ var r = []; try { const {a = b, b} = {} } catch (e) { r.push(e.constructor.name) } try { let [c = c] = [] } catch (e) { r.push(e.constructor.name) } try { const {d} = null } catch (e) { r.push(e.constructor.name) } try { let [e1] = 1 } catch (e) { r.push(e.constructor.name) } let {u} = {u: 1}, [v] = [2], w; r.push(u, v, w); return r.join() } console.log(f())|},
+    {"r16 pattern loop",
+     ~S|function f(a){ var s = 0; for (var i = 0; i < a.length; i++) { const {x, y = 1} = a[i]; let [p, q] = [x, y]; s += p * q } return s } var a = []; for (var i = 0; i < 20; i++) a.push(i % 2 ? {x: i} : {x: i, y: 2}); console.log(f(a))|,
+     max_steps: 5000},
+    {"r16 pattern args",
+     ~S|function f(a, b){ var {x: a} = {x: 5}; var [b = arguments.length] = []; return [a, b, arguments[0], arguments[1]].join() } function g(){ var {arguments: z} = {arguments: 1}; return z } console.log(f(1, 2), f(1), g())|}
   ]
 
   # One snippet for each kind that the compiler handles, and one for each kind that falls
