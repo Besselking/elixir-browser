@@ -66,6 +66,52 @@ defmodule Browser.Media do
     {:ok, media}
   end
 
+  @doc """
+  The format of the frames: `:rgba` (the default) or `:bmp`, a whole 24 bit BMP file that
+  wxWidgets and `Browser.UI.load_image/3` read as they are.
+  """
+  def set_format(%__MODULE__{port: port} = media, format) when format in [:rgba, :bmp] do
+    Port.command(port, [<<?M, if(format == :bmp, do: 1, else: 0)>>])
+    {:ok, media}
+  end
+
+  @doc """
+  The first frame of a video given as bytes, as a BMP file: `{:ok, bmp, {w, h}}` or
+  `{:error, text}`. `width` is the width to scale to (0: the width of the video); the
+  height follows the aspect ratio.
+  """
+  def first_frame(bytes, width \\ 0) do
+    path = Path.join(System.tmp_dir!(), "browser-media-#{System.unique_integer([:positive])}")
+
+    try do
+      File.write!(path, bytes)
+
+      with {:ok, media} <- open(path) do
+        result =
+          with true <- media.info.video? or {:error, "no video stream"},
+               {:ok, media} <- set_format(media, :bmp),
+               {:ok, media} <- scale_to(media, width),
+               {:frame, _pts, w, h, bmp} <- next_video(media) do
+            {:ok, bmp, {w, h}}
+          else
+            {:error, _} = error -> error
+            other -> {:error, "no frame: #{inspect(other)}"}
+          end
+
+        close(media)
+        result
+      end
+    after
+      File.rm(path)
+    end
+  end
+
+  defp scale_to(media, width) when width > 0 and media.info.width > width do
+    set_size(media, width, max(div(media.info.height * width, media.info.width), 1))
+  end
+
+  defp scale_to(media, _width), do: {:ok, media}
+
   @doc "The next video frame: `{:frame, pts_ms, w, h, rgba}`, `:end` or `{:error, text}`."
   def next_video(%__MODULE__{port: port}) do
     Port.command(port, "V")

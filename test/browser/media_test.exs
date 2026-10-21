@@ -85,6 +85,23 @@ defmodule Browser.MediaTest do
     Media.close(media)
   end
 
+  test "bmp frames are whole BMP files", %{clip: clip} do
+    {:ok, media} = Media.open(clip)
+    {:ok, media} = Media.set_format(media, :bmp)
+    assert {:frame, 0, 160, 120, bmp} = Media.next_video(media)
+    assert <<"BM", size::32-little, _::binary>> = bmp
+    assert size == byte_size(bmp)
+    assert byte_size(bmp) == 54 + 160 * 3 * 120
+    Media.close(media)
+  end
+
+  test "first_frame gives a BMP and its size, scaled to a width", %{clip: clip} do
+    bytes = File.read!(clip)
+    assert {:ok, <<"BM", _::binary>>, {160, 120}} = Media.first_frame(bytes)
+    assert {:ok, <<"BM", _::binary>>, {80, 60}} = Media.first_frame(bytes, 80)
+    assert {:error, _} = Media.first_frame("not a video")
+  end
+
   test "a file that is no media gives an error", %{tmp_dir: dir} do
     path = Path.join(dir, "junk.mp4")
     File.write!(path, String.duplicate("not a video", 100))

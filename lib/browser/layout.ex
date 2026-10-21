@@ -1898,6 +1898,19 @@ defmodule Browser.Layout do
   defp media_ops({:element, tag, attrs, _}, parent_style, acc) do
     c = computed(attrs)
     style = restyle(tag, attrs, parent_style, c)
+    url = with "" <- attr_value(attrs, "@src"), do: nil
+    images = Process.get(:layout_images)
+    info = if url && images, do: Map.get(images, url)
+
+    # a loaded poster or first frame is a picture, like an <img>
+    if tag == "video" and match?({:ok, _, _}, info) do
+      image_atom(url, info, attrs, c, style, acc, %{pstyle: parent_style, tag: "video"})
+    else
+      media_box(tag, attrs, c, style, acc)
+    end
+  end
+
+  defp media_box(tag, attrs, c, style, acc) do
     {bw, bh} = if tag == "audio", do: {300, 54}, else: {300, 150}
     ops = media_display_list(tag, List.keymember?(attrs, "controls", 0), bw, bh)
 

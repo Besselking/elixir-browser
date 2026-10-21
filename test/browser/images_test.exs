@@ -8,6 +8,31 @@ defmodule Browser.ImagesTest do
 
   defp file(name), do: "file://" <> Path.join(@dir, name)
 
+  describe "index/2 of videos" do
+    defp video_urls(html) do
+      {_nodes, urls} = html |> HTML.parse() |> Images.index("https://example.com/a/b.html")
+      urls
+    end
+
+    test "a video without a poster asks for its first frame by a media: address" do
+      assert video_urls(~s(<video src="c.mp4"></video>)) == ["media:https://example.com/a/c.mp4"]
+    end
+
+    test "the first source of a video is used when it has no src" do
+      html = ~s(<video><source src="/m.webm"><source src="n.mp4"></video>)
+      assert video_urls(html) == ["media:https://example.com/m.webm"]
+    end
+
+    test "a poster is an ordinary picture" do
+      assert video_urls(~s(<video src="c.mp4" poster="p.png"></video>)) ==
+               ["https://example.com/a/p.png"]
+    end
+
+    test "a video with no source asks for nothing" do
+      assert video_urls("<video></video>") == []
+    end
+  end
+
   describe "index/2" do
     defp indexed(html, base \\ "https://example.com/a/b.html") do
       {nodes, urls} = html |> HTML.parse() |> Images.index(base)

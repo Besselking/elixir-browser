@@ -93,6 +93,7 @@ defmodule Browser.Style do
   @ua_css """
   dialog:not([open]), [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
   audio:not([controls]), object, embed, applet { display: none }
+  video { object-fit: contain }
   slot { display: contents }
   iframe { display: inline-block; width: 300px; height: 150px; border: 2px inset; overflow: auto; background-color: white }
   iframe[scrolling=no] { overflow: hidden }

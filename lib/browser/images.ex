@@ -43,6 +43,25 @@ defmodule Browser.Images do
     end
   end
 
+  # a video shows its poster; without one, its first frame (the pseudo URL `media:` + the
+  # address of the video, which `fetch/2` answers with a BMP picture)
+  defp index_node({:element, "video", attrs, kids}, base, acc) do
+    attrs = absolutize_style(attrs, base)
+    {kids, acc} = Enum.map_reduce(kids, acc, &index_node(&1, base, &2))
+
+    url =
+      case attr(attrs, "poster") |> String.trim() do
+        "" -> media_source(attrs, kids, base)
+        poster -> Fetch.resolve(base, poster)
+      end
+
+    if url do
+      {{:element, "video", attrs ++ [{"@src", url}], kids}, [url | acc]}
+    else
+      {{:element, "video", attrs, kids}, acc}
+    end
+  end
+
   defp index_node({:element, tag, attrs, kids}, base, acc) do
     {kids, acc} = Enum.map_reduce(kids, acc, &index_node(&1, base, &2))
     {{:element, tag, absolutize_style(attrs, base), kids}, acc}
@@ -70,6 +89,26 @@ defmodule Browser.Images do
   @doc "The `url()` addresses in a computed `background-image` list."
   def background_urls(images), do: Browser.Backgrounds.urls(images)
 
+  # "media:" + the address of the `src` of a video or of its first `<source>`
+  defp media_source(attrs, kids, base) do
+    src =
+      case attr(attrs, "src") |> String.trim() do
+        "" ->
+          Enum.find_value(kids, "", fn
+            {:element, "source", a, _} -> attr(a, "src") |> String.trim()
+            _ -> nil
+          end)
+
+        src ->
+          src
+      end
+
+    if src not in ["", nil], do: "media:" <> Fetch.resolve(base, src)
+  end
+
+  @max_media_bytes 32 * 1024 * 1024
+  @max_frame_width 1280
+
   @doc "The image address an `<img>` with these attributes asks for, or nil."
   def source(attrs) do
     [attr(attrs, "src"), attr(attrs, "data-src"), first_candidate(attr(attrs, "srcset"))]
@@ -96,11 +135,46 @@ defmodule Browser.Images do
   `format` one of `:png | :jpeg | :gif | :bmp | :webp`, or `{:error, reason}`. An SVG
   comes back parsed: `{:ok, scene, :svg}` (see `Browser.Svg`).
   """
+  def fetch("media:" <> url, base) do
+    with :ok <- check_allowed(url, base),
+         :ok <- check_media_size(url, base),
+         {:ok, bytes} <- load(url, base),
+         {:ok, bmp, _size} <- Browser.Media.first_frame(bytes, @max_frame_width) do
+      {:ok, bmp, :bmp}
+    end
+  end
+
   def fetch(url, base) do
     with :ok <- check_allowed(url, base),
          {:ok, bytes} <- load(url, base),
          :ok <- check_size(bytes) do
       prepare(bytes)
+    end
+  end
+
+  # The whole file is fetched for one frame (the helper reads a file), so a big video is
+  # not drawn until the helper can read a stream.
+  defp check_media_size("file:" <> _ = url, _base) do
+    case File.stat(URI.decode(URI.parse(url).path || "")) do
+      {:ok, %{size: size}} when size <= @max_media_bytes -> :ok
+      {:ok, _} -> {:error, "video too large for a picture"}
+      {:error, reason} -> {:error, inspect(reason)}
+    end
+  end
+
+  defp check_media_size(url, base) do
+    case Fetch.load(url, method: :head, full: true, initiator: base) do
+      {:ok, %{headers: headers}, _final} ->
+        case headers
+             |> List.keyfind("content-length", 0)
+             |> then(&(&1 && Integer.parse(elem(&1, 1)))) do
+          {n, _} when n <= @max_media_bytes -> :ok
+          {_, _} -> {:error, "video too large for a picture"}
+          _ -> {:error, "video of unknown size"}
+        end
+
+      _ ->
+        {:error, "cannot ask for the size of the video"}
     end
   end
 

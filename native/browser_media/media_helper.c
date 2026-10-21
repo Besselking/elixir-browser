@@ -9,6 +9,8 @@
  * Requests (first byte, then fields):
  *   'O' path        open a file (the browser has saved the bytes to a file)
  *   'S' u32 w, h    size of the video frames to send (0 0: the size of the video)
+ *   'M' u8 mode     0: frames are RGBA bytes (the default); 1: frames are BMP files
+ *                   (24 bit, top-down), which wxWidgets reads without more work
  *   'V'             decode the next video frame
  *   'A'             decode the next chunk of audio
  *   'K' u32 ms      seek; the next frames and chunks start at that time
@@ -17,7 +19,7 @@
  * Replies:
  *   'I' u32 duration_ms, u32 width, u32 height, u8 has_video, u8 has_audio,
  *       u32 frames_per_second*1000, string "video codec,audio codec"
- *   'v' u32 pts_ms, u32 w, u32 h, RGBA bytes
+ *   'v' u32 pts_ms, u32 w, u32 h, RGBA bytes (or a BMP file after 'M' 1)
  *   'a' u32 pts_ms, s16 little-endian PCM, 2 channels, 48000 Hz
  *   'E' u8 'v' or 'a'      no more frames or chunks
  *   'X' string             error text
@@ -53,6 +55,7 @@ static struct SwrContext *swr;
 static int vidx = -1, aidx = -1;
 static Queue vq, aq;
 static int out_w, out_h; /* requested frame size; 0 = native */
+static int bmp_mode;
 static int64_t vseek_ms = -1, aseek_ms = -1;
 static int eof;
 
@@ -206,23 +209,43 @@ static int64_t pts_ms(AVStream *st, int64_t pts) {
   return av_rescale_q(pts, st->time_base, (AVRational){1, 1000});
 }
 
+static void put32le(uint8_t *p, uint32_t v) {
+  p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
+}
+
 static void send_frame(AVFrame *frame) {
   int w = out_w > 0 ? out_w : frame->width, h = out_h > 0 ? out_h : frame->height;
-  sws = sws_getCachedContext(sws, frame->width, frame->height, frame->format, w, h,
-                             AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
+  enum AVPixelFormat fmt_out = bmp_mode ? AV_PIX_FMT_BGR24 : AV_PIX_FMT_RGBA;
+  sws = sws_getCachedContext(sws, frame->width, frame->height, frame->format, w, h, fmt_out,
+                             SWS_BILINEAR, NULL, NULL, NULL);
   if (!sws) return send_error("cannot scale the frame");
-  size_t size = (size_t)w * h * 4;
-  uint8_t *msg = malloc(13 + size);
+  /* a BMP row is padded to 4 bytes and the file starts with 54 bytes of header */
+  size_t stride = bmp_mode ? (((size_t)w * 3 + 3) & ~(size_t)3) : (size_t)w * 4;
+  size_t size = stride * h, head = bmp_mode ? 54 : 0;
+  uint8_t *msg = calloc(1, 13 + head + size);
   if (!msg) return send_error("out of memory");
-  uint8_t *dst[4] = {msg + 13, NULL, NULL, NULL};
-  int stride[4] = {w * 4, 0, 0, 0};
-  sws_scale(sws, (const uint8_t *const *)frame->data, frame->linesize, 0, frame->height, dst, stride);
+  uint8_t *pixels = msg + 13 + head;
+  uint8_t *dst[4] = {pixels, NULL, NULL, NULL};
+  int dst_stride[4] = {(int)stride, 0, 0, 0};
+  sws_scale(sws, (const uint8_t *const *)frame->data, frame->linesize, 0, frame->height, dst, dst_stride);
+  if (bmp_mode) {
+    uint8_t *f = msg + 13;
+    f[0] = 'B'; f[1] = 'M';
+    put32le(f + 2, (uint32_t)(54 + size));
+    put32le(f + 10, 54);
+    put32le(f + 14, 40);
+    put32le(f + 18, (uint32_t)w);
+    put32le(f + 22, (uint32_t)-h); /* a negative height: the rows run top to bottom */
+    f[26] = 1;
+    f[28] = 24;
+    put32le(f + 34, (uint32_t)size);
+  }
   int64_t ms = pts_ms(fmt->streams[vidx], frame->best_effort_timestamp);
   msg[0] = 'v';
   put32(msg + 1, ms < 0 ? 0 : (uint32_t)ms);
   put32(msg + 5, (uint32_t)w);
   put32(msg + 9, (uint32_t)h);
-  send_message(msg, 13 + size, NULL, 0);
+  send_message(msg, 13 + head + size, NULL, 0);
   free(msg);
 }
 
@@ -342,6 +365,7 @@ int main(void) {
       case 'S':
         if (n >= 9) { out_w = (int)get32(msg + 1); out_h = (int)get32(msg + 5); }
         break;
+      case 'M': if (n >= 2) bmp_mode = msg[1] == 1; break;
       case 'V': fmt ? do_video() : send_error("no file is open"); break;
       case 'A': fmt ? do_audio() : send_error("no file is open"); break;
       case 'K': if (n >= 5) do_seek(get32(msg + 1)); break;
