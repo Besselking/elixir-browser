@@ -41,7 +41,12 @@ defmodule Browser.Page do
     # was run for: a changed tree only has its changed elements styled afresh
     memo: nil,
     # changes whenever the page is rebuilt or re-rendered, so a copy can be told from the original
-    ver: nil
+    ver: nil,
+    # the element under the pointer and its ancestors (layout numbers, `Browser.Nids`): these
+    # match `:hover` (see `set_hover/3`)
+    hover: [],
+    # what of the rules can match `:hover` (`hover_rules/1`): nil before it is worked out
+    hover_rules: nil
   ]
 
   @doc "Fetches and builds `url` for the viewport `env` (see `Browser.MediaQuery`)."
@@ -184,7 +189,9 @@ defmodule Browser.Page do
   media query result differs from the last run.
   """
   def restyle(%__MODULE__{} = page, env) do
-    key = {Style.media_key(page.queries, env), page.viewport_units && {env.width, env.height}}
+    key =
+      {Style.media_key(page.queries, env), page.viewport_units && {env.width, env.height},
+       page.hover}
 
     if key == page.key and page.nodes != nil do
       page
@@ -204,13 +211,14 @@ defmodule Browser.Page do
               end
 
             Process.delete(:style_vu)
-            {pruned, memo} = Style.prune(Browser.Modal.backdrops(page.raw), index, old)
+            raw = page.raw |> Browser.Modal.backdrops() |> mark_hover(MapSet.new(page.hover))
+            {pruned, memo} = Style.prune(raw, index, old)
 
             # (a new style attribute with viewport units: the memo and the cache now hold for
             # this window size only)
             key =
               if Process.delete(:style_vu) == true and not page.viewport_units,
-                do: {elem(key, 0), {env.width, env.height}},
+                do: {elem(key, 0), {env.width, env.height}, page.hover},
                 else: key
 
             defs = Browser.Svg.defs(page.raw, pruned)
@@ -234,11 +242,120 @@ defmodule Browser.Page do
     end
   end
 
+  @doc """
+  The page with `chain` (the element under the pointer and its ancestors, as layout numbers;
+  `[]` when the pointer is on no element) matching `:hover`, styled again when that changes
+  what the rules match.
+  """
+  def set_hover(%__MODULE__{hover: chain} = page, chain, _env), do: page
+
+  def set_hover(%__MODULE__{} = page, chain, env) do
+    page = %{page | hover_rules: {page.rules, hover_rules(page)}}
+
+    if hover_changes?(page, chain),
+      do: restyle(%{page | hover: chain}, env),
+      else: %{page | hover: chain}
+  end
+
+  @doc """
+  Whether moving the pointer so that `chain` is hovered can change the page: some rule with
+  `:hover` might match an element that starts or stops being hovered. (What the selector asks
+  of the element itself, its tag, id and classes, is checked; the rest is taken to hold.)
+  """
+  def hover_changes?(%__MODULE__{} = page, chain) do
+    case hover_rules(page) do
+      [] ->
+        false
+
+      compounds ->
+        changed = MapSet.symmetric_difference(MapSet.new(page.hover), MapSet.new(chain))
+        elements = hover_elements(page.pruned || [], changed, [])
+        Enum.any?(elements, fn el -> Enum.any?(compounds, &hover_candidate?(&1, el)) end)
+    end
+  end
+
+  # the compound selectors with `:hover` in the rules (in `:not()` and the like too), worked out
+  # once for a set of rules
+  defp hover_rules(%__MODULE__{rules: rules, hover_rules: {cached, compounds}})
+       when cached === rules,
+       do: compounds
+
+  defp hover_rules(%__MODULE__{rules: rules}),
+    do: (rules || []) |> Enum.flat_map(&hover_compounds(&1.selector)) |> Enum.uniq()
+
+  defp hover_compounds(parts) when is_list(parts),
+    do: Enum.flat_map(parts, fn {c, _} -> hover_compounds(c) end)
+
+  defp hover_compounds(%{pseudos: pseudos} = c) do
+    inner =
+      Enum.flat_map(pseudos, fn
+        {:fn, _, cmps} -> Enum.flat_map(cmps, &hover_compounds/1)
+        {:has, rels} -> Enum.flat_map(rels, fn {_, parts} -> hover_compounds(parts) end)
+        {:nth_of, _, _, sels} -> Enum.flat_map(sels, &hover_compounds/1)
+        _ -> []
+      end)
+
+    if :hover in pseudos, do: [Map.take(c, [:tag, :id, :classes]) | inner], else: inner
+  end
+
+  defp hover_compounds(_), do: []
+
+  defp hover_candidate?(c, {tag, attrs}) do
+    classes =
+      case List.keyfind(attrs, "class", 0) do
+        {_, v} when is_binary(v) -> String.split(v)
+        _ -> []
+      end
+
+    (c.tag in [nil, :any] or c.tag == tag) and
+      (c.id == nil or List.keyfind(attrs, "id", 0) == {"id", c.id}) and
+      Enum.all?(c.classes, &(&1 in classes))
+  end
+
+  # `{tag, attrs}` of the elements of a styled tree whose numbers are in `nids`
+  defp hover_elements(nodes, nids, acc) when is_list(nodes),
+    do: Enum.reduce(nodes, acc, &hover_elements(&1, nids, &2))
+
+  defp hover_elements({:element, tag, attrs, kids}, nids, acc) do
+    acc =
+      case List.keyfind(attrs, "@nid", 0) do
+        {_, nid} -> if MapSet.member?(nids, nid), do: [{tag, attrs} | acc], else: acc
+        nil -> acc
+      end
+
+    if MapSet.size(nids) == length(acc), do: acc, else: hover_elements(kids, nids, acc)
+  end
+
+  defp hover_elements(_, _nids, acc), do: acc
+
+  # Marks the elements of `chain` with `"@hover"`. The chain runs from the root down, so the
+  # walk only goes into a marked element: the rest of the tree stays as it is (the same terms).
+  defp mark_hover(nodes, chain) do
+    if MapSet.size(chain) == 0, do: nodes, else: Enum.map(nodes, &mark_hover_node(&1, chain))
+  end
+
+  defp mark_hover_node({:element, tag, attrs, kids} = node, chain) do
+    case List.keyfind(attrs, "@nid", 0) do
+      {_, nid} ->
+        if MapSet.member?(chain, nid),
+          do: {:element, tag, [{"@hover", true} | attrs], mark_hover(kids, chain)},
+          else: node
+
+      # (an element with no number, from the page itself: its content may be in the chain)
+      nil ->
+        {:element, tag, attrs, mark_hover(kids, chain)}
+    end
+  end
+
+  defp mark_hover_node(node, _chain), do: node
+
   # The memo holds for `env` when each media query it was made with gives the same result now,
   # and, when the styles used viewport units, the window has the same size. (A query that only
   # new rules use does not matter: those rules reach no element that the memo holds, see
   # `refresh_sheets/3`.)
-  defp memo_fits?({media, size}, env) do
+  # (the hovered elements do not matter: they are marked in the tree, and a changed mark is a
+  # changed element)
+  defp memo_fits?({media, size, _hover}, env) do
     (size == false or size == {env.width, env.height}) and
       Enum.all?(media, fn {query, result} -> MediaQuery.eval(query, env) == result end)
   end
@@ -577,7 +694,8 @@ defmodule Browser.Page do
     jobs =
       Enum.map(missing, fn {ref, scope, from} = key ->
         at = from || base
-        {key, if(scope == nil, do: prefetched(ref, at), else: ref), at}
+        {ref, media} = media_split(ref)
+        {key, if(scope == nil, do: prefetched(ref, at), else: ref), at, media}
       end)
 
     # (a `<style>` has its text at hand, and a page may have hundreds of them: only what has to be
@@ -585,19 +703,20 @@ defmodule Browser.Page do
     # once, however many trees have it)
     {inline, remote} =
       Enum.split_with(jobs, fn
-        {_key, {:style, css}, _at} -> not String.contains?(css, "@import")
+        {_key, {:style, css}, _at, _media} -> not String.contains?(css, "@import")
         _ -> false
       end)
 
     fetched =
-      Enum.map(inline, fn {{_, scope, _} = key, {:style, css}, at} ->
-        {key, scope, [{css, at}]}
+      Enum.map(inline, fn {{_, scope, _} = key, {:style, css}, at, media} ->
+        {key, scope, [{media_wrap(css, media), at}]}
       end) ++
         (remote
          |> Task.async_stream(
-           fn {key, ref, at} ->
+           fn {key, ref, at, media} ->
              {_, scope, _} = key
-             {key, scope, ref |> sheet(at) |> with_imports(0)}
+             sheets = ref |> sheet(at) |> with_imports(0)
+             {key, scope, for({css, from} <- sheets, do: {media_wrap(css, media), from})}
            end,
            max_concurrency: 8,
            timeout: @sheet_timeout,
@@ -607,7 +726,7 @@ defmodule Browser.Page do
          |> Enum.zip(remote)
          |> Enum.map(fn
            {{:ok, got}, _} -> got
-           {_, {key, _, _}} -> {key, nil, []}
+           {_, {key, _, _, _}} -> {key, nil, []}
          end))
 
     texts =
@@ -667,16 +786,18 @@ defmodule Browser.Page do
   # inline <style> blocks cost nothing, so all stay
   defp cap_links(refs) do
     {kept, _} =
-      Enum.flat_map_reduce(refs, MapSet.new(), fn
-        {{:link, href}, scope, from} = ref, seen ->
-          key = {href, scope, from}
+      Enum.flat_map_reduce(refs, MapSet.new(), fn {sheet, scope, from} = ref, seen ->
+        case media_split(sheet) do
+          {{:link, href}, media} ->
+            key = {href, media, scope, from}
 
-          if MapSet.member?(seen, key) or MapSet.size(seen) >= @max_sheets,
-            do: {[], seen},
-            else: {[ref], MapSet.put(seen, key)}
+            if MapSet.member?(seen, key) or MapSet.size(seen) >= @max_sheets,
+              do: {[], seen},
+              else: {[ref], MapSet.put(seen, key)}
 
-        ref, seen ->
-          {[ref], seen}
+          _ ->
+            {[ref], seen}
+        end
       end)
 
     kept
@@ -727,6 +848,10 @@ defmodule Browser.Page do
         {Enum.reverse(acc), css}
     end
   end
+
+  # (a sheet with a `media` attribute: `Browser.Style.sheet_refs/1`)
+  defp media_split({:media, media, ref}), do: {ref, media}
+  defp media_split(ref), do: {ref, ""}
 
   # the layer or supports part of an `@import` is not supported: a plain media list is
   defp media_wrap(css, ""), do: css

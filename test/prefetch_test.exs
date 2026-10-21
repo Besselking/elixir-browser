@@ -70,6 +70,14 @@ defmodule Browser.PrefetchTest do
            ]) == ["http://x.test/a.css"]
   end
 
+  test "skips links in comments (IE's conditional ones), also when a comment is split" do
+    assert feed([
+             ~s|<!--[if IE 8]><link rel="stylesheet" href="/ie8.css" /><![endif]-->|,
+             ~s|<!--[if IE 6]><link rel="stylesheet" |,
+             ~s|href="/ie6.css" /><![endif]--><link rel=stylesheet media="(max-width: 42em)" href=/n.css>|
+           ]) == ["http://x.test/n.css"]
+  end
+
   test "a page's stylesheet is requested before its HTML has finished arriving" do
     base =
       serve(%{

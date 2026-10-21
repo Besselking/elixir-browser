@@ -6,7 +6,7 @@ defmodule Mix.Tasks.Browser.Screenshot do
   into a PNG with headless Chromium when one is found (`CHROME` names the binary).
 
       mix browser.screenshot URL OUT.png [--width 1000] [--height 800] [--wx] [--js]
-          [--window 600 [--scroll 0]] [--box-scroll 0] [--archive FILE]
+          [--window 600 [--scroll 0]] [--box-scroll 0] [--hover X,Y] [--archive FILE]
 
   With `--wx` the page is painted by the same code as the window, into a bitmap: its fonts,
   pictures and shadows. That needs an Erlang with wx and a display (`xvfb-run -a mix
@@ -18,6 +18,9 @@ defmodule Mix.Tasks.Browser.Screenshot do
   With `--wx` the scrollbars are drawn too. `--window 600` shows only a window of that height,
   `--scroll` px down the page (as the browser would, with the page's scrollbars), and
   `--box-scroll` scrolls every box that scrolls its content by that many px.
+
+  With `--hover X,Y` the pointer is on the page point `X,Y` (px from the top left of the
+  page): the element there and its ancestors match `:hover` (a menu that opens on hover).
 
   With `--archive FILE` the page loads from a page archive (see `mix browser.archive`) and the
   network is not used.
@@ -47,6 +50,7 @@ defmodule Mix.Tasks.Browser.Screenshot do
           window: :integer,
           scroll: :integer,
           box_scroll: :integer,
+          hover: :string,
           archive: :string
         ]
       )
@@ -68,9 +72,28 @@ defmodule Mix.Tasks.Browser.Screenshot do
         do: Browser.Page.run_js(page, %{Browser.Style.default_env() | width: width, height: 800}),
         else: page
 
+    page = if opts[:hover], do: hover(page, opts[:hover], env), else: page
+
     if opts[:wx] && wx_screenshot(page, out, width, opts),
       do: Mix.shell().info("Wrote #{out} (painted by wx)"),
       else: svg_screenshot(page, out, width, opts[:height])
+  end
+
+  @doc false
+  # the page with the element at the point "x,y" and its ancestors hovered (also for
+  # `mix browser.layout --hover`)
+  def hover(page, point, env) do
+    [x, y] = point |> String.split(",") |> Enum.map(&String.to_integer(String.trim(&1)))
+    {items, _} = Browser.Layout.layout(page.nodes, env.width, &Browser.Screenshot.measure/2, 800)
+    parents = Browser.Nids.parents(page.pruned || [])
+
+    chain =
+      case Browser.UI.nid_at(items, x, y, 0) do
+        nil -> []
+        nid -> nid |> Stream.iterate(&Map.get(parents, &1)) |> Enum.take_while(&(&1 != nil))
+      end
+
+    Browser.Page.set_hover(page, chain, env)
   end
 
   # -> true when the picture was written

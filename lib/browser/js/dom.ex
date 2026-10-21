@@ -3124,6 +3124,25 @@ defmodule Browser.JS.DOM do
         # the list is a snapshot, but removing an attribute node through it empties it, so that
         # `while (el.attributes.length) el.removeAttributeNode(el.attributes[0])` ends
         for a <- attrs, do: put_hidden(a, "__list", list)
+        # a NamedNodeMap also has each attribute under its name (jQuery 1.9 reads
+        # `div.attributes["onfocusin"].expando`)
+        for {{k, _}, a} <- Enum.zip(n.attrs, attrs), do: put_hidden(list, k, a)
+        by_name = Map.new(Enum.zip(Enum.map(n.attrs, &elem(&1, 0)), attrs))
+
+        put_hidden(
+          list,
+          "getNamedItem",
+          native("getNamedItem", fn _this, args ->
+            Map.get(by_name, Str.downcase(to_str(arg(args, 0))), :null)
+          end)
+        )
+
+        put_hidden(
+          list,
+          "item",
+          native("item", fn _this, args -> Enum.at(attrs, to_int(arg(args, 0)), :null) end)
+        )
+
         {:ok, list}
 
       k when k in ~w(offsetWidth offsetHeight offsetTop offsetLeft clientWidth clientHeight

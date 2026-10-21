@@ -5,7 +5,8 @@ defmodule Mix.Tasks.Browser.Layout do
   Loads a page (a URL or a file), lays it out and prints the boxes as an indented tree, so
   that a layout can be read, and two layouts compared, without looking at a picture.
 
-      mix browser.layout URL_OR_FILE [--viewport 800x600] [--all] [--style] [--js] [--archive FILE]
+      mix browser.layout URL_OR_FILE [--viewport 800x600] [--all] [--style] [--js] [--hover X,Y]
+          [--archive FILE]
 
   Each line is one element: its tag with `#id` and `.classes`, the border box that holds
   everything drawn for it and its descendants as `x,y WxH` in page coordinates, then its
@@ -22,6 +23,8 @@ defmodule Mix.Tasks.Browser.Layout do
   * `--style` adds the margin, border width and padding of each box, as `m=t,r,b,l`.
   * `--js` runs the page's scripts first and lays out what they leave (text and line breaks in
     an editable region show up as `<@t>` elements with a box of their own).
+  * `--hover X,Y` puts the pointer on the page point `X,Y`: the element there and its
+    ancestors match `:hover` (see `mix browser.screenshot`).
   * `--archive FILE` loads the page from a page archive (see `mix browser.archive`), with no
     network.
   * `--all` also lists elements that are not drawn (`<head>`, `<script>`, `display: none`).
@@ -42,6 +45,7 @@ defmodule Mix.Tasks.Browser.Layout do
           all: :boolean,
           style: :boolean,
           js: :boolean,
+          hover: :string,
           archive: :string
         ]
       )
@@ -58,6 +62,12 @@ defmodule Mix.Tasks.Browser.Layout do
     case Page.load(Browser.Fetch.normalize(input), env) do
       {:ok, page} ->
         page = if opts[:js], do: Page.run_js(page, env), else: page
+
+        page =
+          if opts[:hover],
+            do: Mix.Tasks.Browser.Screenshot.hover(page, opts[:hover], env),
+            else: page
+
         Mix.shell().info(dump(page, width, height, opts))
 
       {:error, why} ->

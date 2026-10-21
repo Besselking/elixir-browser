@@ -6469,17 +6469,33 @@ defmodule Browser.Layout do
 
   # -- absolute / fixed positioning ------------------------------------------------------
 
+  # (an absolutely positioned box is out of the flow: it adds nothing to the size of the content
+  # that is measured for a shrink-to-fit box, such as a float holding a menu)
   defp place_absolute(st, sub, spec, origin) do
+    if Process.get(:layout_intrinsic) == true,
+      do: st,
+      else: place_absolute_box(st, sub, spec, origin)
+  end
+
+  defp place_absolute_box(st, sub, spec, origin) do
     # a fixed box is placed against the window, whose height is known
     origin = if spec.fixed and origin.h == nil, do: %{origin | h: st.view_h}, else: origin
     cw = origin.w
 
     {static_x, static_y} =
       cond do
-        # (a block-level box is where a block would be: under the line, at its start)
+        # (a block-level box is where a block would be: under the line, at its start. The line
+        # is as tall as its text and its atoms, such as the inline-block of a menu's button)
         st.line != [] and not Map.get(spec, :inline, true) ->
           {fl, _} = float_offsets(st, st.y)
-          {st.margin + st.left + fl, st.y + st.lmax}
+
+          line_h =
+            Enum.reduce(st.line, st.lmax, fn
+              %{type: :atom, h: h}, acc -> max(acc, h)
+              _, acc -> acc
+            end)
+
+          {st.margin + st.left + fl, st.y + line_h}
 
         st.line != [] ->
           {st.x, st.y}
@@ -6577,7 +6593,7 @@ defmodule Browser.Layout do
             it
             |> move(x + tx, y + ty)
             |> Map.put(layer, true)
-            |> Map.put_new(:pz, z_order(spec.seq, spec.z))
+            |> in_stacking_context(spec.seq, spec.z)
 
     # a fixed box stays where it is in the window while the page scrolls
     moved =
@@ -6934,7 +6950,9 @@ defmodule Browser.Layout do
 
   defp resolve({:kw, _}, _base), do: nil
   defp resolve(:stretch, _base), do: nil
-  defp resolve({:pct, f}, base), do: round(f * base)
+  # (a percentage rounds down, as browsers do with their sub-pixel units: two 50% floats then
+  # always fit side by side, where 393 px would give 197 + 197)
+  defp resolve({:pct, f}, base), do: floor(f * base + 1.0e-6)
   defp resolve({:calc, px, f}, base), do: round(max(px + f * base, 0))
 
   defp resolve(n, _base) when is_number(n), do: round(n)
@@ -7039,8 +7057,16 @@ defmodule Browser.Layout do
 
   # outer width of an inline-block: its width, or shrink-to-fit within `avail`
   defp fit_width(st, sub, spec, avail) do
+    # (while the content of a shrink-to-fit box is measured, a percentage width counts as auto:
+    # it is a part of the very width being worked out. A table with one wants all the room)
+    own =
+      if match?({:pct, _}, spec.width) and Process.get(:layout_intrinsic) == true and
+           not Map.get(spec, :table?, false),
+         do: nil,
+         else: spec.width
+
     width =
-      case resolve(spec.width, avail) do
+      case resolve(own, avail) do
         nil ->
           case ratio_fit(sub, spec) do
             nil -> content_width(st, sub, spec, avail)
@@ -12988,6 +13014,19 @@ defmodule Browser.Layout do
   # (`{z, tree order}` when there is a positive `z-index`, else the tree order)
   defp z_order(seq, z) when is_integer(z) and z > 0, do: {z, seq}
   defp z_order(seq, _z), do: seq
+
+  # An item of a box with a positive `z-index` paints in that box's layer: also one of a
+  # positioned box inside it (a menu's `position: relative` entries), which would otherwise
+  # go under the box's background. It keeps its own number, which is later than the box's.
+  defp in_stacking_context(item, seq, z) when is_integer(z) and z > 0 do
+    case Map.get(item, :pz) do
+      nil -> Map.put(item, :pz, {z, seq})
+      {_, own} -> %{item | pz: {z, own}}
+      own -> %{item | pz: {z, own}}
+    end
+  end
+
+  defp in_stacking_context(item, seq, z), do: Map.put_new(item, :pz, z_order(seq, z))
 
   # `z-index`: the order sticky and fixed boxes are painted in
   defp z_index(c) do

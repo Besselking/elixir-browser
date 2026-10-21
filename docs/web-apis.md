@@ -7,7 +7,7 @@ Source: lib/browser/js/dom.ex (DOM, events, URL, storage, history, matchMedia, r
 | DOM tree, querySelector(All), classList, dataset, innerHTML, attributes, getBoundingClientRect | real |
 | Events: dispatchEvent, createEvent, Event subclasses (Pointer, Touch, Hash/PopState, Message, Error, PromiseRejection) | real |
 | Timers, queueMicrotask, requestAnimationFrame, requestIdleCallback | real |
-| fetch, Headers, Request, Response, XMLHttpRequest | real but buffered: one `__fetch(method,url,body)`, status always 200, no response headers, no streaming |
+| fetch, Headers, Request, Response, XMLHttpRequest | real but buffered: status, headers, methods, bodies, credentials and abort work; no streaming. `fetch` and an async XHR go out in a process of their own (`__fetchAsync`): the page goes on while the server is slow, and the answer runs as a task. A sync XHR waits (`__fetch`) |
 | URL, URLSearchParams | real |
 | localStorage, sessionStorage | present (in memory, per page; not persisted) |
 | location, history (pushState/replaceState/popstate), navigator, screen | real or mostly static values |
