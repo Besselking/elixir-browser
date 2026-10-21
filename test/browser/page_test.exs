@@ -147,6 +147,13 @@ defmodule Browser.PageTest do
       assert Page.scripts?(Page.build("<script>1</script>", @url))
       refute Page.scripts?(Page.build("<p>no</p>", @url))
     end
+
+    test "scripts? is true for an iframe with a srcdoc or a src" do
+      assert Page.scripts?(Page.build("<iframe srcdoc='<p>x</p>'></iframe>", @url))
+      assert Page.scripts?(Page.build("<div><iframe src='a.html'></iframe></div>", @url))
+      refute Page.scripts?(Page.build("<iframe></iframe>", @url))
+      refute Page.scripts?(Page.build("<iframe src='about:blank'></iframe>", @url))
+    end
   end
 
   describe "viewport units" do

@@ -19,8 +19,9 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
   button and a bar.
 - `<audio controls>` is a 300 x 54 px bar. `<audio>` without `controls` is not shown.
 - `<iframe>` is an inline box. It is 300 x 150 px, or the size of its `width` and
-  `height` attributes. The page inside is not loaded. (Frames that a script makes with
-  `document.write` or `srcdoc` use their own path.)
+  `height` attributes. The page in its `src` or `srcdoc` is loaded and drawn inside the
+  box, with its own scripts and style sheets. Frames that a script makes with
+  `document.write` work the same way.
 - A video with a `poster` shows the poster. Without one it shows its first frame, if the
   helper is built and the file is at most 32 MiB (the helper reads a file; streaming is
   a later step). The picture is scaled to the box like an image (`object-fit: contain`).

@@ -572,7 +572,22 @@ defmodule Browser.Page do
   end
 
   @doc "True when the page has a `<script>` element or something editable (the runtime holds its document)."
-  def scripts?(%__MODULE__{raw: raw}), do: has_tag?(raw, "script") or editable?(raw)
+  def scripts?(%__MODULE__{raw: raw}),
+    do: has_tag?(raw, "script") or editable?(raw) or frames?(raw)
+
+  # an `<iframe>` with a `src` or `srcdoc` is a document of its own: the runtime loads it
+  defp frames?(nodes) when is_list(nodes), do: Enum.any?(nodes, &frames?/1)
+
+  defp frames?({:element, "iframe", attrs, kids}) do
+    case {List.keyfind(attrs, "srcdoc", 0), List.keyfind(attrs, "src", 0)} do
+      {nil, nil} -> frames?(kids)
+      {nil, {_, v}} -> String.trim(to_string(v)) not in ["", "about:blank"] or frames?(kids)
+      _ -> true
+    end
+  end
+
+  defp frames?({:element, _tag, _attrs, kids}), do: frames?(kids)
+  defp frames?(_), do: false
 
   defp editable?(nodes) when is_list(nodes), do: Enum.any?(nodes, &editable?/1)
 

@@ -31,6 +31,11 @@ button { margin-right: 6px }
   <audio controls src="video/clip.mp4"></audio>
 </div>
 <div class="card">
+  <p>Iframes with a <code>srcdoc</code> page and with a <code>src</code> address:</p>
+  <iframe width="260" height="90" srcdoc="<body style='font-family:sans-serif;margin:0;background:#fee'><h3 style='margin:8px'>srcdoc</h3><p style='margin:8px'>A page in the attribute.</p></body>"></iframe>
+  <iframe width="260" height="90" src="sample.html"></iframe>
+</div>
+<div class="card">
   <p>An iframe made by a script that writes a page into it:</p>
   <span id="frame-host"></span>
 </div>
