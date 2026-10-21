@@ -13,7 +13,7 @@ defmodule Browser.CSS do
 
   A selector may end in `::before`, `::after` (or the one-colon forms), `::marker` or
   `::placeholder`: its rule styles the generated box, marker or hint, and carries
-  `pseudo: :before | :after | :marker | :placeholder` (nil for other rules).
+  `pseudo: :before | :after | :marker | :placeholder | :first_letter` (nil for other rules).
   Selectors using anything else (`:has()`, …) are dropped. `@media` (see
   `Browser.MediaQuery`), `@supports` (assumed true unless it starts with `not`)
   and `@layer` blocks are entered (a rule carries its `layer`, nil when it is in none, for the
@@ -560,16 +560,20 @@ defmodule Browser.CSS do
   # `a::before` -> {"a", :before}; a bare `::after` styles the box of every element
   defp split_pseudo_element(str) do
     case Regex.run(
-           re(~r/\A(.*?)(?:::(before|after|marker|placeholder|backdrop)|:(before|after))\z/su),
+           re(
+             ~r/\A(.*?)(?:::(before|after|marker|placeholder|backdrop|first-letter)|:(before|after|first-letter))\z/su
+           ),
            str
          ) do
       # a backdrop is a box of its own (see `Browser.Modal`) that only these rules match
       [_, head, "backdrop"] -> {head_or_any(head) <> ":mb-backdrop", nil}
-      [_, head, which] -> {head_or_any(head), String.to_atom(which)}
-      [_, head, "", which] -> {head_or_any(head), String.to_atom(which)}
+      [_, head, which] -> {head_or_any(head), pseudo_atom(which)}
+      [_, head, "", which] -> {head_or_any(head), pseudo_atom(which)}
       nil -> {str, nil}
     end
   end
+
+  defp pseudo_atom(name), do: name |> String.replace("-", "_") |> String.to_atom()
 
   defp head_or_any(""), do: "*"
   defp head_or_any(head), do: head

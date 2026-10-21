@@ -418,6 +418,10 @@ defmodule Browser.Style do
   defp note_pseudo(idx, %{pseudo: :placeholder}),
     do: %{idx | pseudo: MapSet.put(idx.pseudo, :placeholder)}
 
+  # a `::first-letter` rule styles part of the text of its element: it needs no `content`
+  defp note_pseudo(idx, %{pseudo: :first_letter}),
+    do: %{idx | pseudo: MapSet.put(idx.pseudo, :first_letter)}
+
   defp note_pseudo(idx, %{pseudo: which, decls: decls}) when which != nil do
     if Enum.any?(decls, fn {p, v, _} -> p == "content" and v not in ["none", "normal"] end),
       do: %{idx | pseudo: MapSet.put(idx.pseudo, which)},
@@ -1817,6 +1821,7 @@ defmodule Browser.Style do
           attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
           kids = prune_children(kids, ctx, idx)
           kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
+          kids = first_letter(idx, ctx, computed, kids)
           node = {:element, tag, attrs, kids}
           {[node | acc], node}
         end
@@ -1827,6 +1832,78 @@ defmodule Browser.Style do
   end
 
   defp kids_of(_tag, _attrs, kids), do: kids
+
+  # `::first-letter`: the first letter of the first line of a block (with the punctuation before
+  # it) is in a span of its own that has the style of the rule
+  @first_letter_displays [nil, "block", "list-item", "inline-block", "table-cell", "flow-root"]
+
+  defp first_letter(idx, ctx, computed, kids) do
+    with true <- MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), :first_letter),
+         true <- computed["display"] in @first_letter_displays,
+         false <- Enum.empty?(declared(idx, ctx, :first_letter)) do
+      {c, _custom, _own} = compute(idx, ctx, ctx, :first_letter)
+      {kids, _done} = wrap_first_letter(kids, {:element, "span", [{"@computed", c}], []})
+      kids
+    else
+      _ -> kids
+    end
+  end
+
+  # -> {kids, done?}
+  defp wrap_first_letter([], _span), do: {[], false}
+
+  defp wrap_first_letter([{:text, text} = node | rest], span) do
+    case Regex.run(re(~r/\A(\s*)([\p{P}\p{S}]*[\p{L}\p{N}]|[\p{P}\p{S}]+)(.*)\z/su), text) do
+      [_, ws, letter, tail] ->
+        {:element, "span", attrs, _} = span
+        letter = {:element, "span", attrs, [{:text, letter}]}
+        before = if ws == "", do: [], else: [{:text, ws}]
+        tail = if tail == "", do: [], else: [{:text, tail}]
+        {before ++ [letter | tail] ++ rest, true}
+
+      nil ->
+        # (white space only: the letter is in what follows; anything else has no letter)
+        if String.trim(text) == "" do
+          {more, done?} = wrap_first_letter(rest, span)
+          {[node | more], done?}
+        else
+          {[node | rest], true}
+        end
+    end
+  end
+
+  defp wrap_first_letter([{:element, tag, attrs, ekids} = node | rest], span) do
+    cond do
+      tag in ~w(img br input select textarea button svg video canvas iframe hr) ->
+        {[node | rest], true}
+
+      floated_or_positioned?(attrs) ->
+        skip_node(node, rest, span)
+
+      true ->
+        case wrap_first_letter(ekids, span) do
+          {ekids, true} -> {[{:element, tag, attrs, ekids} | rest], true}
+          {_, false} -> skip_node(node, rest, span)
+        end
+    end
+  end
+
+  defp wrap_first_letter([node | rest], span), do: skip_node(node, rest, span)
+
+  defp skip_node(node, rest, span) do
+    {more, done?} = wrap_first_letter(rest, span)
+    {[node | more], done?}
+  end
+
+  defp floated_or_positioned?(attrs) do
+    case List.keyfind(attrs, "@computed", 0) do
+      {_, %{} = c} ->
+        c["float"] not in [nil, "none"] or c["position"] in ["absolute", "fixed"]
+
+      _ ->
+        false
+    end
+  end
 
   # `::marker { content }` of list items (the text drawn instead of the bullet or number) and
   # summaries. A summary's marker may depend on whether its `<details>` is open, so both are
