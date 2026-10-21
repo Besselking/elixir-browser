@@ -1,6 +1,6 @@
 # Media: video, audio and iframe
 
-Status: stage 1 is done. The other stages are a plan.
+Status: stages 1 and 2 are done, and silent playback of video works (stage 4 without sound). The other stages are a plan.
 
 ## Rule exception
 
@@ -24,7 +24,15 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
 - A video with a `poster` shows the poster. Without one it shows its first frame, if the
   helper is built and the file is at most 32 MiB (the helper reads a file; streaming is
   a later step). The picture is scaled to the box like an image (`object-fit: contain`).
-- Nothing plays. `HTMLMediaElement.play()` returns a promise and does nothing.
+- A video plays without sound. `video.play()`, `video.pause()` and a click on a video with
+  `controls` (the whole box, for now) start and stop it. `Browser.Media.Player` downloads the
+  file (up to 256 MiB), decodes frame by frame and sends each frame in time. Each frame is
+  drawn like a new picture of the same size. A late frame (more than 200 ms) is dropped. At
+  the end the video goes back to its first frame, paused. A video of a tab that is not shown
+  stops. A page that is left stops its videos.
+- Not done yet: sound, `currentTime`, `duration`, `paused`, the `HTMLMediaElement` events,
+  seeking, `autoplay` and `loop`, the `<source>` choice by `type`, audio elements. `play()`
+  returns a promise that is already resolved.
 
 ## Stages
 

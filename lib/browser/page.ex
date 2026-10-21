@@ -292,6 +292,27 @@ defmodule Browser.Page do
     end)
   end
 
+  @doc "The address of the video element with element number `nid` (`\"@media\"`), or nil."
+  def media_url(%__MODULE__{raw: raw}, nid), do: find_media(raw, nid)
+
+  defp find_media(nodes, nid) do
+    Enum.find_value(nodes, fn
+      {:element, "video", attrs, kids} ->
+        with {_, ^nid} <- List.keyfind(attrs, "@nid", 0),
+             {_, url} <- List.keyfind(attrs, "@media", 0) do
+          url
+        else
+          _ -> find_media(kids, nid)
+        end
+
+      {:element, _tag, _attrs, kids} ->
+        find_media(kids, nid)
+
+      _ ->
+        nil
+    end)
+  end
+
   @doc """
   `%{control id => element number}` (`"@nid"`) of the page's controls: how a control is found
   again in a page a script has changed, where the ids may have been dealt out afresh.

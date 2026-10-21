@@ -111,4 +111,62 @@ defmodule Browser.MediaTest do
   test "a missing file gives an error" do
     assert {:error, _} = Media.open("/nonexistent/clip.mp4")
   end
+
+  describe "Player" do
+    alias Browser.Media.Player
+
+    defp player(clip) do
+      url = "file://" <> clip
+      {:ok, pid} = Player.start(url: url, base: url, owner: self())
+      {pid, url}
+    end
+
+    defp frames(url, ms) do
+      receive do
+        {:media_frame, _pid, ^url, <<"BM", _::binary>>} ->
+          [:frame | frames(url, ms)]
+      after
+        ms -> []
+      end
+    end
+
+    test "it plays the frames in time, then goes back to the first frame", %{clip: clip} do
+      {pid, url} = player(clip)
+      assert_receive {:media_state, ^url, :ready}, 5000
+      Player.play(pid)
+      assert_receive {:media_state, ^url, :playing}, 1000
+      started = System.monotonic_time(:millisecond)
+      assert_receive {:media_state, ^url, :ended}, 5000
+      took = System.monotonic_time(:millisecond) - started
+      # 20 frames at 10 per second
+      assert took in 1500..3500
+      # (the frames, and the first one again at the end)
+      assert length(frames(url, 200)) in 19..22
+      assert Player.status(pid) == :paused
+      assert Player.position(pid) == 0
+    end
+
+    test "pause stops the frames and play goes on", %{clip: clip} do
+      {pid, url} = player(clip)
+      assert_receive {:media_state, ^url, :ready}, 5000
+      Player.play(pid)
+      Process.sleep(500)
+      Player.pause(pid)
+      assert_receive {:media_state, ^url, :paused}, 1000
+      _ = frames(url, 100)
+      assert frames(url, 400) == []
+      pos = Player.position(pid)
+      assert pos > 0
+      Player.toggle(pid)
+      assert_receive {:media_frame, ^pid, ^url, _}, 1000
+      assert Player.position(pid) >= pos
+    end
+
+    test "a file that cannot be played fails", %{tmp_dir: dir} do
+      path = Path.join(dir, "bad.mp4")
+      File.write!(path, "junk")
+      {_pid, url} = player(path)
+      assert_receive {:media_state, ^url, :failed}, 5000
+    end
+  end
 end

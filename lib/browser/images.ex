@@ -48,12 +48,16 @@ defmodule Browser.Images do
   defp index_node({:element, "video", attrs, kids}, base, acc) do
     attrs = absolutize_style(attrs, base)
     {kids, acc} = Enum.map_reduce(kids, acc, &index_node(&1, base, &2))
+    media = media_source(attrs, kids, base)
 
     url =
       case attr(attrs, "poster") |> String.trim() do
-        "" -> media_source(attrs, kids, base)
+        "" -> media && "media:" <> media
         poster -> Fetch.resolve(base, poster)
       end
+
+    # `@media` is the address of the video itself, which the player needs when there is a poster
+    attrs = if media, do: attrs ++ [{"@media", media}], else: attrs
 
     if url do
       {{:element, "video", attrs ++ [{"@src", url}], kids}, [url | acc]}
@@ -89,7 +93,7 @@ defmodule Browser.Images do
   @doc "The `url()` addresses in a computed `background-image` list."
   def background_urls(images), do: Browser.Backgrounds.urls(images)
 
-  # "media:" + the address of the `src` of a video or of its first `<source>`
+  # the address of the `src` of a video or of its first `<source>`
   defp media_source(attrs, kids, base) do
     src =
       case attr(attrs, "src") |> String.trim() do
@@ -103,7 +107,7 @@ defmodule Browser.Images do
           src
       end
 
-    if src not in ["", nil], do: "media:" <> Fetch.resolve(base, src)
+    if src not in ["", nil], do: Fetch.resolve(base, src)
   end
 
   @max_media_bytes 32 * 1024 * 1024

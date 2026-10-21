@@ -570,4 +570,24 @@ defmodule Browser.JS.ActivationTest do
       Runtime.stop(pid)
     end
   end
+
+  describe "video elements" do
+    test "play(), pause() and a click on a video with controls go to the session" do
+      {_pid, r} =
+        start(~S"""
+        <video id="v" controls></video><video id="w"></video><audio id="a" controls></audio>
+        <script>
+        var v = document.getElementById("v"), w = document.getElementById("w");
+        v.play(); v.pause(); w.play(); v.click(); w.click();
+        document.getElementById("a").play();
+        </script>
+        """)
+
+      media = for {:media, nid, op} <- r.outbox, do: {nid, op}
+      [{v, :play}, {v, :pause}, {w, :play}, {v, :toggle}] = media
+      assert is_integer(v) and is_integer(w) and v != w
+      # (a click on a video without controls and any call on an audio element do nothing)
+      assert length(media) == 4
+    end
+  end
 end

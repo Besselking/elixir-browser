@@ -1801,7 +1801,10 @@ defmodule Browser.UI do
         {w, h} = {:wxImage.getWidth(image), :wxImage.getHeight(image)}
         bitmap = :wxBitmap.new(image)
         :wxImage.destroy(image)
+        # a picture that is replaced (the next frame of a video) is not kept
+        old = :ets.lookup(@images, url)
         :ets.insert(@images, {url, bitmap})
+        for {_, previous} <- old, do: :wxBitmap.destroy(previous)
         if w > 0 and h > 0, do: {:ok, w, h}, else: :error
       else
         :error

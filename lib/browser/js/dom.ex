@@ -7263,12 +7263,18 @@ defmodule Browser.JS.DOM do
       :undefined
     end)
 
-    for name <- ~w(select showModal close pause load) do
+    for name <- ~w(select showModal close load) do
       def_fn(p, name, fn _this, _ -> :undefined end)
     end
 
-    # nothing is played, but a script that starts a video gets its promise
-    def_fn(p, "play", fn _this, _ ->
+    # a video is played (without sound) by the session; the other media elements do nothing
+    def_fn(p, "pause", fn this, _ ->
+      media_op(this, :pause)
+      :undefined
+    end)
+
+    def_fn(p, "play", fn this, _ ->
+      media_op(this, :play)
       promise = Browser.JS.Promise.new()
       Browser.JS.Promise.fulfill(promise, :undefined)
       promise
@@ -7506,8 +7512,15 @@ defmodule Browser.JS.DOM do
         "input" -> type_of(n) in @activation_inputs
         t when t in ["button", "label"] -> true
         "summary" -> details_of_summary(nid) != nil
+        "video" -> get_attr(n, "controls") != nil
         _ -> false
       end
+  end
+
+  # `play()` and `pause()` of a video: the session starts or stops its player
+  defp media_op(this, op) do
+    nid = this_nid(this)
+    if node(nid).tag == "video", do: out({:media, ensure_nid(nid), op}), else: :ok
   end
 
   # the `<details>` that `nid` is the summary of (its first `<summary>` child), or nil
@@ -7567,6 +7580,7 @@ defmodule Browser.JS.DOM do
       t when t in ["a", "area"] -> follow_hyperlink(nid)
       "label" -> label_activation(nid, target)
       "summary" -> toggle_details(details_of_summary(nid))
+      "video" -> out({:media, ensure_nid(nid), :toggle})
       _ when n.tag in ["button", "input"] -> control_activation(nid, n, pre)
       _ -> :ok
     end
