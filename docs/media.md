@@ -43,7 +43,7 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
 
 1. Boxes (done).
 2. The helper and its protocol (done, except hardware decoding). `native/browser_media/media_helper.c`,
-   built by `mix media.build` (needs `cc`, `pkg-config` and the libav development files).
+   built by `mix media.build` (needs `cc`, `pkg-config` and the libav development files). `mix app.bundle` runs it first and puts the helper and its libav libraries into the app. On a Mac, install the tools with `brew install ffmpeg pkg-config`. If the helper cannot be built, the app has no video playback.
    `Browser.Media` starts the helper and gives frames and audio chunks. If the helper
    is not built, stage 1 stays as it is and `Browser.Media.available?/0` is false.
 3. Sound. The helper or the browser must play the PCM. The audio clock is the master clock.
