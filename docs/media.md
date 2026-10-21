@@ -39,7 +39,8 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
   `timeupdate` (about every 250 ms), `ended` and `error`. A video with `controls` is opened when the page is shown (unless it has
   `preload="none"` or the file is bigger than 32 MiB), so its length is known before the
   first play. Other videos start their player on the first `play()` or click.
-- Not done yet: sound, the `<source>` choice by `type`, audio elements, `canPlayType`. `play()` returns a promise that is already
+- A `<source>` is chosen by its `type`, and `canPlayType()` answers `"maybe"` or `"probably"` for the common types once the helper is built.
+- Not done yet: sound, audio elements. `play()` returns a promise that is already
   resolved.
 
 ## Stages

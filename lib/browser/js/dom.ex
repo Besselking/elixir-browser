@@ -7368,7 +7368,9 @@ defmodule Browser.JS.DOM do
       promise
     end)
 
-    def_fn(p, "canPlayType", fn _this, _ -> "" end)
+    def_fn(p, "canPlayType", fn _this, args ->
+      Browser.Media.can_play_type(to_str(arg(args, 0)))
+    end)
 
     def_fn(p, "getContext", fn this, args -> canvas_context(this, to_str(arg(args, 0))) end)
 

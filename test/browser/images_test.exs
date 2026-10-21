@@ -34,6 +34,31 @@ defmodule Browser.ImagesTest do
       refute "media:https://example.com/c.mp4#nid=" <> a == b
     end
 
+    test "a source is chosen by its type" do
+      System.put_env("BROWSER_MEDIA_HELPER", Path.expand("../../mix.exs", __DIR__))
+      on_exit(fn -> System.delete_env("BROWSER_MEDIA_HELPER") end)
+
+      html =
+        ~s(<video><source src="a.xyz" type="video/x-unknown"><source src="b.mp4" type="video/mp4"></video>)
+
+      assert video_urls(html) == ["media:https://example.com/a/b.mp4"]
+
+      assert Browser.Media.can_play_type("video/mp4") == "maybe"
+      assert Browser.Media.can_play_type(~s(video/webm; codecs="vp9, opus")) == "probably"
+      assert Browser.Media.can_play_type("video/x-unknown") == ""
+    end
+
+    test "without the helper nothing can be played and the first source is used" do
+      System.put_env("BROWSER_MEDIA_HELPER", "/nonexistent/helper")
+      on_exit(fn -> System.delete_env("BROWSER_MEDIA_HELPER") end)
+
+      html =
+        ~s(<video><source src="a.webm" type="video/webm"><source src="b.mp4" type="video/mp4"></video>)
+
+      assert video_urls(html) == ["media:https://example.com/a/a.webm"]
+      assert Browser.Media.can_play_type("video/mp4") == ""
+    end
+
     test "a poster is an ordinary picture" do
       assert video_urls(~s(<video src="c.mp4" poster="p.png"></video>)) ==
                ["https://example.com/a/p.png"]

@@ -29,6 +29,26 @@ defmodule Browser.Media do
       Path.join(Application.app_dir(:browser, "priv"), "browser_media")
   end
 
+  @playable ~w(video/mp4 video/webm video/ogg video/quicktime video/x-matroska video/mpeg
+               audio/mpeg audio/mp3 audio/mp4 audio/aac audio/ogg audio/wav audio/x-wav
+               audio/wave audio/webm audio/flac audio/x-m4a)
+
+  @doc """
+  What `canPlayType(type)` answers: `""`, `"maybe"` or `"probably"` (a known type with a
+  `codecs` list). The helper decodes what libav knows, so every common media type is
+  accepted, once the helper is built.
+  """
+  def can_play_type(type) when is_binary(type) do
+    [base | params] = type |> String.downcase() |> String.split(";")
+
+    cond do
+      not available?() -> ""
+      String.trim(base) not in @playable -> ""
+      Enum.any?(params, &(String.trim(&1) |> String.starts_with?("codecs="))) -> "probably"
+      true -> "maybe"
+    end
+  end
+
   @doc "True when the helper program has been built."
   def available?, do: File.regular?(helper_path())
 

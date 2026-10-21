@@ -113,10 +113,20 @@ defmodule Browser.Images do
     src =
       case attr(attrs, "src") |> String.trim() do
         "" ->
-          Enum.find_value(kids, "", fn
-            {:element, "source", a, _} -> attr(a, "src") |> String.trim()
-            _ -> nil
-          end)
+          sources = for {:element, "source", a, _} <- kids, do: a
+
+          # the first source whose `type` can be played (all of them are tried in order)
+          playable =
+            Enum.find(sources, fn a ->
+              attr(a, "src") |> String.trim() != "" and
+                (attr(a, "type") |> String.trim() == "" or
+                   Browser.Media.can_play_type(attr(a, "type")) != "")
+            end)
+
+          case playable || List.first(sources) do
+            nil -> ""
+            a -> attr(a, "src") |> String.trim()
+          end
 
         src ->
           src
