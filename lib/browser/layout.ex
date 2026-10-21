@@ -1176,11 +1176,13 @@ defmodule Browser.Layout do
     walk_zwsp_text("\u200B", style, acc)
   end
 
-  defp walk({:element, tag, attrs, _} = el, style, acc) when tag in ["img", "svg", "canvas"] do
+  defp walk({:element, tag, attrs, _} = el, style, acc)
+       when tag in ["img", "svg", "canvas", "video", "audio"] do
     ops = fn acc ->
       case tag do
         "img" -> image_ops(el, style, acc)
         "canvas" -> canvas_ops(el, style, acc)
+        t when t in ["video", "audio"] -> media_ops(el, style, acc)
         _ -> svg_ops(el, style, acc)
       end
     end
@@ -1584,6 +1586,10 @@ defmodule Browser.Layout do
   # own box.
   defp image_sub({:element, "img", _, _} = el, style), do: image_ops(el, style, [])
   defp image_sub({:element, "canvas", _, _} = el, style), do: canvas_ops(el, style, [])
+
+  defp image_sub({:element, tag, _, _} = el, style) when tag in ["video", "audio"],
+    do: media_ops(el, style, [])
+
   defp image_sub(el, style), do: svg_ops(el, style, [])
 
   defp abs_ops({:element, tag, attrs, kids}, parent_style, c, acc) do
@@ -1592,7 +1598,7 @@ defmodule Browser.Layout do
     else
       box = box(tag, c)
       # a picture is sized by its own width and height: they stay with it
-      replaced? = tag in ["img", "svg", "canvas"]
+      replaced? = tag in ["img", "svg", "canvas", "video", "audio"]
 
       own =
         Map.drop(
@@ -1699,6 +1705,7 @@ defmodule Browser.Layout do
     url = with "" <- attr_value(attrs, "@src"), do: nil
     images = Process.get(:layout_images)
     info = if url && images, do: Map.get(images, url)
+
     alt = attr_value(attrs, "alt")
     declared = declared_size(attrs)
 
@@ -1741,6 +1748,12 @@ defmodule Browser.Layout do
         image_css(computed(attrs))
       )
   end
+
+  # a video swaps its black box for the picture (its poster or first frame): always a new layout
+  def image_size_fixed?({:element, "video", attrs, kids}, url),
+    do:
+      attr_value(attrs, "@src") != url and attr_value(attrs, "@frame") != url and
+        image_size_fixed?(kids, url)
 
   def image_size_fixed?({:element, _tag, _attrs, kids}, url), do: image_size_fixed?(kids, url)
   def image_size_fixed?(_text, _url), do: true
@@ -1883,6 +1896,87 @@ defmodule Browser.Layout do
     }
 
     image_atom(nil, nil, attrs, c, style, acc, extra)
+  end
+
+  # `<video>` and `<audio>` are replaced elements. Nothing is played yet (docs/media.md): a
+  # video is a black box, and an element with `controls` shows a play button and a bar. Sizes:
+  # the `width` and `height` attributes, else 300 x 150 (an audio bar is 300 x 54). An audio
+  # element with no `controls` is `display: none` (user-agent sheet).
+  defp media_ops({:element, tag, attrs, _}, parent_style, acc) do
+    c = computed(attrs)
+    style = restyle(tag, attrs, parent_style, c)
+    url = with "" <- attr_value(attrs, "@src"), do: nil
+    images = Process.get(:layout_images)
+    info = if url && images, do: Map.get(images, url)
+
+    # a video with a poster shows the frames of its player instead, once there are some
+    {url, info} =
+      with "media:" <> _ = frame <- attr_value(attrs, "@frame"),
+           {:ok, _, _} = frame_info <- images && Map.get(images, frame) do
+        {frame, frame_info}
+      else
+        _ -> {url, info}
+      end
+
+    # a loaded poster or first frame is a picture, like an <img>
+    if tag == "video" and match?({:ok, _, _}, info) do
+      controls = List.keymember?(attrs, "controls", 0)
+      extra = %{pstyle: parent_style, tag: "video", controls: controls}
+      image_atom(url, info, attrs, c, style, acc, extra)
+    else
+      media_box(tag, attrs, c, style, acc)
+    end
+  end
+
+  defp media_box(tag, attrs, c, style, acc) do
+    {bw, bh} = if tag == "audio", do: {300, 54}, else: {300, 150}
+    ops = media_display_list(tag, List.keymember?(attrs, "controls", 0), bw, bh)
+
+    extra = %{
+      canvas: {bw, bh, ops},
+      intrinsic: {bw, bh},
+      paint?: true,
+      attrs: declared_size(attrs) || %{w: nil, h: nil},
+      current: color4(c["color"]),
+      tag: tag
+    }
+
+    image_atom(nil, nil, attrs, c, style, acc, extra)
+  end
+
+  defp media_display_list(tag, controls?, w, h) do
+    alias Browser.Canvas
+    paint = fn rgba -> {:color, rgba} end
+    surface = Canvas.new(w, h)
+
+    surface =
+      case tag do
+        "video" -> Canvas.fill_rect(surface, 0, 0, w, h, paint.({0, 0, 0, 255}), 1.0)
+        "audio" -> Canvas.fill_rect(surface, 0, 0, w, h, paint.({241, 243, 244, 255}), 1.0)
+      end
+
+    surface = media_controls(surface, tag, controls?, w, h)
+
+    Canvas.ops(surface)
+  end
+
+  # the play button and the bar of a video or an audio element with `controls`
+  defp media_controls(surface, tag, controls?, w, h) do
+    alias Browser.Canvas
+    paint = fn rgba -> {:color, rgba} end
+
+    cond do
+      tag == "video" and controls? ->
+        Browser.Media.Controls.draw(surface, w, h, nil)
+
+      tag == "audio" ->
+        surface
+        |> Browser.Media.Controls.triangle(16, h / 2 - 9, 18, paint.({60, 64, 67, 255}))
+        |> Canvas.fill_rect(50, h / 2 - 1.5, w - 70, 3, paint.({154, 160, 166, 255}), 1.0)
+
+      true ->
+        surface
+    end
   end
 
   defp image_atom(url, info, attrs, c, style, acc, extra) do
@@ -5076,13 +5170,26 @@ defmodule Browser.Layout do
           _ ->
             item = Map.merge(item, %{type: :image, url: spec.url})
 
-            case Browser.ImageBox.fit(spec.intrinsic, {cw, ch}, spec[:fit], spec[:fit_pos]) do
-              nil ->
-                [item]
+            pic =
+              case Browser.ImageBox.fit(spec.intrinsic, {cw, ch}, spec[:fit], spec[:fit_pos]) do
+                nil ->
+                  item
 
-              rect ->
-                # drawn at its own size inside the item's box, which clips it
-                [Map.put(item, :fit, rect)]
+                rect ->
+                  # drawn at its own size inside the item's box, which clips it
+                  Map.put(item, :fit, rect)
+              end
+
+            # the controls of a video are drawn over its picture
+            if spec[:controls] do
+              ops = Browser.Media.Controls.ops(cw, ch, nil)
+
+              [
+                pic,
+                Map.merge(Map.drop(item, [:url]), %{type: :svg, ops: ops, video_controls: true})
+              ]
+            else
+              [pic]
             end
         end
       else

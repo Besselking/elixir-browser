@@ -103,6 +103,12 @@ defmodule Browser.JS.Runtime do
   @doc "A form with `method=\"dialog\"` was submitted, by the control `cid` (nil: by script)."
   def dialog_submit(pid, fid, cid), do: call(pid, {:dialog_submit, fid, cid})
 
+  @doc """
+  A media player says something about the video the layout numbers `nid`: the values scripts
+  read (`props`, by JS name) and the events to fire at it.
+  """
+  def media(pid, nid, props, events), do: call(pid, {:media, nid, props, events})
+
   @doc "The pointer moved from the element the layout numbers `old` to `new` (nil for none)."
   def hover(pid, old, new), do: call(pid, {:hover, old, new})
 
@@ -586,6 +592,12 @@ defmodule Browser.JS.Runtime do
   # `<form method="dialog">` was submitted (by the control `cid`, or by script): the dialog closes
   defp handle({:dialog_submit, fid, cid}) do
     guard(fn -> DOM.dialog_submit(fid, cid) end, :ok)
+    Browser.JS.Promise.run_microtasks()
+    finish(%{})
+  end
+
+  defp handle({:media, nid, props, events}) do
+    guard(fn -> DOM.media_update(nid, props, events) end, :ok)
     Browser.JS.Promise.run_microtasks()
     finish(%{})
   end

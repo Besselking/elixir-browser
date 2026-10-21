@@ -99,6 +99,9 @@ defmodule Browser.Session do
       sbar: nil,
       # decoded pictures by url: {:ok, width, height} or :failed
       images: %{},
+      # the players of the videos of the page: element number => pid (`Browser.Media.Player`)
+      media: %{},
+      media_ui: %{},
       layout_timer: nil,
       height: 0,
       scroll: 0,
@@ -241,6 +244,8 @@ defmodule Browser.Session do
     do: {:noreply, state}
 
   def handle_info({:loaded, _, url, mode, result}, state) do
+    state = stop_media(state)
+
     state =
       if state.adopt_js != nil and state.adopt_js == state.js, do: state, else: stop_js(state)
 
@@ -402,11 +407,17 @@ defmodule Browser.Session do
           :failed
       end
 
+    previous = state.images[url]
     state = put_in(state, [:images, url], info)
 
     cond do
       # the layout that is running picks up (or checks) the picture when it is done
       state.layout_job != nil ->
+        {:noreply, state}
+
+      # the next frame of a playing video, as big as the last one: only the picture changes
+      String.starts_with?(url, "media:") and info == previous ->
+        UI.refresh_images(state.ui, state.items, url, state.scroll, &moved_on_screen?/1)
         {:noreply, state}
 
       image_layout_needed?(state.page, url, info) ->
@@ -430,6 +441,40 @@ defmodule Browser.Session do
   end
 
   def handle_info({:images_done, _stale, _urls}, state), do: {:noreply, state}
+
+  # a frame of a playing video arrives like a picture that has loaded
+  def handle_info({:media_frame, pid, _url, bmp}, state) do
+    with {nid, _} <- Enum.find(state.media, fn {_nid, p} -> p == pid end),
+         %Page{} = page <- state.page,
+         pic when is_binary(pic) <- Page.media_picture(page, nid) do
+      handle_info({:image, state.nonce, pic, {:ok, bmp, :bmp}}, state)
+    else
+      _ -> {:noreply, state}
+    end
+  end
+
+  # a player says something: the page's scripts read it and hear the events
+  def handle_info({:media_state, pid, _url, what, snap}, state) do
+    case Enum.find(state.media, fn {_nid, p} -> p == pid end) do
+      {nid, _} ->
+        state = update_media_ui(state, nid, what, snap)
+
+        if state.js do
+          {props, events} = media_events(what, snap)
+          reply = Browser.JS.Runtime.media(js(state), nid, props, events)
+          {:noreply, apply_js(state, reply)}
+        else
+          {:noreply, state}
+        end
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, %{media: media} = state) do
+    {:noreply, %{state | media: Map.reject(media, fn {_nid, p} -> p == pid end)}}
+  end
 
   # several pictures usually arrive together: lay out once for the batch
   def handle_info({:image_layout, ref}, %{layout_timer: ref, layout_job: nil} = state),
@@ -817,7 +862,7 @@ defmodule Browser.Session do
       do: UI.set_status(state.ui, if(href, do: Fetch.resolve(base(state), href), else: ""))
 
     state = pointer_over(%{state | hover: {href, kind}}, x, y)
-    {:noreply, state}
+    {:noreply, media_motion(state, x, y)}
   end
 
   def handle_info({:wheel, rot, delta, lines, x, y}, state) do
@@ -1616,6 +1661,7 @@ defmodule Browser.Session do
 
                 case UI.link_at(state.links, x, py) do
                   nil ->
+                    state = media_click(state, x, y)
                     state = js_pointer(state, x, y, ["mousedown", "mouseup", "click"])
                     {:noreply, page_click(state, x, py, count, shift)}
 
@@ -2909,6 +2955,18 @@ defmodule Browser.Session do
     state
   end
 
+  # a video: start, pause or toggle its player (made the first time it is asked)
+  defp js_effect({:media, nid, op}, state) do
+    case media_player(state, nid) do
+      {pid, state} ->
+        apply(Browser.Media.Player, op, [pid])
+        state
+
+      nil ->
+        state
+    end
+  end
+
   defp js_effect({:reload}, state), do: load(state, state.url, :history)
   defp js_effect({:history_go, 0}, state), do: load(state, state.url, :history)
   defp js_effect({:history_go, n}, state), do: history_step(state, n)
@@ -2916,6 +2974,172 @@ defmodule Browser.Session do
 
   defp control(%{page: nil}, _cid), do: nil
   defp control(state, cid), do: state.page.forms.controls[cid]
+
+  # -- videos ----------------------------------------------------------------
+
+  defp media_player(%{media: media} = state, nid) do
+    case media do
+      %{^nid => pid} ->
+        {pid, state}
+
+      _ ->
+        with %Page{} = page <- state.page,
+             true <- Browser.Media.available?(),
+             url when is_binary(url) <- Page.media_url(page, nid),
+             {:ok, pid} <-
+               Browser.Media.Player.start(url: url, base: page.base || state.url, owner: self()) do
+          Process.monitor(pid)
+          {pid, %{state | media: Map.put(media, nid, pid)}}
+        else
+          _ -> nil
+        end
+    end
+  end
+
+  # A click on the controls of a video: the play button and the rest of the picture start or stop
+  # it, the bar jumps to the place (the controls are drawn by `media_controls` in the layout:
+  # the bar is the bottom 28 px, its line runs from x 40 to 16 px before the right edge).
+  defp media_click(state, x, y) do
+    with %Page{} = page <- state.page,
+         {%{type: :svg, nid: nid, w: w, h: h}, dx, dy} <-
+           UI.item_at(state.items, x, y, state.scroll),
+         url when is_binary(url) <- Page.media_url(page, nid),
+         {pid, state} <- media_player(state, nid) do
+      if dy >= h - 28 and dx >= 40 do
+        Browser.Media.Player.seek_fraction(pid, (dx - 40) / max(w - 56, 1))
+      else
+        Browser.Media.Player.toggle(pid)
+      end
+
+      state
+    else
+      _ -> state
+    end
+  end
+
+  # -- the controls of a video follow its state ---------------------------------------------
+
+  @controls_idle_ms 2000
+
+  # what the controls of each video show: playing or not, how far, and whether the mouse moved
+  # lately (a video that plays hides its controls when the mouse is idle)
+  defp media_ui_states(%{media_ui: ui}) do
+    now = System.monotonic_time(:millisecond)
+
+    Map.new(ui, fn {nid, m} ->
+      {nid,
+       %{
+         playing: m.playing,
+         frac: m.frac,
+         visible: not m.playing or now - m.moved_at < @controls_idle_ms
+       }}
+    end)
+  end
+
+  defp update_media_ui(state, nid, what, snap) do
+    old = Map.get(state.media_ui, nid, %{playing: false, frac: 0.0, moved_at: 0, dur: nil})
+    dur = snap.duration_ms || old.dur
+    frac = if dur && dur > 0, do: min((snap.pos || 0) / dur, 1.0), else: old.frac
+
+    new =
+      case what do
+        :playing -> %{old | playing: true, moved_at: now_ms()}
+        w when w in [:paused, :failed] -> %{old | playing: false}
+        :ended -> %{old | playing: false, frac: 0.0}
+        :ready -> old
+        _ -> %{old | frac: frac}
+      end
+
+    redraw_media_ui(state, nid, %{
+      new
+      | dur: dur,
+        frac: if(what == :ended, do: 0.0, else: new.frac)
+    })
+  end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
+  # swaps the controls of the video in the items and repaints them
+  defp redraw_media_ui(state, nid, m) do
+    File.write!(
+      "/tmp/mui.log",
+      "#{inspect({nid, m})} items=#{Enum.count(state.items, &Map.get(&1, :video_controls))}\n",
+      [:append]
+    )
+
+    state = %{state | media_ui: Map.put(state.media_ui, nid, m)}
+    items = Browser.Media.Controls.apply(state.items, %{nid => media_ui_states(state)[nid]})
+    UI.update(state.ui, items, overlay(state), state.scroll, state.caret_on, :diff)
+    %{state | items: items}
+  end
+
+  # the mouse moved over a video that plays: its controls show again
+  defp media_motion(%{media_ui: ui} = state, _x, _y) when ui == %{}, do: state
+
+  defp media_motion(state, x, y) do
+    with {%{video_controls: true, nid: nid}, _, _} <-
+           UI.item_at(state.items, x, y, state.scroll),
+         %{playing: true, moved_at: at} = m <- state.media_ui[nid] do
+      now = now_ms()
+      hidden? = now - at >= @controls_idle_ms
+      m = %{m | moved_at: now}
+
+      if hidden?,
+        do: redraw_media_ui(state, nid, m),
+        else: %{state | media_ui: Map.put(ui_of(state), nid, m)}
+    else
+      _ -> state
+    end
+  end
+
+  defp ui_of(state), do: state.media_ui
+
+  # what scripts read and the events they hear when a player reports `what`
+  defp media_events(what, snap) do
+    time = %{"currentTime" => (snap.pos || 0) / 1000}
+
+    meta =
+      case snap do
+        %{duration_ms: ms} when is_integer(ms) -> %{"duration" => ms / 1000}
+        _ -> %{}
+      end
+
+    size = %{"videoWidth" => (snap.width || 0) * 1.0, "videoHeight" => (snap.height || 0) * 1.0}
+
+    case what do
+      :ready ->
+        {Map.merge(time, meta) |> Map.merge(size) |> Map.put("readyState", 4.0),
+         ~w(loadedmetadata loadeddata canplay)}
+
+      :playing ->
+        {Map.merge(time, %{"paused" => false, "ended" => false}), ~w(play playing)}
+
+      :paused ->
+        {Map.put(time, "paused", true), ~w(pause)}
+
+      :time ->
+        {time, ~w(timeupdate)}
+
+      :seeked ->
+        {time, ~w(seeking seeked timeupdate)}
+
+      :ended ->
+        {%{"paused" => true, "ended" => true, "currentTime" => Map.get(meta, "duration", 0.0)},
+         ~w(timeupdate pause ended)}
+
+      :failed ->
+        {%{"paused" => true}, ~w(error)}
+    end
+  end
+
+  # the players of a page that is left
+  defp stop_media(%{media: media} = state) do
+    Enum.each(media, fn {_nid, pid} ->
+      if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+    end)
+
+    %{state | media: %{}, media_ui: %{}}
+  end
 
   # -- images ----------------------------------------------------------------
 
@@ -3120,6 +3344,8 @@ defmodule Browser.Session do
 
   # `items` are what is drawn: what the clicks and the pointer find is looked up in them
   defp put_items(state, items) do
+    items = Browser.Media.Controls.apply(items, media_ui_states(state))
+
     %{
       state
       | items: items,
@@ -3748,7 +3974,7 @@ defmodule Browser.Session do
   # What belongs to one tab. Everything else (the window, the jobs and timers, the address
   # bar's suggestions, the visited pages) is shared; a tab that is not shown has none of
   # its jobs running: `park/1` stops them and `resume/1` starts again what was cut short.
-  @tab_keys ~w(history page nodes items base scrollers soff links controls hit_controls sticky images height scroll
+  @tab_keys ~w(history page nodes items base scrollers soff links controls hit_controls sticky images media media_ui height scroll
     scroll_x content_w wheel_rem wheel_rem_x url focus caret menu sel sel_anchor drag sel_texts
     sel_items click fanchor fdrag hover hover_nid hover_chain js scripts_pending page_edits fragment loading tid ed efocus
     esel edrag egoal)a
@@ -3768,6 +3994,8 @@ defmodule Browser.Session do
       scrollers: %{},
       soff: %{},
       images: %{},
+      media: %{},
+      media_ui: %{},
       height: 0,
       scroll: 0,
       scroll_x: 0,
@@ -3837,6 +4065,8 @@ defmodule Browser.Session do
       |> stop_blink()
 
     if state.js, do: Browser.JS.Runtime.visible(state.js, false)
+    # a video of a tab that is not shown stops
+    Enum.each(state.media, fn {_nid, pid} -> Browser.Media.Player.pause(pid) end)
 
     tab =
       state

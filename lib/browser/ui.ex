@@ -1802,7 +1802,10 @@ defmodule Browser.UI do
         {w, h} = {:wxImage.getWidth(image), :wxImage.getHeight(image)}
         bitmap = :wxBitmap.new(image)
         :wxImage.destroy(image)
+        # a picture that is replaced (the next frame of a video) is not kept
+        old = :ets.lookup(@images, url)
         :ets.insert(@images, {url, bitmap})
+        for {_, previous} <- old, do: :wxBitmap.destroy(previous)
         if w > 0 and h > 0, do: {:ok, w, h}, else: :error
       else
         :error
@@ -1887,6 +1890,19 @@ defmodule Browser.UI do
     |> Enum.find_value(fn {it, _} ->
       if is_integer(Map.get(it, :nid)) and it.type != :box and not Map.get(it, :hidden, false),
         do: it.nid
+    end)
+  end
+
+  @doc """
+  The item with an element number painted topmost at window point `{x, y}`, and where the point
+  is in it: `{item, dx, dy}`, or nil.
+  """
+  def item_at(items, x, y, scroll) do
+    items
+    |> hits(x, y, scroll)
+    |> Enum.find_value(fn {it, _} ->
+      if is_integer(Map.get(it, :nid)) and it.type != :box and not Map.get(it, :hidden, false),
+        do: {it, x - it.x, y + scroll - it.y}
     end)
   end
 

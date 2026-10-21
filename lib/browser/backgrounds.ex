@@ -5,7 +5,8 @@ defmodule Browser.Backgrounds do
   Values are comma-separated lists of layers (the first layer is on top). Parsed:
 
     * `parse_images/1` -> `:none | {:url, url} | {:linear, dir, stops} | {:radial, opts, stops}`
-      (repeating and conic gradients are not supported and read as `:none`)
+      (a conic gradient is not supported and reads as `:none`; a repeating one has `{:repeating, dir}`
+      as its direction, or `repeating: true` in its options)
     * `parse_repeat/1` -> `{x, y}` with `:repeat | :no_repeat`
     * `parse_position/1` -> `{x, y}`, each px, `{:pct, fraction}` or `{:from_end, px}`
     * `parse_size/1` -> `:cover | :contain | {w, h}`, each `:auto`, px or `{:pct, f}`
@@ -122,10 +123,18 @@ defmodule Browser.Backgrounds do
         {:url, Enum.find(caps, "", &(&1 != ""))}
 
       m = Regex.run(re(~r/\A(repeating-)?linear-gradient\((.*)\)\z/is), s) ->
-        if Enum.at(m, 1) == "", do: linear(Enum.at(m, 2)), else: :none
+        with {:linear, dir, stops} <- linear(Enum.at(m, 2)) do
+          if Enum.at(m, 1) == "",
+            do: {:linear, dir, stops},
+            else: {:linear, {:repeating, dir}, stops}
+        end
 
       m = Regex.run(re(~r/\A(repeating-)?radial-gradient\((.*)\)\z/is), s) ->
-        if Enum.at(m, 1) == "", do: radial(Enum.at(m, 2)), else: :none
+        with {:radial, opts, stops} <- radial(Enum.at(m, 2)) do
+          if Enum.at(m, 1) == "",
+            do: {:radial, opts, stops},
+            else: {:radial, Map.put(opts, :repeating, true), stops}
+        end
 
       true ->
         :none
@@ -705,6 +714,12 @@ defmodule Browser.Backgrounds do
   defp finish(:svg, scene, tw, th, current),
     do: %{ops: Browser.Svg.render(scene, tw, th, current: current)}
 
+  defp finish(:linear, {{:repeating, dir}, stops}, tw, th, current) do
+    {x1, y1, x2, y2} = linear_line(dir, tw, th)
+    len = :math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    %{line: {x1, y1, x2, y2}, stops: stops |> normalize_stops(len, current) |> repeat_stops()}
+  end
+
   defp finish(:linear, {dir, stops}, tw, th, current) do
     {x1, y1, x2, y2} = linear_line(dir, tw, th)
     len = :math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
@@ -713,7 +728,64 @@ defmodule Browser.Backgrounds do
 
   defp finish(:radial, {opts, stops}, tw, th, current) do
     {cx, cy, rx, ry} = radial_geometry(opts, tw, th)
-    %{center: {cx, cy}, radii: {rx, ry}, stops: normalize_stops(stops, rx, current)}
+    stops = normalize_stops(stops, rx, current)
+    stops = if opts[:repeating], do: repeat_stops(stops), else: stops
+    %{center: {cx, cy}, radii: {rx, ry}, stops: stops}
+  end
+
+  @max_repeats 500
+
+  # A repeating gradient: the stops from the first to the last position are one period, tiled
+  # along the whole line; what lies outside 0..1 is cut off (with the colour at the cut).
+  defp repeat_stops(stops) do
+    {first, _} = hd(stops)
+    {last, last_color} = List.last(stops)
+    period = last - first
+
+    cond do
+      period <= 1.0e-6 ->
+        [{0.0, last_color}, {1.0, last_color}]
+
+      true ->
+        k0 = -ceil_div_float(first, period)
+        k1 = ceil_div_float(1.0 - first, period)
+
+        if k1 - k0 > @max_repeats do
+          stops
+        else
+          for(k <- k0..k1, {pos, color} <- stops, do: {pos + k * period, color})
+          |> clip_stops()
+        end
+    end
+  end
+
+  defp ceil_div_float(a, b), do: trunc(Float.ceil(a / b))
+
+  defp clip_stops(stops) do
+    inside = Enum.filter(stops, fn {pos, _} -> pos > 0.0 and pos < 1.0 end)
+    [{0.0, color_at(stops, 0.0)}] ++ inside ++ [{1.0, color_at(stops, 1.0)}]
+  end
+
+  # the colour of a stop list at `at`: the last stop at or before it, blended to the next
+  defp color_at(stops, at) do
+    before = stops |> Enum.filter(fn {p, _} -> p <= at end) |> List.last()
+    after_ = Enum.find(stops, fn {p, _} -> p > at end)
+
+    case {before, after_} do
+      {nil, {_, c}} ->
+        c
+
+      {{_, c}, nil} ->
+        c
+
+      {{p0, {r0, g0, b0, a0}}, {p1, {r1, g1, b1, a1}}} ->
+        f = (at - p0) / (p1 - p0)
+        mix = fn x, y -> round(x + (y - x) * f) end
+        {mix.(r0, r1), mix.(g0, g1), mix.(b0, b1), mix.(a0, a1)}
+
+      {{_, c}, _} ->
+        c
+    end
   end
 
   defp place_offset({:pct, f}, free), do: f * free

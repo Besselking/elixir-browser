@@ -92,10 +92,11 @@ defmodule Browser.Style do
   # user-agent defaults; author rules and inline styles override them
   @ua_css """
   dialog:not([open]), [hidden], input[type=hidden], area, base, datalist, noembed, param, rp, template { display: none }
-  audio, video, iframe, object, embed, applet { display: none }
+  audio:not([controls]), object, embed, applet { display: none }
+  video { object-fit: contain }
   slot { display: contents }
-  iframe[data-b-frame] { display: inline-block; width: 300px; height: 150px; border: 2px inset; overflow: auto; background-color: white }
-  iframe[data-b-frame][scrolling=no] { overflow: hidden }
+  iframe { display: inline-block; width: 300px; height: 150px; border: 2px inset; overflow: auto; background-color: white }
+  iframe[scrolling=no] { overflow: hidden }
   html { font-size: 16px; color: #000000; font-weight: normal; font-style: normal }
   address, article, aside, blockquote, body, center, details, dialog, dd, div, dl, dt,
   fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr,
@@ -1049,6 +1050,14 @@ defmodule Browser.Style do
     for {name, prop, unit} <- [{"cols", "width", 8}, {"rows", "height", 18}],
         {n, ""} when n > 0 <- [Integer.parse(attr(attrs, name))],
         do: {prop, "#{n * unit}px"}
+  end
+
+  # <iframe width height> are pixel (or percent) sizes
+  defp hints(%{tag: "iframe", attrs: attrs}) do
+    for {name, prop} <- [{"width", "width"}, {"height", "height"}],
+        v = attrs |> attr(name) |> String.trim(),
+        Regex.match?(re(~r/\A\d+(\.\d+)?%?\z/), v),
+        do: {prop, if(String.ends_with?(v, "%"), do: v, else: v <> "px")}
   end
 
   # <img align="left|right"> floats; hspace/vspace are margins

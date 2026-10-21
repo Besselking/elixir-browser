@@ -9,6 +9,9 @@ defmodule Mix.Tasks.App.Bundle do
       mix app.bundle [--name "Elixir Browser"] [--id dev.local.elixir-browser]
                      [--icon path/to/icon.png]
 
+  The media helper is built first (`mix media.build`, needs `brew install ffmpeg pkg-config`)
+  and bundled with the libav libraries. If it cannot be built, the app has no video playback.
+
   Without `--icon` a placeholder icon is drawn with `scripts/make_icon.swift`.
   The bundle is only valid for the CPU architecture and macOS version it was
   built on, and is ad-hoc signed.
@@ -37,6 +40,7 @@ defmodule Mix.Tasks.App.Bundle do
     File.mkdir_p!(macos)
     File.mkdir_p!(res)
 
+    build_media_helper()
     build_release(release)
     relocate_dylibs(release)
     sign_all(release)
@@ -49,6 +53,18 @@ defmodule Mix.Tasks.App.Bundle do
   end
 
   # -- release -----------------------------------------------------------------
+
+  # The media helper (docs/media.md) goes into priv/, so the release carries it and
+  # `relocate_dylibs/1` bundles the libav libraries it links. Without the libav development
+  # files the app is built without video playback.
+  defp build_media_helper do
+    Mix.Task.run("media.build")
+  rescue
+    error in Mix.Error ->
+      Mix.shell().info(
+        "No media helper in the bundle (no video playback): #{Exception.message(error)}"
+      )
+  end
 
   defp build_release(path) do
     cmd!("mix", ["release", "browser", "--overwrite", "--path", path, "--quiet"],

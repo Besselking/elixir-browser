@@ -3,6 +3,7 @@
 #   macOS, Debian/Ubuntu:  wxWidgets 3.3 (reads WebP images) and OTP built against it, from source
 #                          under $PREFIX (default /usr/local; $HOME/.local on macOS), Elixir precompiled.
 #                          Homebrew's erlang is linked against wxWidgets 3.2, which cannot read WebP.
+# ffmpeg and its development libraries (libav) are installed too: the media helper links them.
 # Versions match .tool-versions; asdf/mise users can run `asdf install` / `mise install` instead.
 #
 # The source build takes 30+ minutes. To skip it, the script first tries a prebuilt archive of
@@ -88,8 +89,9 @@ OTP_CONFIGURE=()
 case "$(uname -s)" in
 Darwin)
   command -v brew >/dev/null || { echo "Homebrew is required: https://brew.sh" >&2; exit 1; }
-  # build tools and libraries; webp, jpeg, libpng, libtiff are what lets wx read those formats
-  brew install autoconf openssl@3 webp jpeg-turbo libpng libtiff
+  # build tools and libraries; webp, jpeg, libpng, libtiff are what lets wx read those formats;
+  # ffmpeg (libav) and pkg-config are for the media helper (docs/media.md)
+  brew install autoconf openssl@3 webp jpeg-turbo libpng libtiff ffmpeg pkg-config
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
   if ! have_toolchain; then
@@ -113,10 +115,12 @@ Linux)
   export DEBIAN_FRONTEND=noninteractive
   $sudo apt-get update
   # build tools and the libraries wxWidgets needs (the prebuilt OTP from builds.hex.pm has no wx,
-  # which the GUI needs); libwebp-dev is what lets wx read WebP
+  # which the GUI needs); libwebp-dev is what lets wx read WebP; the libav*-dev packages and
+  # pkg-config are for the media helper (docs/media.md)
   $sudo apt-get install -y build-essential autoconf m4 libssl-dev libncurses-dev \
     libgl-dev libglu1-mesa-dev libgtk-3-dev libwebp-dev libjpeg-dev libpng-dev libtiff-dev \
-    xvfb unzip curl bzip2
+    xvfb unzip curl bzip2 pkg-config ffmpeg libavformat-dev libavcodec-dev libavutil-dev \
+    libswscale-dev libswresample-dev
 
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
