@@ -32,7 +32,7 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap flex-line-count justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode text-wrap-style tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character text-overflow -webkit-line-clamp line-clamp
+            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode text-wrap-style tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character text-overflow -webkit-line-clamp line-clamp counter-reset counter-increment counter-set
             grid-template-columns grid-template-rows grid-auto-rows grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
@@ -363,7 +363,7 @@ defmodule Browser.Style do
           scope_class: scope_classes(ranked)
         },
         fn {rule, order}, idx ->
-          idx = note_pseudo(idx, rule)
+          idx = idx |> note_pseudo(rule) |> note_counters(rule)
           rule = Map.put(rule, :order, order - Map.get(bases, scope_key(rule), 0))
 
           Map.update(
@@ -429,6 +429,15 @@ defmodule Browser.Style do
   end
 
   defp note_pseudo(idx, _rule), do: idx
+
+  # a rule that sets a counter: the pruned tree is gone over to give each `counter()` its value
+  defp note_counters(idx, %{decls: decls}) do
+    if Enum.any?(decls, fn {p, _, _} -> p in ~w(counter-reset counter-increment counter-set) end),
+      do: Map.put(idx, :counters, true),
+      else: idx
+  end
+
+  defp note_counters(idx, _rule), do: idx
 
   @doc "Convenience: `parse_sheets/1` followed by `index_rules/2`."
   def index(sheets, env \\ @default_env), do: sheets |> parse_sheets() |> index_rules(env)
@@ -1305,7 +1314,7 @@ defmodule Browser.Style do
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
     start_signs()
-    pruned = prune_children(nodes, nil, idx)
+    pruned = nodes |> prune_children(nil, idx) |> resolve_counters(idx)
     Process.delete(:style_share)
     Process.delete(:style_inline)
     Process.delete(:style_custom)
@@ -1333,7 +1342,7 @@ defmodule Browser.Style do
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
     start_signs()
-    pruned = prune_children(nodes, nil, idx)
+    pruned = nodes |> prune_children(nil, idx) |> resolve_counters(idx)
     Process.delete(:style_share)
     Process.delete(:style_inline)
     end_signs()
@@ -1346,6 +1355,9 @@ defmodule Browser.Style do
     Process.delete(:style_custom_from)
     {pruned, memo}
   end
+
+  defp resolve_counters(pruned, %{counters: true}), do: Browser.Counters.resolve(pruned)
+  defp resolve_counters(pruned, _idx), do: pruned
 
   defp prune_children(nodes, parent, idx) do
     count = Enum.count(nodes, &match?({:element, _, _, _}, &1))
@@ -2069,7 +2081,7 @@ defmodule Browser.Style do
     parts =
       Regex.scan(
         re(
-          ~r/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|attr\(\s*([\w-]+)\s*\)|open-quote|close-quote/su
+          ~r/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|attr\(\s*([\w-]+)\s*\)|open-quote|close-quote|counters\(\s*([\w-]+)\s*,\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*(?:,\s*([\w-]+)\s*)?\)|counter\(\s*([\w-]+)\s*(?:,\s*([\w-]+)\s*)?\)/su
         ),
         value
       )
@@ -2081,11 +2093,20 @@ defmodule Browser.Style do
         [_, s] -> css_string(s)
         [_, "", s] -> css_string(s)
         [_, "", "", name] -> attr(attrs, String.downcase(name))
+        [_, "", "", "", name, sep] -> counters_marker(name, sep, "decimal")
+        [_, "", "", "", name, sep, style] -> counters_marker(name, sep, style)
+        [_, "", "", "", "", "", "", name] -> Browser.Counters.marker(name, "decimal")
+        [_, "", "", "", "", "", "", name, style] -> Browser.Counters.marker(name, style)
         ["open-quote"] -> "“"
         ["close-quote"] -> "”"
         _ -> ""
       end)
     end
+  end
+
+  defp counters_marker(name, sep, style) do
+    sep = sep |> String.slice(1..-2//1) |> css_string()
+    Browser.Counters.marker(name, sep, style)
   end
 
   # `\201C` and `\"` in a CSS string
