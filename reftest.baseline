@@ -3847,6 +3847,7 @@ css/css-flexbox/balance/balance-005.html
 css/css-flexbox/balance/balance-available-size-002.html
 css/css-flexbox/balance/balance-complex.html
 css/css-flexbox/balance/balance-flex-grow.html
+css/css-flexbox/balance/balance-line-break-overflowing-item.html
 css/css-flexbox/balance/balance-line-count-intrinsic-001.html
 css/css-flexbox/balance/balance-line-count-intrinsic-002.html
 css/css-flexbox/balance/balance-line-count-intrinsic-003.html
@@ -3875,6 +3876,7 @@ css/css-flexbox/column-flex-child-center-with-indefinite-height.html
 css/css-flexbox/column-flex-child-with-max-width.html
 css/css-flexbox/css-flexbox-height-animation-stretch.html
 css/css-flexbox/display-flex-001.htm
+css/css-flexbox/fieldset-as-item-overflow.html
 css/css-flexbox/fit-content-item-002.html
 css/css-flexbox/fit-content-item-003.html
 css/css-flexbox/fit-content-item-004.html
@@ -4357,6 +4359,8 @@ css/css-flexbox/grid-flex-item-004.html
 css/css-flexbox/grid-flex-item-006.html
 css/css-flexbox/grid-flex-item-007.html
 css/css-flexbox/inline-flex-min-content-height.html
+css/css-flexbox/intrinsic-size/col-flex-grow-negative-margin-001.html
+css/css-flexbox/intrinsic-size/col-negative-margin-hidden-grid-item-001.html
 css/css-flexbox/intrinsic-size/col-wrap-001.html
 css/css-flexbox/intrinsic-size/col-wrap-002.html
 css/css-flexbox/intrinsic-size/col-wrap-003.html
@@ -4369,6 +4373,8 @@ css/css-flexbox/intrinsic-size/col-wrap-014.html
 css/css-flexbox/intrinsic-size/col-wrap-020.html
 css/css-flexbox/intrinsic-size/row-002.html
 css/css-flexbox/intrinsic-size/row-007.html
+css/css-flexbox/intrinsic-size/row-009.html
+css/css-flexbox/intrinsic-size/row-010.html
 css/css-flexbox/item-with-max-height-and-scrollbar.html
 css/css-flexbox/item-with-table-with-infinite-max-intrinsic-width.html
 css/css-flexbox/justify-content-001.htm
@@ -4817,6 +4823,7 @@ css/css-sizing/aspect-ratio/flex-aspect-ratio-003.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-004.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-005.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-006.html
+css/css-sizing/aspect-ratio/flex-aspect-ratio-007.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-008.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-009.html
 css/css-sizing/aspect-ratio/flex-aspect-ratio-010.html
@@ -5782,6 +5789,7 @@ css/css-text/white-space/white-space-pre-035.html
 css/css-text/white-space/white-space-pre-051.html
 css/css-text/white-space/white-space-pre-052.html
 css/css-text/white-space/white-space-pre-wrap-justify-001.html
+css/css-text/white-space/white-space-pre-wrap-justify-005.html
 css/css-text/white-space/white-space-pre-wrap-trailing-spaces-001.html
 css/css-text/white-space/white-space-pre-wrap-trailing-spaces-002.html
 css/css-text/white-space/white-space-pre-wrap-trailing-spaces-003.html

@@ -6,7 +6,7 @@ Native GUI web browser in Elixir (`:wx`): HTTP(S), HTML parser, CSS engine, layo
 - Only the LATEST Elixir/OTP are supported (`.tool-versions`: Erlang 29.1.1, Elixir 1.20.4-otp-29). No compatibility workarounds for older versions; fix the toolchain instead.
 - `scripts/install-toolchain.sh` installs OTP + wxWidgets 3.3 (needed for WebP) + Elixir. It downloads a prebuilt archive from this repo's `toolchain` release when it can, else builds from source (30+ min). `--pack OUT.tar.gz` makes the archive (the `toolchain-release.yml` workflow does it). On toolchain bumps rerun that.
 - Set `ELIXIR_ERL_OPTIONS="+fnu"` for UTF-8 file names. Do not use ppa:rabbitmq (stops at OTP 27).
-- No Hex dependencies (`deps: []`). Keep it that way: implement things ourselves (WebSocket, cookies, Public Suffix List are in-tree). No NIFs, no QuickJS: JS stays in Elixir.
+- No Hex dependencies (`deps: []`). Keep it that way: implement things ourselves (WebSocket, cookies, Public Suffix List are in-tree). No NIFs, no QuickJS: JS stays in Elixir. One exception (Bess, 2026-10-21): media decoding may use the ffmpeg libraries (libav) in a separate helper process on a Port, never a NIF; the rest stays dependency-free. See `docs/media.md`; `scripts/install-toolchain.sh` installs ffmpeg and the libav dev packages.
 
 ## Checks (what CI runs, `.github/workflows/ci.yml`)
 1. `mix format --check-formatted`

@@ -61,6 +61,9 @@ Last updated 2026-10-05. PRs 45, 48, 50, 54, 59 and 62 merged; dynamic import + 
 - [x] Nudge fieldset legend offset (~0.64 font height) on a Mac: confirmed fine
 
 - [x] HTML: full WHATWG named-entity table (priv/html_entities.txt), legacy no-semicolon entities; soft hyphen (&shy;) hidden in layout
+- [x] `<video>`, `<audio controls>` and `<iframe>` are boxes (black video box with a play button and bar, audio bar, iframe box with `width`/`height` attributes); `repeating-linear-gradient` and `repeating-radial-gradient` paint (this PR). Plan for real playback: docs/media.md
+- [ ] Media playback through a libav helper over a Port (docs/media.md stages 2 to 6; Bess approved the exception to the no-dependencies rule on 2026-10-21; libav comes from scripts/install-toolchain.sh)
+- [ ] Missing CSS/HTML found in the 2026-10-21 audit: `counter()`/`counters()` in `content` (needs counter state in the style walk; careful with the prune memo), `-webkit-line-clamp` and `text-overflow: ellipsis` (parsed, not used by layout), `::first-letter`/`::first-line`, `@container` queries, `conic-gradient`, `<progress>`/`<meter>`, `input type=range/date/color`, `writing-mode: vertical-*`, `<ruby>` placement, `::selection`, `accent-color`
 - [ ] Soft hyphen: break lines at U+00AD and show a hyphen when it breaks
 
 ## JavaScript runtime

@@ -794,6 +794,45 @@ defmodule Browser.LayoutTest do
     end
   end
 
+  describe "media boxes" do
+    defp media_items(html) do
+      page = Browser.Page.build(html, "about:home")
+      {items, _} = Layout.layout(page.nodes, 600, &measure/2, 600)
+      Enum.filter(items, &(&1.type == :svg))
+    end
+
+    test "a video is 300 x 150 unless it has a size" do
+      assert [%{w: 300, h: 150}] = media_items("<video></video>")
+      assert [%{w: 200, h: 100}] = media_items(~s(<video width="200" height="100"></video>))
+    end
+
+    test "an audio element shows a bar with controls and nothing without" do
+      assert [%{w: 300, h: 54}] = media_items("<audio controls></audio>")
+      assert [] = media_items("<audio></audio>")
+    end
+
+    test "a video with controls draws more than one without" do
+      [plain] = media_items("<video></video>")
+      [with_controls] = media_items("<video controls></video>")
+      assert length(with_controls.ops) > length(plain.ops)
+    end
+
+    test "an iframe is a box of 300 x 150 or its width and height attributes" do
+      boxes = fn html ->
+        page = Browser.Page.build(html, "about:home")
+        {items, _} = Layout.layout(page.nodes, 600, &measure/2, 600)
+        Enum.filter(items, &(&1.type in [:box, :rect]))
+      end
+
+      assert Enum.any?(boxes.("<iframe></iframe>"), &(&1.w >= 300 and &1.h >= 150))
+
+      assert Enum.any?(
+               boxes.(~s(<iframe width="240" height="80"></iframe>)),
+               &(&1.w >= 240 and &1.w < 260 and &1.h >= 80 and &1.h < 100)
+             )
+    end
+  end
+
   describe "inline-block" do
     alias Browser.Page
 

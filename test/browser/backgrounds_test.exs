@@ -112,8 +112,15 @@ defmodule Browser.BackgroundsTest do
       assert B.parse_images("linear-gradient(red)") == [:none]
     end
 
+    test "a repeating gradient keeps its repeat in the direction or the options" do
+      assert [{:linear, {:repeating, {:angle, 180.0}}, [_, _]}] =
+               B.parse_images("repeating-linear-gradient(red, blue 10px)")
+
+      assert [{:radial, %{repeating: true}, [_, _]}] =
+               B.parse_images("repeating-radial-gradient(red, blue 10px)")
+    end
+
     test "unsupported gradients read as none" do
-      assert B.parse_images("repeating-linear-gradient(red, blue 10px)") == [:none]
       assert B.parse_images("conic-gradient(red, blue)") == [:none]
       assert B.parse_images("image-set(url(a.png) 1x)") == [:none]
     end
@@ -410,6 +417,31 @@ defmodule Browser.BackgroundsTest do
 
       assert {20.0, 10.0, _, _} =
                B.radial_geometry(radial(:circle, :closest_side, {20.0, 10.0}), 200, 100)
+    end
+  end
+
+  describe "repeating gradients" do
+    defp stops_of(css, tile \\ {0, 0, 100, 100}) do
+      spec = %{images: B.parse_images(css), repeat: [], position: [], size: []}
+      area = {0, 0, 100, 100}
+      [layer] = B.paint_layers(spec, area, area, %{}, {0, 0, 0, 255})
+      _ = tile
+      layer.stops
+    end
+
+    test "the stops are tiled along the line and cut at 0 and 1" do
+      # a 100 px line, a 20 px period: red 0-10 px, blue 10-20 px, five times
+      stops = stops_of("repeating-linear-gradient(to bottom, red 0 10px, blue 10px 20px)")
+      assert {+0.0, {255, 0, 0, 255}} = hd(stops)
+      assert {1.0, {255, 0, 0, 255}} = List.last(stops)
+      assert length(stops) > 10
+      assert Enum.all?(stops, fn {p, _} -> p >= 0.0 and p <= 1.0 end)
+      assert stops == Enum.sort_by(stops, &elem(&1, 0))
+    end
+
+    test "a period of zero is the last colour" do
+      assert [{+0.0, c}, {1.0, c}] = stops_of("repeating-linear-gradient(red 10px, blue 10px)")
+      assert c == {0, 0, 255, 255}
     end
   end
 
