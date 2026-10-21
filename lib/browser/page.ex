@@ -481,7 +481,11 @@ defmodule Browser.Page do
           metrics: fn _style -> 16 end
         )
 
-      rects = Browser.Nids.rects(items, Browser.Nids.parents(laid.pruned || []))
+      rects =
+        items
+        |> Browser.Nids.rects(Browser.Nids.parents(laid.pruned || []))
+        |> Browser.Nids.with_styles(laid.pruned || [])
+
       send(js, {:layout_now_done, ref, rects, {env.width * 1.0, height * 1.0}})
     end
 

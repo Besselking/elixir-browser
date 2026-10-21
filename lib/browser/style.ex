@@ -2023,20 +2023,26 @@ defmodule Browser.Style do
   defp control_display(computed, _tag), do: computed
 
   # `width: auto` on a text field is the width it has for its `size` (20 characters when it has
-  # none), as the user agent's 170px is, not the width of its content
+  # none), as the user agent's 170px is, not the width of its content; a checkbox or a radio
+  # button keeps its 13px
   defp field_width(%{"width" => :auto} = computed, %{tag: "input", attrs: attrs}) do
     type = attrs |> attr("type") |> String.downcase()
 
-    if Browser.Forms.text_like?(type) do
-      width =
-        case Integer.parse(attr(attrs, "size")) do
-          {n, ""} when n > 0 -> n * 8.0
-          _ -> 170.0
-        end
+    cond do
+      type in ["checkbox", "radio"] ->
+        Map.put(computed, "width", 13.0)
 
-      Map.put(computed, "width", width)
-    else
-      computed
+      Browser.Forms.text_like?(type) ->
+        width =
+          case Integer.parse(attr(attrs, "size")) do
+            {n, ""} when n > 0 -> n * 8.0
+            _ -> 170.0
+          end
+
+        Map.put(computed, "width", width)
+
+      true ->
+        computed
     end
   end
 

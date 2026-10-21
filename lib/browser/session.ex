@@ -2675,7 +2675,11 @@ defmodule Browser.Session do
       )
 
     if job.ref != nil do
-      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
+      rects =
+        items
+        |> Browser.Nids.rects(Browser.Nids.parents(page.pruned || []))
+        |> Browser.Nids.with_styles(page.pruned || [])
+
       send(job.js, {:layout_now_done, job.ref, rects, {job.width * 1.0, height}})
     end
   end
@@ -3237,7 +3241,7 @@ defmodule Browser.Session do
 
     Browser.JS.Runtime.layout(
       pid,
-      rects,
+      Browser.Nids.with_styles(rects, page.pruned || []),
       state.scroll_x,
       state.scroll,
       {state.content_w, state.height}
