@@ -32,7 +32,7 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap flex-line-count justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode text-wrap-style tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character
+            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode text-wrap-style tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character text-overflow -webkit-line-clamp line-clamp
             grid-template-columns grid-template-rows grid-auto-rows grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
@@ -2875,6 +2875,17 @@ defmodule Browser.Style do
 
   defp typed("font-style", v, _env, _pc),
     do: {:ok, if(v in ["italic", "oblique"], do: "italic", else: "normal")}
+
+  # the old flexbox box of `-webkit-line-clamp` is a block (its lines stack the same way)
+  defp typed("display", "-webkit-box", _env, _pc), do: {:ok, "block"}
+  defp typed("display", "-webkit-inline-box", _env, _pc), do: {:ok, "inline-block"}
+
+  defp typed(prop, v, _env, _pc) when prop in ["-webkit-line-clamp", "line-clamp"] do
+    case Integer.parse(v) do
+      {n, ""} when n >= 1 -> {:ok, n}
+      _ -> :skip
+    end
+  end
 
   defp typed(_prop, v, _env, _pc), do: {:ok, v}
 
