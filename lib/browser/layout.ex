@@ -2478,8 +2478,11 @@ defmodule Browser.Layout do
     end
   end
 
+  # (a box that clamps its lines is not balanced: the clamp counts the lines of the plain wrap)
   defp balance_text?(c),
-    do: "balance" in split_words(to_string(c["text-wrap-style"] || c["text-wrap"]))
+    do:
+      "balance" in split_words(to_string(c["text-wrap-style"] || c["text-wrap"])) and
+        line_clamp(c) == nil
 
   # `text-indent`: the first line of a block starts that far in, as if an inline box of that
   # width led it (`lead`); a percentage is of the block's own width. Nothing carries over from
@@ -2596,7 +2599,10 @@ defmodule Browser.Layout do
       minpct: pct_of(c["min-height"]) || calc_pct(c["min-height"]),
       minoff: calc_px(c["min-height"]),
       clip: clips?(c),
-      ellipsis: c["text-overflow"] == "ellipsis" and clips?(c),
+      # (it has no effect on a flex or grid container)
+      ellipsis:
+        c["text-overflow"] == "ellipsis" and clips?(c) and
+          c["display"] in [nil, "block", "list-item", "inline-block", "flow-root", "table-cell"],
       clamp: line_clamp(c),
       cpath: plain_inset?(c["clip-path"]),
       scroll: scroll_axes(c),

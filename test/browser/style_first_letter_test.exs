@@ -27,7 +27,7 @@ defmodule Browser.StyleFirstLetterTest do
     text =
       run("<style>p::first-letter { color: #00f }</style><p><b>Big</b> two</p><div>No</div>")
 
-    assert %{color: {0, 0, 255}} = Enum.find(text, &(&1.text == "B"))
+    assert %{color: {0, 0, 255}, bold: true} = Enum.find(text, &(&1.text == "B"))
     assert %{color: {0, 0, 0}} = Enum.find(text, &(&1.text == "two"))
     assert %{color: {0, 0, 0}} = Enum.find(text, &(&1.text == "No"))
   end

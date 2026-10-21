@@ -1875,23 +1875,25 @@ defmodule Browser.Style do
   defp first_letter(idx, ctx, computed, kids) do
     with true <- MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), :first_letter),
          true <- computed["display"] in @first_letter_displays,
-         false <- Enum.empty?(declared(idx, ctx, :first_letter)) do
+         decl when decl != [] and decl != %{} <- declared(idx, ctx, :first_letter) do
       {c, _custom, _own} = compute(idx, ctx, ctx, :first_letter)
-      {kids, _done} = wrap_first_letter(kids, {:element, "span", [{"@computed", c}], []})
+      # what the rule itself sets stays; the rest is inherited from the element that holds the
+      # letter, not from the block
+      own = for {k, _} <- decl, do: k
+      {kids, _done} = wrap_first_letter(kids, {c, own}, %{})
       kids
     else
       _ -> kids
     end
   end
 
-  # -> {kids, done?}
-  defp wrap_first_letter([], _span), do: {[], false}
+  # -> {kids, done?}; `inherit` is what the elements between the block and the letter pass on
+  defp wrap_first_letter([], _span, _inherit), do: {[], false}
 
-  defp wrap_first_letter([{:text, text} = node | rest], span) do
+  defp wrap_first_letter([{:text, text} = node | rest], {c, _own} = span, inherit) do
     case Regex.run(re(~r/\A(\s*)([\p{P}\p{S}]*[\p{L}\p{N}]|[\p{P}\p{S}]+)(.*)\z/su), text) do
       [_, ws, letter, tail] ->
-        {:element, "span", attrs, _} = span
-        letter = {:element, "span", attrs, [{:text, letter}]}
+        letter = {:element, "span", [{"@computed", Map.merge(c, inherit)}], [{:text, letter}]}
         before = if ws == "", do: [], else: [{:text, ws}]
         tail = if tail == "", do: [], else: [{:text, tail}]
         {before ++ [letter | tail] ++ rest, true}
@@ -1899,7 +1901,7 @@ defmodule Browser.Style do
       nil ->
         # (white space only: the letter is in what follows; anything else has no letter)
         if String.trim(text) == "" do
-          {more, done?} = wrap_first_letter(rest, span)
+          {more, done?} = wrap_first_letter(rest, span, inherit)
           {[node | more], done?}
         else
           {[node | rest], true}
@@ -1907,26 +1909,32 @@ defmodule Browser.Style do
     end
   end
 
-  defp wrap_first_letter([{:element, tag, attrs, ekids} = node | rest], span) do
+  defp wrap_first_letter([{:element, tag, attrs, ekids} = node | rest], {_, own} = span, inherit) do
     cond do
       tag in ~w(img br input select textarea button svg video canvas iframe hr) ->
         {[node | rest], true}
 
       floated_or_positioned?(attrs) ->
-        skip_node(node, rest, span)
+        skip_node(node, rest, span, inherit)
 
       true ->
-        case wrap_first_letter(ekids, span) do
+        inner =
+          case List.keyfind(attrs, "@computed", 0) do
+            {_, %{} = ec} -> Map.merge(inherit, Map.drop(Map.take(ec, @inherited), own))
+            _ -> inherit
+          end
+
+        case wrap_first_letter(ekids, span, inner) do
           {ekids, true} -> {[{:element, tag, attrs, ekids} | rest], true}
-          {_, false} -> skip_node(node, rest, span)
+          {_, false} -> skip_node(node, rest, span, inherit)
         end
     end
   end
 
-  defp wrap_first_letter([node | rest], span), do: skip_node(node, rest, span)
+  defp wrap_first_letter([node | rest], span, inherit), do: skip_node(node, rest, span, inherit)
 
-  defp skip_node(node, rest, span) do
-    {more, done?} = wrap_first_letter(rest, span)
+  defp skip_node(node, rest, span, inherit) do
+    {more, done?} = wrap_first_letter(rest, span, inherit)
     {[node | more], done?}
   end
 
