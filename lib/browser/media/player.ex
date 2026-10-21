@@ -6,7 +6,7 @@ defmodule Browser.Media.Player do
       {:media_frame, player_pid, url, bmp_bytes}
 
   which the session turns into the message of a loaded picture (`"media:" <> url`), so the
-  page draws the frame like an image. Other messages to the owner: `{:media_state, url, :ready | :playing | :paused | :ended | :failed}`.
+  page draws the frame like an image. Other messages to the owner: `{:media_state, player_pid, url, what, snapshot}` with `what` one of `:ready | :playing | :paused | :time | :ended | :failed` and a snapshot map of `:pos`, `:duration_ms`, `:width`, `:height`.
 
   A frame that comes too late (more than 200 ms) is not shown. At the end the player
   goes back to the first frame, paused.
@@ -53,7 +53,8 @@ defmodule Browser.Media.Player do
       pos: 0,
       held: nil,
       clock: nil,
-      timer: nil
+      timer: nil,
+      tu: 0
     }
 
     {:ok, state, {:continue, :load}}
@@ -91,7 +92,18 @@ defmodule Browser.Media.Player do
   @impl true
   def handle_info({:show, {pts, bmp}}, %{status: :playing} = state) do
     send(state.owner, {:media_frame, self(), state.url, bmp})
-    {:noreply, next_frame(%{state | pos: pts, held: nil, timer: nil})}
+    state = %{state | pos: pts, held: nil, timer: nil}
+
+    # `timeupdate` about every 250 ms
+    state =
+      if pts - state.tu >= 250 or pts < state.tu do
+        notify(state, :time)
+        %{state | tu: pts}
+      else
+        state
+      end
+
+    {:noreply, next_frame(state)}
   end
 
   def handle_info(_other, state), do: {:noreply, state}
@@ -205,6 +217,19 @@ defmodule Browser.Media.Player do
     end
   end
 
-  defp notify(state, what), do: send(state.owner, {:media_state, state.url, what})
+  # what the owner (and so the page's scripts) can read: the time, the length, the picture size
+  defp notify(state, what) do
+    info = if state.media, do: state.media.info, else: %{}
+
+    snapshot = %{
+      pos: state.pos,
+      duration_ms: info[:duration_ms],
+      width: info[:width],
+      height: info[:height]
+    }
+
+    send(state.owner, {:media_state, self(), state.url, what, snapshot})
+  end
+
   defp now, do: System.monotonic_time(:millisecond)
 end

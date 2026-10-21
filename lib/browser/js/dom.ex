@@ -3054,6 +3054,7 @@ defmodule Browser.JS.DOM do
   end
 
   @bool_attrs ~w(disabled hidden readonly required multiple autofocus selected)
+  @media_props ~w(paused ended currentTime duration readyState videoWidth videoHeight)
 
   defp element_get(n, key, _self) do
     case key do
@@ -3096,6 +3097,9 @@ defmodule Browser.JS.DOM do
 
       "isContentEditable" ->
         {:ok, editable?(n.id)}
+
+      k when k in @media_props and n.tag in ["video", "audio"] ->
+        {:ok, media_prop(n, k)}
 
       "value" ->
         {:ok, value_of(n)}
@@ -7515,6 +7519,45 @@ defmodule Browser.JS.DOM do
         "video" -> get_attr(n, "controls") != nil
         _ -> false
       end
+  end
+
+  # what scripts read of a media element before the player says anything
+  defp media_prop(n, key) do
+    state = n.props["media"] || %{}
+
+    case {key, Map.fetch(state, key)} do
+      {_, {:ok, v}} -> v
+      {"paused", _} -> true
+      {"ended", _} -> false
+      {"currentTime", _} -> 0.0
+      {"duration", _} -> :nan
+      {"readyState", _} -> 0.0
+      {k, _} when k in ["videoWidth", "videoHeight"] -> 0.0
+    end
+  end
+
+  @doc """
+  The player of the media element the layout numbers `nid` says something: `props` are the
+  values scripts read (`paused`, `currentTime`, `duration`, ...) and `events` the names of the
+  events that follow, in order.
+  """
+  def media_update(nid, props, events) do
+    case nid_numbered(nid) do
+      nil ->
+        :ok
+
+      id ->
+        update_node(
+          id,
+          &%{&1 | props: Map.update(&1.props, "media", props, fn m -> Map.merge(m, props) end)}
+        )
+
+        for type <- events do
+          dispatch(id, type, %{bubbles: false, cancelable: false})
+        end
+
+        :ok
+    end
   end
 
   # `play()` and `pause()` of a video: the session starts or stops its player

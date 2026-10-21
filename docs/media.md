@@ -30,9 +30,14 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
   drawn like a new picture of the same size. A late frame (more than 200 ms) is dropped. At
   the end the video goes back to its first frame, paused. A video of a tab that is not shown
   stops. A page that is left stops its videos.
-- Not done yet: sound, `currentTime`, `duration`, `paused`, the `HTMLMediaElement` events,
-  seeking, `autoplay` and `loop`, the `<source>` choice by `type`, audio elements. `play()`
-  returns a promise that is already resolved.
+- Scripts can read `paused`, `ended`, `currentTime`, `duration`, `readyState`, `videoWidth`
+  and `videoHeight` of a video. The player tells the page about changes, and the page gets
+  the events `loadedmetadata`, `loadeddata`, `canplay`, `play`, `playing`, `pause`,
+  `timeupdate` (about every 250 ms), `ended` and `error`. The player starts on the first
+  `play()` or click, so a video that nobody plays has `duration` NaN.
+- Not done yet: sound, setting `currentTime` (seeking), `autoplay` and `loop`, the `<source>`
+  choice by `type`, audio elements, `canPlayType`. `play()` returns a promise that is already
+  resolved.
 
 ## Stages
 

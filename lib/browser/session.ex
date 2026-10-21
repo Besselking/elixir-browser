@@ -446,7 +446,20 @@ defmodule Browser.Session do
       else: {:noreply, state}
   end
 
-  def handle_info({:media_state, _url, _what}, state), do: {:noreply, state}
+  # a player says something: the page's scripts read it and hear the events
+  def handle_info({:media_state, pid, _url, what, snap}, %{js: js} = state) when js != nil do
+    case Enum.find(state.media, fn {_nid, p} -> p == pid end) do
+      {nid, _} ->
+        {props, events} = media_events(what, snap)
+        reply = Browser.JS.Runtime.media(js(state), nid, props, events)
+        {:noreply, apply_js(state, reply)}
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:media_state, _pid, _url, _what, _snap}, state), do: {:noreply, state}
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, %{media: media} = state) do
     {:noreply, %{state | media: Map.reject(media, fn {_nid, p} -> p == pid end)}}
@@ -2898,6 +2911,41 @@ defmodule Browser.Session do
         else
           _ -> nil
         end
+    end
+  end
+
+  # what scripts read and the events they hear when a player reports `what`
+  defp media_events(what, snap) do
+    time = %{"currentTime" => (snap.pos || 0) / 1000}
+
+    meta =
+      case snap do
+        %{duration_ms: ms} when is_integer(ms) -> %{"duration" => ms / 1000}
+        _ -> %{}
+      end
+
+    size = %{"videoWidth" => (snap.width || 0) * 1.0, "videoHeight" => (snap.height || 0) * 1.0}
+
+    case what do
+      :ready ->
+        {Map.merge(time, meta) |> Map.merge(size) |> Map.put("readyState", 4.0),
+         ~w(loadedmetadata loadeddata canplay)}
+
+      :playing ->
+        {Map.merge(time, %{"paused" => false, "ended" => false}), ~w(play playing)}
+
+      :paused ->
+        {Map.put(time, "paused", true), ~w(pause)}
+
+      :time ->
+        {time, ~w(timeupdate)}
+
+      :ended ->
+        {%{"paused" => true, "ended" => true, "currentTime" => Map.get(meta, "duration", 0.0)},
+         ~w(timeupdate pause ended)}
+
+      :failed ->
+        {%{"paused" => true}, ~w(error)}
     end
   end
 

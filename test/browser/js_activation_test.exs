@@ -589,5 +589,49 @@ defmodule Browser.JS.ActivationTest do
       # (a click on a video without controls and any call on an audio element do nothing)
       assert length(media) == 4
     end
+
+    test "state and events come from the player" do
+      {pid, r} =
+        start(~S"""
+        <video id="v" controls></video>
+        <script>
+        var v = document.getElementById("v");
+        ["loadedmetadata", "play", "pause", "timeupdate", "ended"].forEach(function (t) {
+          v.addEventListener(t, function () {
+            console.log(t + " " + v.paused + " " + v.currentTime + " " + v.duration);
+          });
+        });
+        console.log("start " + v.paused + " " + v.ended + " " + v.duration + " " + v.readyState);
+        v.play();
+        </script>
+        """)
+
+      assert ["start true false NaN 0"] = logs(r)
+      [{:media, nid, :play}] = Enum.filter(r.outbox, &match?({:media, _, _}, &1))
+
+      reply =
+        Runtime.media(
+          pid,
+          nid,
+          %{
+            "duration" => 12.0,
+            "videoWidth" => 320.0,
+            "videoHeight" => 180.0,
+            "readyState" => 4.0
+          },
+          ["loadedmetadata"]
+        )
+
+      assert ["loadedmetadata true 0 12"] = logs(reply)
+
+      reply = Runtime.media(pid, nid, %{"paused" => false, "currentTime" => 0.5}, ["play"])
+      assert ["play false 0.5 12"] = logs(reply)
+
+      reply = Runtime.media(pid, nid, %{"currentTime" => 1.25}, ["timeupdate"])
+      assert ["timeupdate false 1.25 12"] = logs(reply)
+
+      reply = Runtime.media(pid, nid, %{"paused" => true, "ended" => true}, ["pause", "ended"])
+      assert ["pause true 1.25 12", "ended true 1.25 12"] = logs(reply)
+    end
   end
 end
