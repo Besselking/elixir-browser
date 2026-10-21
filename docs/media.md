@@ -32,8 +32,7 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
   `Browser.Media.Player` downloads the file (up to 256 MiB), decodes frame by frame and sends
   each frame in time. Each frame is drawn like a new picture of the same size. A late frame
   (more than 200 ms) is dropped. At the end the video goes back to its first frame, paused.
-  A video of a tab that is not shown
-  stops. A page that is left stops its videos.
+  A video of a tab that is not shown stops. A page that is left stops its videos.
 - Scripts can read `paused`, `ended`, `currentTime`, `duration`, `readyState`, `videoWidth`
   and `videoHeight` of a video. The player tells the page about changes, and the page gets
   the events `loadedmetadata`, `loadeddata`, `canplay`, `play`, `playing`, `pause`,
