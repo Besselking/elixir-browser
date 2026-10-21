@@ -550,3 +550,19 @@ Finding: none of the 32 Speedometer 3.1 suites use WebAssembly (checked all page
 - [ ] Show a `<canvas>` on the page (it is `display: none` now; pages that show the canvas itself stay blank)
 - [ ] Paths, text, `drawImage`, `getImageData` and `fillStyle` gradients
 - [ ] `load` / `error` events for images with an http(s) URL made by script
+
+## archiveofourown.org (thread "AO3 in the browser", 2026-10-20)
+- [x] A `<link>` or `<style>` with a `media` attribute applies only where its query holds (it was applied at every width when the attribute named `screen`, so the phone layout showed on the desktop; one with only a feature query, such as `(max-width: 600px)`, was dropped). `Browser.Style.sheet_refs/1` gives `{:media, query, ref}`, and the sheet is wrapped in `@media`
+- [x] The stylesheet prefetcher skips links in HTML comments (IE conditional comments fetched four sheets for nothing)
+- [x] Percentage widths round down: two `width: 50%` floats in a 393 px box were 197 + 197 px and did not fit side by side
+- [x] A form control with `display: inline` is an inline-block, and a text field with `width: auto` keeps the width of its `size` (it shrank to nothing)
+- [x] jQuery 1.9 ran into `div.attributes["onfocusin"].expando`: `attributes` now has each attribute under its name, `getNamedItem` and `item`. With jQuery dead, every script of the page failed
+- [x] `fetch` and an async `XMLHttpRequest` no longer stop the page while the server answers: AO3's `/token_dispenser.json` takes 8 s, and clicks, hovers and the console waited for it ("script timed out")
+- [x] CSS `:hover`: the element under the pointer and its ancestors are marked `"@hover"` (`Page.set_hover/3`), and the window styles and lays the page out again in a page job when a rule with `:hover` can match an element that the pointer entered or left. `mix browser.screenshot --hover X,Y` and `mix browser.layout --hover X,Y` show a page with the pointer on a point
+- [x] Menus: an absolutely positioned block after an inline-block on a line goes below the line (it went to the top of its parent); an absolutely positioned box no longer widens a shrink-to-fit parent; the positioned entries of a box with a positive `z-index` paint above its background
+- [ ] `:focus`, `:focus-within`, `:active` and `:visited` still never match (menus that open from the keyboard, focus rings from the page)
+- [ ] A hover change restyles and lays out the whole page in the background: fine on AO3 (26 ms restyle) but not measured on big pages (`bench/hover.exs` only covers the scripts' hover events). Narrow it to the hovered subtree when the layout allows
+- [ ] `z-index` on a relatively positioned box with positioned children has the same paint-order problem as the absolute one fixed here (see `in_stacking_context/3` in layout.ex)
+- [x] `getComputedStyle` read only the `style` attribute and tag defaults, so jQuery's `fadeIn` took AO3's terms prompt (`class="hidden"`) for visible and only hid the page behind it (/media went blank after 1.5 s). The layouts sent to the scripts now carry `display`, `visibility`, `position`, `float` and `overflow` from the cascade (`Browser.Nids.styles/1`); an element the cascade left out is `display: none`. A checkbox or radio button with `width: auto` keeps its 13px
+- [ ] `getComputedStyle`: the other properties (colors, fonts, margins, `opacity`) still come from the `style` attribute or a default; a child of a `display: none` element gets its tag's default; a control styled `display: inline` reads `inline-block` (browsers keep `inline`); `:hover` is not known
+- [ ] AO3's Cloudflare challenge script (a hidden iframe that loads `/cdn-cgi/challenge-platform/scripts/jsd/main.js`) was not checked

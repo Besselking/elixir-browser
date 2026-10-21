@@ -115,6 +115,7 @@ defmodule Browser.Session do
       nonce: 0,
       hover: {nil, :arrow},
       hover_nid: nil,
+      hover_chain: nil,
       url: nil,
       # form interaction: the focused control, its caret (graphemes), blink state, and
       # the control whose option menu is open
@@ -293,6 +294,7 @@ defmodule Browser.Session do
         page: page,
         nodes: page.nodes,
         url: page.url,
+        hover_chain: nil,
         scroll: 0,
         soff: %{},
         sbar: nil,
@@ -648,6 +650,10 @@ defmodule Browser.Session do
       when obj == state.ui.tabs,
       do: {:noreply, state}
 
+  # the pointer left the page: nothing is hovered
+  def handle_info(wx(event: wxMouse(type: :leave_window)), state),
+    do: {:noreply, pointer_over(state, nil, nil)}
+
   def handle_info(wx(event: wxMouse(type: :right_down, x: wx_x, y: y)), state),
     do: {:noreply, context_menu(state, wx_x, y)}
 
@@ -944,7 +950,7 @@ defmodule Browser.Session do
         state
       end
 
-    state = if pending, do: start_page_job(state, pending), else: state
+    state = if pending, do: start_page_job(state, pending), else: hover_after_job(state)
     {:noreply, start_images(state)}
   end
 
@@ -2362,20 +2368,73 @@ defmodule Browser.Session do
     end
   end
 
-  # the pointer is over another element: the page's scripts hear `mouseover`, `mouseenter` and so on
-  # (menus that open on hover)
-  defp pointer_over(%{js: nil} = state, _x, _y), do: state
-
+  # the pointer is over another element: it and its ancestors match `:hover`, and the page's
+  # scripts hear `mouseover`, `mouseenter` and so on (menus that open on hover)
   defp pointer_over(state, x, y) do
-    case UI.nid_at(state.items, x, y, state.scroll) do
-      nid when nid == state.hover_nid ->
+    nid = if x != nil, do: UI.nid_at(state.items, x, y, state.scroll)
+    state = css_hover(state, nid)
+
+    cond do
+      state.js == nil or nid == state.hover_nid ->
         state
 
-      nid ->
+      true ->
         Browser.JS.Runtime.hover_async(state.js, state.hover_nid, nid)
         %{state | hover_nid: nid}
     end
   end
+
+  # The chain of hovered elements goes to the page. When that can change what the rules match,
+  # the page is styled and laid out again in a page job, like a tree from the scripts. (The
+  # chain asked for is kept in `hover_chain`: a job that is running finishes first, see
+  # `hover_after_job/1`.)
+  defp css_hover(%{page: %Page{} = page} = state, nid) do
+    chain = hover_chain(page, nid)
+    state = %{state | hover_chain: chain}
+
+    cond do
+      chain == page.hover -> state
+      state.page_job != nil -> state
+      Page.hover_changes?(page, chain) -> start_hover_job(state, chain)
+      true -> %{state | page: %{page | hover: chain}}
+    end
+  end
+
+  defp css_hover(state, _nid), do: state
+
+  # (the parents of the elements are worked out once for a styled tree)
+  defp hover_chain(_page, nil), do: []
+
+  defp hover_chain(page, nid) do
+    pruned = page.pruned || []
+
+    parents =
+      case Process.get(:hover_parents) do
+        {same, parents} when same === pruned ->
+          parents
+
+        _ ->
+          parents = Browser.Nids.parents(pruned)
+          Process.put(:hover_parents, {pruned, parents})
+          parents
+      end
+
+    nid |> Stream.iterate(&Map.get(parents, &1)) |> Enum.take_while(&(&1 != nil))
+  end
+
+  defp hover_after_job(%{page: %Page{} = page, page_job: nil} = state) do
+    case state.hover_chain do
+      chain when is_list(chain) and chain != page.hover ->
+        if Page.hover_changes?(page, chain),
+          do: start_hover_job(state, chain),
+          else: %{state | page: %{page | hover: chain}}
+
+      _ ->
+        state
+    end
+  end
+
+  defp hover_after_job(state), do: state
 
   # a press or click on the page itself: the element under the pointer hears it (the document, when
   # nothing is painted there), which is how menus close when one clicks away
@@ -2434,7 +2493,7 @@ defmodule Browser.Session do
 
       pid ->
         Browser.JS.Runtime.stop(pid)
-        %{state | js: nil, hover_nid: nil}
+        %{state | js: nil, hover_nid: nil, hover_chain: nil}
     end
   end
 
@@ -2616,7 +2675,11 @@ defmodule Browser.Session do
       )
 
     if job.ref != nil do
-      rects = Browser.Nids.rects(items, Browser.Nids.parents(page.pruned || []))
+      rects =
+        items
+        |> Browser.Nids.rects(Browser.Nids.parents(page.pruned || []))
+        |> Browser.Nids.with_styles(page.pruned || [])
+
       send(job.js, {:layout_now_done, job.ref, rects, {job.width * 1.0, height}})
     end
   end
@@ -2725,6 +2788,17 @@ defmodule Browser.Session do
   # keeps changing the page (an animation, a scroll listener) does not stop the window from
   # scrolling and answering. Trees that arrive while it runs are replaced by the newest one.
   defp start_page_job(%{page_job: nil} = state, raw) do
+    # (the elements the pointer is over now match `:hover` in the new tree too)
+    hover = state.hover_chain || state.page.hover
+    build_page_job(%{state | page: %{state.page | hover: hover}}, &Page.from_raw(&1, raw, &2))
+  end
+
+  defp start_page_job(state, raw), do: %{state | page_pending: raw}
+
+  defp start_hover_job(state, chain),
+    do: build_page_job(state, &Page.set_hover(&1, chain, &2))
+
+  defp build_page_job(state, build) do
     me = self()
     ref = make_ref()
     wx_env = :wx.get_env()
@@ -2742,7 +2816,7 @@ defmodule Browser.Session do
     pid =
       spawn_layout(fn ->
         :wx.set_env(wx_env)
-        page = Page.from_raw(base, raw, env)
+        page = build.(base, env)
 
         {items, height} =
           LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
@@ -2758,8 +2832,6 @@ defmodule Browser.Session do
 
     %{state | page_job: {ref, pid}, page_pending: nil}
   end
-
-  defp start_page_job(state, raw), do: %{state | page_pending: raw}
 
   defp js_effect({:history, kind, url}, state) do
     history =
@@ -3169,7 +3241,7 @@ defmodule Browser.Session do
 
     Browser.JS.Runtime.layout(
       pid,
-      rects,
+      Browser.Nids.with_styles(rects, page.pruned || []),
       state.scroll_x,
       state.scroll,
       {state.content_w, state.height}
@@ -3678,7 +3750,7 @@ defmodule Browser.Session do
   # its jobs running: `park/1` stops them and `resume/1` starts again what was cut short.
   @tab_keys ~w(history page nodes items base scrollers soff links controls hit_controls sticky images height scroll
     scroll_x content_w wheel_rem wheel_rem_x url focus caret menu sel sel_anchor drag sel_texts
-    sel_items click fanchor fdrag hover hover_nid js scripts_pending page_edits fragment loading tid ed efocus
+    sel_items click fanchor fdrag hover hover_nid hover_chain js scripts_pending page_edits fragment loading tid ed efocus
     esel edrag egoal)a
 
   defp blank_tab do
@@ -3716,6 +3788,7 @@ defmodule Browser.Session do
       fdrag: false,
       hover: {nil, :arrow},
       hover_nid: nil,
+      hover_chain: nil,
       js: nil,
       scripts_pending: false,
       page_edits: %{},

@@ -11,11 +11,14 @@ defmodule Browser.JS.WebAPI do
   @methods ~w(get head post put patch delete options)
 
   @doc """
-  Declares `__fetch` and `__clipboardText` and runs the prelude. `http` is
-  `(request) -> {:ok, response} | {:error, msg}`; see `Browser.JS.Runtime.http/1`. `clipboard`
-  is `() -> text | nil`: the text on the system clipboard, or nil when there is no window.
+  Declares `__fetch`, `__fetchAsync` and `__clipboardText` and runs the prelude. `http` is
+  `(request) -> {:ok, response} | {:error, msg}`; see `Browser.JS.Runtime.http/1`.
+  `http_start` is `(request, callback) -> any`: it starts the request without waiting and
+  later runs `callback` with `response_args/1` of the answer (see
+  `Browser.JS.Runtime.http_start/2`). `clipboard` is `() -> text | nil`: the text on the system
+  clipboard, or nil when there is no window.
   """
-  def install(scope, http, clipboard \\ fn -> nil end) do
+  def install(scope, http, http_start, clipboard \\ fn -> nil end) do
     Interp.declare(
       scope,
       "__clipboardText",
@@ -31,34 +34,19 @@ defmodule Browser.JS.WebAPI do
       scope,
       "__fetch",
       Interp.native("__fetch", fn _this, args ->
-        arg = &Enum.at(args, &1, :undefined)
-
-        method = arg.(0) |> Interp.to_str() |> String.downcase()
-        method = if method in @methods, do: String.to_atom(method), else: :get
-
-        request = %{
-          method: method,
-          url: arg.(1) |> Interp.to_str(),
-          body: body_text(arg.(2)),
-          headers: pairs(arg.(3)),
-          content_type: body_text(arg.(4)),
-          credentials: credentials(arg.(5))
-        }
-
-        case http.(request) do
-          {:ok, r} ->
-            Interp.new_object([
-              {"status", r.status * 1.0},
-              {"statusText", r.status_text},
-              {"url", r.url},
-              {"body", r.body},
-              {"redirected", r.redirected},
-              {"headers", Interp.new_array(for {k, v} <- r.headers, do: Interp.new_array([k, v]))}
-            ])
-
-          {:error, msg} ->
-            Interp.throw_error("TypeError", "Failed to fetch: #{msg}")
+        case http.(request(args)) do
+          {:ok, r} -> response(r)
+          {:error, msg} -> Interp.throw_error("TypeError", "Failed to fetch: #{msg}")
         end
+      end)
+    )
+
+    Interp.declare(
+      scope,
+      "__fetchAsync",
+      Interp.native("__fetchAsync", fn _this, args ->
+        http_start.(request(args), Enum.at(args, 6, :undefined))
+        :undefined
       end)
     )
 
@@ -66,6 +54,37 @@ defmodule Browser.JS.WebAPI do
       {:ok, ast} -> Interp.run_program(ast)
       {:error, msg} -> throw({:syntax, "web api prelude: " <> msg})
     end
+  end
+
+  defp request(args) do
+    arg = &Enum.at(args, &1, :undefined)
+
+    method = arg.(0) |> Interp.to_str() |> String.downcase()
+    method = if method in @methods, do: String.to_atom(method), else: :get
+
+    %{
+      method: method,
+      url: arg.(1) |> Interp.to_str(),
+      body: body_text(arg.(2)),
+      headers: pairs(arg.(3)),
+      content_type: body_text(arg.(4)),
+      credentials: credentials(arg.(5))
+    }
+  end
+
+  @doc "The arguments for the callback of `__fetchAsync`: `[response]`, or `[null, message]`."
+  def response_args({:ok, r}), do: [response(r)]
+  def response_args({:error, msg}), do: [:null, "Failed to fetch: #{msg}"]
+
+  defp response(r) do
+    Interp.new_object([
+      {"status", r.status * 1.0},
+      {"statusText", r.status_text},
+      {"url", r.url},
+      {"body", r.body},
+      {"redirected", r.redirected},
+      {"headers", Interp.new_array(for {k, v} <- r.headers, do: Interp.new_array([k, v]))}
+    ])
   end
 
   defp pairs({:obj, _} = list) do
@@ -137,13 +156,17 @@ defmodule Browser.JS.WebAPI do
       return [String(body), "text/plain;charset=UTF-8"];
     }
 
-    // runs a request now: `{ status, statusText, url, body, headers, redirected }`; a failure throws
-    function send(method, url, body, headers, credentials) {
+    // runs a request now: `{ status, statusText, url, body, headers, redirected }`; a failure throws.
+    // With `done`, the request goes out while the page goes on, and `done(response)` (or
+    // `done(null, message)` on a failure) runs as a task of its own when the answer is in.
+    function send(method, url, body, headers, credentials, done) {
       var enc = encodeBody(body);
       var list = [], ctype = enc[1];
       headers.forEach(function (v, k) { if (k === "content-type") ctype = v; else list.push([k, v]); });
       if (enc[0] === null) ctype = null;
-      return __fetch(method, new URL(url, curDoc().baseURI || curLoc().href).href, enc[0], list, ctype, credentials);
+      var abs = new URL(url, curDoc().baseURI || curLoc().href).href;
+      if (done) return __fetchAsync(method, abs, enc[0], list, ctype, credentials, done);
+      return __fetch(method, abs, enc[0], list, ctype, credentials);
     }
 
     function Response(body, init) {
@@ -210,15 +233,17 @@ defmodule Browser.JS.WebAPI do
         // the request goes out after the caller has had its turn, so `abort()` right after `fetch()` wins
         setTimeout(function () {
           if (settled) return;
-          var r;
-          try { r = send(req.method, req.url, req.body, req.headers, req.credentials); }
-          catch (e) { settled = true; reject(new TypeError("Failed to fetch")); return; }
-          if (settled) return;
-          settled = true;
-          if (req.signal) req.signal.removeEventListener("abort", onabort);
-          var res = new Response(r.body, { status: r.status, statusText: r.statusText, url: r.url, redirected: r.redirected, headers: r.headers });
-          res.type = "basic";
-          resolve(res);
+          function done(r) {
+            if (settled) return;
+            settled = true;
+            if (req.signal) req.signal.removeEventListener("abort", onabort);
+            if (!r) { reject(new TypeError("Failed to fetch")); return; }
+            var res = new Response(r.body, { status: r.status, statusText: r.statusText, url: r.url, redirected: r.redirected, headers: r.headers });
+            res.type = "basic";
+            resolve(res);
+          }
+          try { send(req.method, req.url, req.body, req.headers, req.credentials, done); }
+          catch (e) { settled = true; reject(new TypeError("Failed to fetch")); }
         }, 0);
       });
     }
@@ -265,8 +290,19 @@ defmodule Browser.JS.WebAPI do
       var self = this;
       if (self._aborted) return;
       var cred = self.withCredentials ? "include" : "same-origin";
+      if (self._async) {
+        // (an answer to an earlier `send`, from before an `abort` and a new `open`, is dropped)
+        var gen = self._gen = (self._gen || 0) + 1;
+        try { send(self._method, self._url, body, self._headers, cred, function (r) { if (self._gen === gen) self._done(r || null); }); }
+        catch (e) { self._done(null); }
+        return;
+      }
       var r = null;
       try { r = send(self._method, self._url, body, self._headers, cred); } catch (e) { r = null; }
+      self._done(r);
+    };
+    XMLHttpRequest.prototype._done = function (r) {
+      var self = this;
       if (self._aborted) return;
       if (r === null) {
         self.readyState = 4; self.status = 0; self.statusText = "";

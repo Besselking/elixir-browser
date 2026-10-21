@@ -87,8 +87,10 @@ defmodule Browser.PatchFieldTest do
     assert type_into(~s(<input name=q style="text-align:right">)) == 0
   end
 
-  test "an auto-width field is never patched" do
-    assert type_into(~s(<input name=q style="width:auto">)) == 0
+  # (`width: auto` is the width of the field's `size`, as in browsers: typing does not change it)
+  test "an auto-width field has a fixed width, so typing in it is patched" do
+    assert type_into(~s(<input name=q style="width:auto">)) ==
+             type_into(~s(<input name=q style="width:170px">))
   end
 
   test "text too wide for the field falls back to a full layout" do

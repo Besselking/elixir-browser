@@ -8,6 +8,8 @@ defmodule Browser.Prefetch do
   keeps the state in its process dictionary.
   """
 
+  import Browser.Re, only: [re: 1]
+
   alias Browser.{Fetch, HTML, Style}
 
   @key {__MODULE__, :state}
@@ -24,9 +26,9 @@ defmodule Browser.Prefetch do
     if MapSet.size(st.started) >= @max_sheets do
       :ok
     else
-      buf = st.buf <> chunk
+      {buf, open_comment} = without_comments(st.buf <> chunk)
       links = Regex.scan(@link, buf)
-      rest = rest_after(buf, links)
+      rest = if open_comment == "", do: rest_after(buf, links), else: open_comment
       st = %{st | buf: rest}
 
       started =
@@ -75,6 +77,17 @@ defmodule Browser.Prefetch do
     Process.get(@key)
   end
 
+  # (links in comments, such as `<!--[if IE]>` ones, are not loaded) -> {text without its
+  # comments, a comment not finished yet}
+  defp without_comments(buf) do
+    buf = Regex.replace(re(~r/<!--.*?-->/s), buf, "")
+
+    case :binary.match(buf, "<!--") do
+      {pos, _} -> {binary_part(buf, 0, pos), binary_part(buf, pos, byte_size(buf) - pos)}
+      :nomatch -> {buf, ""}
+    end
+  end
+
   # what follows the last complete tag, cut to a possibly unfinished tag at its end
   defp rest_after(buf, links) do
     tail =
@@ -101,7 +114,9 @@ defmodule Browser.Prefetch do
   end
 
   defp hrefs(tag) do
-    for {:link, href} <- tag |> HTML.parse() |> Style.sheet_refs(), do: href
+    for ref <- tag |> HTML.parse() |> Style.sheet_refs(),
+        {:link, href} <- [with({:media, _, link} <- ref, do: link)],
+        do: href
   end
 
   defp start(href, started, base, allowed?) do

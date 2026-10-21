@@ -61,6 +61,24 @@ defmodule Browser.JS.DOMTest do
     assert logs(r) == ["4 true true", "1 1", "1 1", "3 true 1", "0 0 0"]
   end
 
+  # jQuery 1.9 reads `div.attributes["onfocusin"].expando` while it starts
+  test "attributes has each attribute under its name, and getNamedItem" do
+    r =
+      run(
+        ~S"""
+        var p = document.getElementById("a");
+        p.setAttribute("onfocusin", "t");
+        var at = p.attributes;
+        console.log(at.onfocusin.value, at["data-x"].name, at.getNamedItem("ID").value, at.getNamedItem("no"), at.item(0).name);
+        console.log(at.length, Object.keys(at).length, at.expando === undefined);
+        """,
+        "<p id=a data-x=1>x</p>"
+      )
+
+    assert errors(r) == []
+    assert logs(r) == ["t data-x a null id", "3 3 true"]
+  end
+
   test "reading an unknown property of window is undefined, a named element is found" do
     r =
       run(
@@ -2019,6 +2037,50 @@ defmodule Browser.JS.DOMTest do
       assert_receive {:request, "http://t.test/ok", opts}
       assert opts[:method] == :post and opts[:credentials] == :include
       assert {"x-b", "2"} in opts[:headers]
+    end
+
+    test "the page goes on while a slow request is out, and hears the answer later" do
+      test = self()
+
+      slow = fn url, opts ->
+        if url == "http://t.test/slow", do: Process.sleep(1000)
+        request_fn(test).(url, opts)
+      end
+
+      {pid, r} =
+        start(
+          ~S"""
+          <body><script>
+          fetch("/slow").then((res) => res.text()).then((t) => console.log("fetch", t));
+          const x = new XMLHttpRequest();
+          x.open("GET", "/slow");
+          x.onload = () => console.log("xhr", x.status);
+          x.send();
+          </script></body>
+          """,
+          %{},
+          %{request: slow}
+        )
+
+      assert errors(r) == []
+      {t, reply} = :timer.tc(fn -> Runtime.eval(pid, "1 + 1") end)
+      assert {:result, "2"} in reply.console
+      assert t < 500_000
+      assert Enum.sort(logs(%{console: collect_slow(pid, 2)})) == ["fetch {\"n\":1}", "xhr 200"]
+    end
+
+    defp collect_slow(_pid, 0), do: []
+
+    defp collect_slow(pid, n) do
+      receive do
+        {:js_async, ^pid, %{console: [_ | _] = console}} ->
+          console ++ collect_slow(pid, n - length(for {:log, _} <- console, do: 1))
+
+        {:js_async, ^pid, _} ->
+          collect_slow(pid, n)
+      after
+        5000 -> []
+      end
     end
 
     test "a synchronous XMLHttpRequest has its answer when send returns" do

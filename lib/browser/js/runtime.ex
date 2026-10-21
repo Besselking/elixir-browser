@@ -195,7 +195,7 @@ defmodule Browser.JS.Runtime do
         DOM.install(scope)
         Process.put(:rt_info, info)
         Process.put(:js_hidden, info[:hidden] == true)
-        Browser.JS.WebAPI.install(scope, &http/1, &clipboard_text/0)
+        Browser.JS.WebAPI.install(scope, &http/1, &http_start/2, &clipboard_text/0)
         Browser.JS.Editing.install(scope)
         Browser.JS.WebAssembly.install(scope)
         Browser.JS.IndexedDB.install(scope)
@@ -369,6 +369,12 @@ defmodule Browser.JS.Runtime do
         reply = finish(%{})
 
         if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
+      {:http_done, id, result} ->
+        # (the callback is a timer that is due now: the `after` below runs it)
+        Process.put(:js_now, elapsed(t0))
+        http_done(id, result)
         loop(t0)
 
       {:ws, id, event} ->
@@ -787,9 +793,31 @@ defmodule Browser.JS.Runtime do
     drained = drain_idb()
 
     cond do
+      # (a request answers before the next timer, as if it took no time)
+      await_http() -> timers_and_messages(on_error)
       Builtins.run_next_timer(on_error) -> timers_and_messages(on_error)
       drained -> timers_and_messages(on_error)
       true -> :ok
+    end
+  end
+
+  @http_wait 30_000
+
+  defp await_http do
+    pending = pending_http()
+
+    if map_size(pending) > 0 do
+      receive do
+        {:http_done, id, result} when is_map_key(pending, id) ->
+          http_done(id, result)
+          true
+      after
+        @http_wait ->
+          Process.put(:js_http, %{})
+          false
+      end
+    else
+      false
     end
   end
 
@@ -1023,10 +1051,56 @@ defmodule Browser.JS.Runtime do
   # A page's `info.request` (`fn url, opts -> ...`) makes the real request; without one
   # (in tests) the page's `fetch` function answers every request with status 200.
   @doc false
-  def http(%{url: url} = req) do
+  def http(req), do: http_job(req).()
+
+  # `fetch` and an async `XMLHttpRequest`: the request runs in a process of its own, so that the
+  # page goes on (a slow server held up every click and timer until it answered). The answer
+  # comes back as `{:http_done, id, result}`, and `callback` runs as a task (see `http_done/2`).
+  @doc false
+  def http_start(req, callback) do
+    job = http_job(req)
+    id = make_ref()
+    rt = self()
+    Process.put(:js_http, Map.put(pending_http(), id, {callback, DOM.timer_realm()}))
+
+    spawn(fn ->
+      result =
+        try do
+          job.()
+        catch
+          kind, reason -> {:error, Exception.format_banner(kind, reason)}
+        end
+
+      send(rt, {:http_done, id, result})
+    end)
+  end
+
+  defp pending_http, do: Process.get(:js_http, %{})
+
+  defp http_done(id, result) do
+    case Map.pop(pending_http(), id) do
+      {{callback, realm}, rest} ->
+        Process.put(:js_http, rest)
+
+        DOM.in_realm(realm, fn ->
+          Builtins.add_timer(callback, 0, Browser.JS.WebAPI.response_args(result))
+        end)
+
+      {nil, _} ->
+        :ok
+    end
+  end
+
+  # the request as a function that needs nothing of this process, so that another can run it
+  defp http_job(%{url: url} = req) do
     scheme = URI.parse(url).scheme
     request = Process.get(:rt_info)[:request]
+    fetch = fetch_job(url)
 
+    fn -> http_run(req, scheme, request, fetch) end
+  end
+
+  defp http_run(%{url: url} = req, scheme, request, fetch) do
     cond do
       scheme in ["http", "https"] and request != nil ->
         opts = [
@@ -1044,7 +1118,7 @@ defmodule Browser.JS.Runtime do
         end
 
       true ->
-        case fetch(url) do
+        case fetch.() do
           {:ok, body, final} ->
             {:ok,
              %{
@@ -1065,14 +1139,20 @@ defmodule Browser.JS.Runtime do
   defp allowed_url?(url),
     do: page_scheme() == "file" or URI.parse(url).scheme in ["http", "https", "data"]
 
-  defp fetch(url) do
+  defp fetch(url), do: fetch_job(url).()
+
+  defp fetch_job(url) do
     if allowed_url?(url) do
-      case Process.get(:rt_info).fetch.(url) do
-        {:ok, body, final} -> {:ok, body, final}
-        {:error, msg} -> {:error, to_string(msg)}
+      load = Process.get(:rt_info).fetch
+
+      fn ->
+        case load.(url) do
+          {:ok, body, final} -> {:ok, body, final}
+          {:error, msg} -> {:error, to_string(msg)}
+        end
       end
     else
-      {:error, "blocked"}
+      fn -> {:error, "blocked"} end
     end
   end
 

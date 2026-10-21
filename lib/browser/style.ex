@@ -163,7 +163,11 @@ defmodule Browser.Style do
 
   # -- finding stylesheets -------------------------------------------------------
 
-  @doc "Stylesheet references in document order: `{:style, css}` or `{:link, href}`."
+  @doc """
+  Stylesheet references in document order: `{:style, css}` or `{:link, href}`, or
+  `{:media, query, ref}` for one whose `media` attribute limits where it applies (its rules go
+  into an `@media query` block). A sheet whose media types never include the screen is left out.
+  """
   def sheet_refs(nodes), do: nodes |> refs([]) |> Enum.reverse()
 
   defp refs(nodes, acc), do: Enum.reduce(nodes, acc, &ref/2)
@@ -200,12 +204,7 @@ defmodule Browser.Style do
   defp ref({:text, _}, acc), do: acc
 
   defp ref({:element, "style", attrs, kids}, acc) do
-    if media_ok?(attrs) do
-      css = for {:text, t} <- kids, into: "", do: t
-      [{:style, css} | acc]
-    else
-      acc
-    end
+    with_media(attrs, acc, fn -> {:style, for({:text, t} <- kids, into: "", do: t)} end)
   end
 
   defp ref({:element, "link", attrs, _}, acc) do
@@ -213,19 +212,26 @@ defmodule Browser.Style do
     href = attr(attrs, "href")
 
     if "stylesheet" in rel and "alternate" not in rel and href != "" and
-         not List.keymember?(attrs, "disabled", 0) and media_ok?(attrs),
-       do: [{:link, href} | acc],
+         not List.keymember?(attrs, "disabled", 0),
+       do: with_media(attrs, acc, fn -> {:link, href} end),
        else: acc
   end
 
   defp ref({:element, _, _, kids}, acc), do: refs(kids, acc)
 
-  defp media_ok?(attrs) do
-    case attr(attrs, "media") |> String.downcase() |> String.trim() do
-      "" -> true
-      media -> String.contains?(media, ["all", "screen"])
+  defp with_media(attrs, acc, ref) do
+    case attrs |> attr("media") |> String.downcase() |> String.trim() do
+      media when media in ["", "all", "screen", "only screen"] ->
+        [ref.() | acc]
+
+      media ->
+        if Enum.any?(MediaQuery.parse(media), &screen_type?/1),
+          do: [{:media, media, ref.()} | acc],
+          else: acc
     end
   end
+
+  defp screen_type?(%{type: type, negate: negate}), do: type in ["all", "screen"] != negate
 
   defp attr(attrs, name), do: List.keyfind(attrs, name, 0, {nil, ""}) |> elem(1)
 
@@ -1775,7 +1781,14 @@ defmodule Browser.Style do
     else
       ctx = tag |> CSS.context(attrs, kids, parent, prev, i, count, rest) |> then(&sign(idx, &1))
       {computed, custom, own} = compute(idx, ctx, parent)
-      computed = computed |> blockify_grid_item(parent) |> flex_item_align(parent)
+
+      computed =
+        computed
+        |> control_display(tag)
+        |> field_width(ctx)
+        |> blockify_grid_item(parent)
+        |> flex_item_align(parent)
+
       root = if parent, do: parent.root_fs, else: computed["font-size"] || @default_fs
 
       ctx =
@@ -2000,6 +2013,40 @@ defmodule Browser.Style do
         char
     end)
   end
+
+  # A form control is an atomic box: `display: inline` makes it an inline-block, not an inline
+  # box that its content would flow through (it would shrink to nothing)
+  defp control_display(%{"display" => "inline"} = computed, tag)
+       when tag in ["input", "select", "textarea", "button"],
+       do: Map.put(computed, "display", "inline-block")
+
+  defp control_display(computed, _tag), do: computed
+
+  # `width: auto` on a text field is the width it has for its `size` (20 characters when it has
+  # none), as the user agent's 170px is, not the width of its content; a checkbox or a radio
+  # button keeps its 13px
+  defp field_width(%{"width" => :auto} = computed, %{tag: "input", attrs: attrs}) do
+    type = attrs |> attr("type") |> String.downcase()
+
+    cond do
+      type in ["checkbox", "radio"] ->
+        Map.put(computed, "width", 13.0)
+
+      Browser.Forms.text_like?(type) ->
+        width =
+          case Integer.parse(attr(attrs, "size")) do
+            {n, ""} when n > 0 -> n * 8.0
+            _ -> 170.0
+          end
+
+        Map.put(computed, "width", width)
+
+      true ->
+        computed
+    end
+  end
+
+  defp field_width(computed, _ctx), do: computed
 
   # Grid is laid out as a stack of blocks, so what sits directly in a grid container is
   # block-level, as it is in a real grid (an inline link wrapping a logo becomes a block box).
