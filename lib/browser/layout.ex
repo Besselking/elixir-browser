@@ -1948,12 +1948,6 @@ defmodule Browser.Layout do
     Canvas.ops(surface)
   end
 
-  defp media_display_list_controls(tag, w, h) do
-    Browser.Canvas.ops(
-      media_controls(Browser.Canvas.new(max(trunc(w), 1), max(trunc(h), 1)), tag, true, w, h)
-    )
-  end
-
   # the play button and the bar of a video or an audio element with `controls`
   defp media_controls(surface, tag, controls?, w, h) do
     alias Browser.Canvas
@@ -1961,33 +1955,16 @@ defmodule Browser.Layout do
 
     cond do
       tag == "video" and controls? ->
-        surface
-        |> triangle(w / 2 - 12, h / 2 - 16, 28, paint.({255, 255, 255, 230}))
-        |> Canvas.fill_rect(0, h - 28, w, 28, paint.({0, 0, 0, 140}), 1.0)
-        |> triangle(10, h - 22, 16, paint.({255, 255, 255, 255}))
-        |> Canvas.fill_rect(40, h - 15, w - 56, 3, paint.({255, 255, 255, 140}), 1.0)
+        Browser.Media.Controls.draw(surface, w, h, nil)
 
       tag == "audio" ->
         surface
-        |> triangle(16, h / 2 - 9, 18, paint.({60, 64, 67, 255}))
+        |> Browser.Media.Controls.triangle(16, h / 2 - 9, 18, paint.({60, 64, 67, 255}))
         |> Canvas.fill_rect(50, h / 2 - 1.5, w - 70, 3, paint.({154, 160, 166, 255}), 1.0)
 
       true ->
         surface
     end
-  end
-
-  # a play triangle of height `size` with its top left corner at x, y
-  defp triangle(surface, x, y, size, paint) do
-    alias Browser.Canvas
-
-    surface
-    |> Canvas.begin_path()
-    |> Canvas.move_to(x, y)
-    |> Canvas.line_to(x + size * 0.9, y + size / 2)
-    |> Canvas.line_to(x, y + size)
-    |> Canvas.close_path()
-    |> Canvas.fill(paint, :nonzero, 1.0)
   end
 
   defp image_atom(url, info, attrs, c, style, acc, extra) do
@@ -5193,8 +5170,12 @@ defmodule Browser.Layout do
 
             # the controls of a video are drawn over its picture
             if spec[:controls] do
-              ops = media_display_list_controls("video", cw, ch)
-              [pic, Map.merge(Map.drop(item, [:url]), %{type: :svg, ops: ops})]
+              ops = Browser.Media.Controls.ops(cw, ch, nil)
+
+              [
+                pic,
+                Map.merge(Map.drop(item, [:url]), %{type: :svg, ops: ops, video_controls: true})
+              ]
             else
               [pic]
             end

@@ -25,7 +25,7 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
   helper is built and the file is at most 32 MiB (the helper reads a file; streaming is
   a later step). The picture is scaled to the box like an image (`object-fit: contain`).
 - A video plays without sound. `video.play()`, `video.pause()` and a click on a video with
-  `controls` start and stop it. A click on the bar jumps to that place in the video. `Browser.Media.Player` downloads the
+  `controls` start and stop it. A click on the bar jumps to that place in the video. The controls follow the state: a pause button and a progress line that moves while the video plays. A playing video hides its controls when the mouse has not moved over it for 2 seconds; they come back when the mouse moves. `Browser.Media.Player` downloads the
   file (up to 256 MiB), decodes frame by frame and sends each frame in time. Each frame is
   drawn like a new picture of the same size. A late frame (more than 200 ms) is dropped. At
   the end the video goes back to its first frame, paused. A video of a tab that is not shown
