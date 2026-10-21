@@ -13,23 +13,22 @@ button { margin-right: 6px }
 <body><div class="page">
 <h1>Video and frames</h1>
 <div class="card">
-  <p>A video with <code>controls</code>. It shows its first frame (no sound yet). Click it, or use the buttons, to play and pause.</p>
+  <p>A video with <code>controls</code>, and buttons that call <code>play()</code> and <code>pause()</code>.</p>
   <video id="v" src="video/clip.mp4" width="320" height="180" controls></video>
   <p><button onclick="document.getElementById('v').play()">Play</button><button onclick="document.getElementById('v').pause()">Pause</button></p>
 </div>
 <div class="card">
-  <p>Two small videos of the same file, each with its own controls. Left: it has a <code>poster</code> picture, which is shown until you play the video. Right: no poster, so it shows its first frame; its box is square and the picture keeps its shape. Playing one video does not play the other.</p>
+  <p>A video with a <code>poster</code> picture, and a square video without one.</p>
   <video src="video/clip.mp4" poster="images/photo.png" width="160" height="90" controls></video>
   <video src="video/clip.mp4" width="90" height="90" controls></video>
 </div>
 <div class="card">
-  <p>An audio element with <code>controls</code> (a bar only; no sound yet):</p>
+  <p>An audio element with <code>controls</code>:</p>
   <audio controls src="video/clip.mp4"></audio>
 </div>
 <div class="card">
-  <p>Iframes. The first is made by a script that writes a page into it. The second has a <code>src</code>: for now it is only a box (loading the page in it is not done yet).</p>
+  <p>An iframe made by a script that writes a page into it:</p>
   <span id="frame-host"></span>
-  <iframe width="260" height="90" src="sample.html"></iframe>
 </div>
 </div>
 <script>
