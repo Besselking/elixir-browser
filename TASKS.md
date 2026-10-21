@@ -62,9 +62,12 @@ Last updated 2026-10-05. PRs 45, 48, 50, 54, 59 and 62 merged; dynamic import + 
 
 - [x] HTML: full WHATWG named-entity table (priv/html_entities.txt), legacy no-semicolon entities; soft hyphen (&shy;) hidden in layout
 - [x] `<video>`, `<audio controls>` and `<iframe>` are boxes (black video box with a play button and bar, audio bar, iframe box with `width`/`height` attributes); `repeating-linear-gradient` and `repeating-radial-gradient` paint (this PR). Plan for real playback: docs/media.md
-- [ ] Media playback through a libav helper over a Port (docs/media.md stages 2 to 6; Bess approved the exception to the no-dependencies rule on 2026-10-21; libav comes from scripts/install-toolchain.sh)
+- [x] Media helper: `native/browser_media` (libav, software decode) on a Port, `Browser.Media` API (open, set_size, next_video, next_audio, seek), `mix media.build`; tests in test/browser/media_test.exs (skipped without the helper and ffmpeg)
+- [ ] Media: hardware decoding in the helper (VideoToolbox, VAAPI; needs a Mac), streaming input
+- [ ] Media playback (docs/media.md stages 3 to 6: sound, drawing frames in the page, HTMLMediaElement in JS, controls; Bess approved the exception to the no-dependencies rule on 2026-10-21; libav comes from scripts/install-toolchain.sh)
 - [ ] Missing CSS/HTML found in the 2026-10-21 audit: `counter()`/`counters()` in `content` (needs counter state in the style walk; careful with the prune memo), `-webkit-line-clamp` and `text-overflow: ellipsis` (parsed, not used by layout), `::first-letter`/`::first-line`, `@container` queries, `conic-gradient`, `<progress>`/`<meter>`, `input type=range/date/color`, `writing-mode: vertical-*`, `<ruby>` placement, `::selection`, `accent-color`
 - [ ] Form inputs with native pickers (Bess 2026-10-21): `type=date/datetime-local/month` open a wx calendar popup (wxCalendarCtrl or wxDatePickerCtrl; no wxTimePickerCtrl binding, so `time` is a validated text field), `type=color` opens wxColourDialog, `type=range` is drawn in the page and dragged, `progress`/`meter` drawn. Check the Mac look after merge
+- [ ] `mix browser.screenshot --wx` segfaults at exit for any page with a CSS gradient (the PNG is written first; also on main, 2026-10-21): wx teardown of gradient brushes?
 - [ ] Soft hyphen: break lines at U+00AD and show a hyphen when it breaks
 
 ## JavaScript runtime
