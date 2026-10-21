@@ -1904,7 +1904,9 @@ defmodule Browser.Layout do
 
     # a loaded poster or first frame is a picture, like an <img>
     if tag == "video" and match?({:ok, _, _}, info) do
-      image_atom(url, info, attrs, c, style, acc, %{pstyle: parent_style, tag: "video"})
+      controls = List.keymember?(attrs, "controls", 0)
+      extra = %{pstyle: parent_style, tag: "video", controls: controls}
+      image_atom(url, info, attrs, c, style, acc, extra)
     else
       media_box(tag, attrs, c, style, acc)
     end
@@ -1937,25 +1939,38 @@ defmodule Browser.Layout do
         "audio" -> Canvas.fill_rect(surface, 0, 0, w, h, paint.({241, 243, 244, 255}), 1.0)
       end
 
-    surface =
-      cond do
-        tag == "video" and controls? ->
-          surface
-          |> triangle(w / 2 - 12, h / 2 - 16, 28, paint.({255, 255, 255, 230}))
-          |> Canvas.fill_rect(0, h - 28, w, 28, paint.({0, 0, 0, 140}), 1.0)
-          |> triangle(10, h - 22, 16, paint.({255, 255, 255, 255}))
-          |> Canvas.fill_rect(40, h - 15, w - 56, 3, paint.({255, 255, 255, 140}), 1.0)
-
-        tag == "audio" ->
-          surface
-          |> triangle(16, h / 2 - 9, 18, paint.({60, 64, 67, 255}))
-          |> Canvas.fill_rect(50, h / 2 - 1.5, w - 70, 3, paint.({154, 160, 166, 255}), 1.0)
-
-        true ->
-          surface
-      end
+    surface = media_controls(surface, tag, controls?, w, h)
 
     Canvas.ops(surface)
+  end
+
+  defp media_display_list_controls(tag, w, h) do
+    Browser.Canvas.ops(
+      media_controls(Browser.Canvas.new(max(trunc(w), 1), max(trunc(h), 1)), tag, true, w, h)
+    )
+  end
+
+  # the play button and the bar of a video or an audio element with `controls`
+  defp media_controls(surface, tag, controls?, w, h) do
+    alias Browser.Canvas
+    paint = fn rgba -> {:color, rgba} end
+
+    cond do
+      tag == "video" and controls? ->
+        surface
+        |> triangle(w / 2 - 12, h / 2 - 16, 28, paint.({255, 255, 255, 230}))
+        |> Canvas.fill_rect(0, h - 28, w, 28, paint.({0, 0, 0, 140}), 1.0)
+        |> triangle(10, h - 22, 16, paint.({255, 255, 255, 255}))
+        |> Canvas.fill_rect(40, h - 15, w - 56, 3, paint.({255, 255, 255, 140}), 1.0)
+
+      tag == "audio" ->
+        surface
+        |> triangle(16, h / 2 - 9, 18, paint.({60, 64, 67, 255}))
+        |> Canvas.fill_rect(50, h / 2 - 1.5, w - 70, 3, paint.({154, 160, 166, 255}), 1.0)
+
+      true ->
+        surface
+    end
   end
 
   # a play triangle of height `size` with its top left corner at x, y
@@ -5162,13 +5177,22 @@ defmodule Browser.Layout do
           _ ->
             item = Map.merge(item, %{type: :image, url: spec.url})
 
-            case Browser.ImageBox.fit(spec.intrinsic, {cw, ch}, spec[:fit], spec[:fit_pos]) do
-              nil ->
-                [item]
+            pic =
+              case Browser.ImageBox.fit(spec.intrinsic, {cw, ch}, spec[:fit], spec[:fit_pos]) do
+                nil ->
+                  item
 
-              rect ->
-                # drawn at its own size inside the item's box, which clips it
-                [Map.put(item, :fit, rect)]
+                rect ->
+                  # drawn at its own size inside the item's box, which clips it
+                  Map.put(item, :fit, rect)
+              end
+
+            # the controls of a video are drawn over its picture
+            if spec[:controls] do
+              ops = media_display_list_controls("video", cw, ch)
+              [pic, Map.merge(Map.drop(item, [:url]), %{type: :svg, ops: ops})]
+            else
+              [pic]
             end
         end
       else

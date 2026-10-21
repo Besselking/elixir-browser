@@ -1944,6 +1944,18 @@ defmodule Browser.LayoutTest do
       assert [%{url: @img, w: 120, h: 80, x: 4}] = pics(items)
     end
 
+    test "a video shows its loaded first frame as a picture, with its controls over it" do
+      frame = %{"media:http://example.test/dir/v.mp4" => {:ok, 160, 90}}
+
+      {items, _} = im(~s(<video src="v.mp4"></video>), frame)
+      assert [%{url: "media:http://example.test/dir/v.mp4", w: 160, h: 90}] = pics(items)
+      assert Enum.filter(items, &(&1.type == :svg)) == []
+
+      {items, _} = im(~s(<video src="v.mp4" controls></video>), frame)
+      assert [%{w: 160, h: 90}] = pics(items)
+      assert [%{w: 160, h: 90, ops: [_ | _]}] = Enum.filter(items, &(&1.type == :svg))
+    end
+
     test "a percentage height attribute is of a containing block with a height" do
       {items, _} =
         im(~s(<div style="height:200px"><img src="a.png" height="50%"></div>), loaded(30, 30))
