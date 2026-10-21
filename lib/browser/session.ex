@@ -2875,14 +2875,16 @@ defmodule Browser.Session do
         :wx.set_env(wx_env)
         page = build.(base, env)
 
-        {items, height} =
-          LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
-            scrollers: true,
-            boxes: boxes,
-            metrics: true,
-            images: images,
-            svg_defs: page.svg_defs
-          )
+        {page, {items, height}} =
+          Page.settle(page, env, fn page ->
+            LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
+              scrollers: true,
+              boxes: boxes or Page.cq?(page),
+              metrics: true,
+              images: images,
+              svg_defs: page.svg_defs
+            )
+          end)
 
         send(me, {:page_done, ref, nonce, page, items, height, width, images})
       end)
@@ -3335,15 +3337,17 @@ defmodule Browser.Session do
         :wx.set_env(wx_env)
         page = Page.restyle(base, env)
 
-        {items, height} =
-          LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
-            scrollers: true,
-            boxes: boxes,
-            metrics: true,
-            focus: focus,
-            images: images,
-            svg_defs: page.svg_defs
-          )
+        {page, {items, height}} =
+          Page.settle(page, env, fn page ->
+            LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
+              scrollers: true,
+              boxes: boxes or Page.cq?(page),
+              metrics: true,
+              focus: focus,
+              images: images,
+              svg_defs: page.svg_defs
+            )
+          end)
 
         send(me, {:layout_done, ref, base.ver, page, items, height, width, images})
       end)

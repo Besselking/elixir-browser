@@ -84,11 +84,16 @@ defmodule Mix.Tasks.Browser.Layout do
 
   @doc false
   def dump(page, width, height, opts \\ []) do
-    {items, content_height} =
-      Layout.layout(page.nodes, width, &Screenshot.measure/2, height,
-        svg_defs: page.svg_defs,
-        margin: 0
-      )
+    env = %{Browser.Style.default_env() | width: width, height: height}
+
+    {page, {items, content_height}} =
+      Browser.Page.settle(page, env, fn page ->
+        Layout.layout(page.nodes, width, &Screenshot.measure/2, height,
+          svg_defs: page.svg_defs,
+          margin: 0,
+          boxes: Browser.Page.cq?(page)
+        )
+      end)
 
     tree = page.pruned || []
     parents = Nids.parents(tree)

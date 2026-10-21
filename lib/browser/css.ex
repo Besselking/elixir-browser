@@ -49,11 +49,21 @@ defmodule Browser.CSS do
           selector: parts,
           specificity: spec,
           decls: decls,
-          media: Enum.reject(conds, &(match?({:layer, _}, &1) or &1 == :registered)),
+          media:
+            Enum.reject(
+              conds,
+              &(match?({:layer, _}, &1) or match?({:container, _, _}, &1) or &1 == :registered)
+            ),
           layer: layer_path(conds),
           pseudo: pseudo
         }
         |> then(&if(:registered in conds, do: Map.put(&1, :registered, true), else: &1))
+        |> then(fn rule ->
+          case for({:container, name, query} <- conds, do: {name, query}) do
+            [] -> rule
+            cq -> Map.put(rule, :cq, cq)
+          end
+        end)
       end
     end)
   end
@@ -243,12 +253,27 @@ defmodule Browser.CSS do
               "media" -> blocks(body, conds ++ [MediaQuery.parse(prelude)], [])
               "supports" -> if supports?(prelude), do: blocks(body, conds, []), else: []
               "layer" -> blocks(body, conds ++ [{:layer, layer_name(prelude)}], [])
+              "container" -> blocks(body, conds ++ [container_cond(prelude)], [])
               "property" -> registered_default(prelude, body, conds)
               _ -> []
             end
 
           {Enum.reverse(inner) ++ acc, rest}
         end
+    end
+  end
+
+  # `@container sidebar (min-width: 400px)` -> {"sidebar", query}: the name is nil without one; the
+  # query is a media query on the size of the container (see `Browser.Container`)
+  defp container_cond(prelude) do
+    prelude = String.trim(prelude)
+
+    case Regex.run(re(~r/\A([\w-]+)\s*(\(.*|not\b.*)\z/su), prelude) do
+      [_, name, query] when name not in ["not", "and", "or", "style"] ->
+        {:container, name, query}
+
+      _ ->
+        {:container, nil, prelude}
     end
   end
 

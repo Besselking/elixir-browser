@@ -32,7 +32,7 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap flex-line-count justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode text-wrap-style tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character text-overflow -webkit-line-clamp line-clamp counter-reset counter-increment counter-set
+            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode text-wrap-style tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character text-overflow -webkit-line-clamp line-clamp counter-reset counter-increment counter-set container-type container-name
             grid-template-columns grid-template-rows grid-auto-rows grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
@@ -363,7 +363,7 @@ defmodule Browser.Style do
           scope_class: scope_classes(ranked)
         },
         fn {rule, order}, idx ->
-          idx = idx |> note_pseudo(rule) |> note_counters(rule)
+          idx = idx |> note_pseudo(rule) |> note_counters(rule) |> note_container(rule)
           rule = Map.put(rule, :order, order - Map.get(bases, scope_key(rule), 0))
 
           Map.update(
@@ -438,6 +438,11 @@ defmodule Browser.Style do
   end
 
   defp note_counters(idx, _rule), do: idx
+
+  # a rule in an `@container` block depends on the size of an ancestor: such a page is styled
+  # again when the sizes change, and its elements do not share what they declare
+  defp note_container(idx, %{cq: _}), do: Map.put(idx, :cq, true)
+  defp note_container(idx, _rule), do: idx
 
   @doc "Convenience: `parse_sheets/1` followed by `index_rules/2`."
   def index(sheets, env \\ @default_env), do: sheets |> parse_sheets() |> index_rules(env)
@@ -564,6 +569,7 @@ defmodule Browser.Style do
         from_host <- [from_shadow?(rule, ctx)],
         from_host or rule.origin == :ua or Map.get(rule, :scope) == Map.get(ctx, :scope),
         CSS.matches?(rule.selector, ctx),
+        Map.get(rule, :cq) == nil or Browser.Container.match?(rule.cq, ctx),
         {prop, value, important?} <- rule.decls do
       # (what the page says about a shadow host beats the `:host` rules in its shadow tree)
       {prop,
@@ -717,6 +723,17 @@ defmodule Browser.Style do
       end
 
     [{"flex-grow", grow, imp}, {"flex-shrink", shrink, imp}, {"flex-basis", basis, imp}]
+  end
+
+  # `container: <name> / <type>`
+  defp expand({"container", value, imp}) do
+    {name, type} =
+      case String.split(value, "/", parts: 2) do
+        [name, type] -> {String.trim(name), String.trim(type)}
+        [name] -> {String.trim(name), "normal"}
+      end
+
+    [{"container-name", name, imp}, {"container-type", type, imp}]
   end
 
   # `flex-flow: <direction> || <wrap>`: what is not given is the initial value
@@ -1314,7 +1331,9 @@ defmodule Browser.Style do
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
     start_signs()
+    Process.put(:style_no_share, Map.get(idx, :cq, false))
     pruned = nodes |> prune_children(nil, idx) |> resolve_counters(idx)
+    Process.delete(:style_no_share)
     Process.delete(:style_share)
     Process.delete(:style_inline)
     Process.delete(:style_custom)
@@ -1342,7 +1361,9 @@ defmodule Browser.Style do
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
     start_signs()
+    Process.put(:style_no_share, Map.get(idx, :cq, false))
     pruned = nodes |> prune_children(nil, idx) |> resolve_counters(idx)
+    Process.delete(:style_no_share)
     Process.delete(:style_share)
     Process.delete(:style_inline)
     end_signs()
