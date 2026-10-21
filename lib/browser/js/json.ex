@@ -14,7 +14,11 @@ defmodule Browser.JS.Json do
   defguardp is_plain(c) when c >= 0x20 and c < 0x80 and c != ?" and c != ?\\
 
   defp get(o, k), do: Interp.get(o, k)
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
+  # (a direct walk of the argument list: `Enum.at/3` slices the list, four calls and a list
+  # for each argument)
+  defp arg([a | _], 0), do: a
+  defp arg([_ | rest], i), do: arg(rest, i - 1)
+  defp arg([], _i), do: :undefined
   defp object?({:obj, _}), do: true
   defp object?(_), do: false
 

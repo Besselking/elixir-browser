@@ -9,7 +9,11 @@ defmodule Browser.JS.BigInt do
   import Browser.JS.Interp, except: [get: 2, put: 3, loose_eq: 2]
   alias Browser.JS.Interp
 
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
+  # (a direct walk of the argument list: `Enum.at/3` slices the list, four calls and a list
+  # for each argument)
+  defp arg([a | _], 0), do: a
+  defp arg([_ | rest], i), do: arg(rest, i - 1)
+  defp arg([], _i), do: :undefined
 
   @mix_error "Cannot mix BigInt and other types, use explicit conversions"
 

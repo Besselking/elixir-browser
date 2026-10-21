@@ -16,7 +16,11 @@ defmodule Browser.JS.Iterators do
   @iterator {:symbol, :iterator, "Symbol.iterator"}
   @max_safe 9_007_199_254_740_991
 
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
+  # (a direct walk of the argument list: `Enum.at/3` slices the list, four calls and a list
+  # for each argument)
+  defp arg([a | _], 0), do: a
+  defp arg([_ | rest], i), do: arg(rest, i - 1)
+  defp arg([], _i), do: :undefined
   defp get(o, k), do: Interp.get(o, k)
 
   # ── plumbing ───────────────────────────────────────────────

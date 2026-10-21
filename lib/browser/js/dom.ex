@@ -25,7 +25,15 @@ defmodule Browser.JS.DOM do
 
   # ── state ──────────────────────────────────────────────────
 
-  defp st, do: Process.get(:dom)
+  # (`:erlang.get/1` is an instruction of the JIT; `Process.get/1` is a call around it, and the
+  # state is read for each node)
+  defp st do
+    case :erlang.get(:dom) do
+      :undefined -> nil
+      s -> s
+    end
+  end
+
   defp put_st(s), do: Process.put(:dom, s)
 
   # The fields of the state (and of the saved fields of a realm) that hold no JS value: the
@@ -846,7 +854,7 @@ defmodule Browser.JS.DOM do
 
   @doc "The frame document a timer made now belongs to (nil in the page's own document)."
   def timer_realm do
-    case Process.get(:dom) do
+    case st() do
       %{doc: d, main: m} when d != m -> d
       _ -> nil
     end
@@ -867,7 +875,7 @@ defmodule Browser.JS.DOM do
 
   @doc "The document of the running realm, or nil in a runtime with no document."
   def current_doc_or_nil do
-    case Process.get(:dom) do
+    case st() do
       %{doc: d} -> d
       _ -> nil
     end
@@ -2743,7 +2751,11 @@ defmodule Browser.JS.DOM do
 
   defp this_nid(this), do: nid_of(this)
 
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
+  # (a direct walk of the argument list: `Enum.at/3` slices the list, four calls and a list
+  # for each argument)
+  defp arg([a | _], 0), do: a
+  defp arg([_ | rest], i), do: arg(rest, i - 1)
+  defp arg([], _i), do: :undefined
   defp float(n), do: n * 1.0
   defp nodes_array(ids), do: new_array(wrap_all(ids))
 

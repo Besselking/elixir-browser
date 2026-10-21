@@ -54,6 +54,9 @@ defmodule Browser.JS.Compile do
     * the unary operators, `typeof` of a global name, `delete` of a property and the
       binary operators;
     * property reads, calls, `new`, array literals and object literals;
+    * the creation of a function expression or an arrow that the resolver rewrote, also
+      with the name that a declaration or an assignment to a slot gives it (see "Function
+      creation");
     * assignments, compound assignments, `++` and `--` to a slot or to a property;
     * destructuring assignments and declarations with a pattern, which give the pattern
       with compiled expressions to `Interp.bind_pattern/4`;
@@ -84,9 +87,12 @@ defmodule Browser.JS.Compile do
   get an add cell (step A3), which gives the record its new shape with no walk of the
   prototype chain.
 
-  An object literal with constant keys and plain values gets the shape of its keys when it
-  compiles (step A3). When it runs, it gets the id of the object first, then it evaluates
-  the values, and then it writes the record in one write (`Interp.put_literal/4`). `new`
+  An object literal with constant keys gets the shape of its keys when it compiles (step
+  A3), when its values are plain values, functions or methods. When it runs, it gets the id
+  of the object first, then it evaluates the values, and then it writes the record in one
+  write (`Interp.put_literal/4`). A function value takes its key as its name, and a method
+  gets the id as its home. Every other literal makes the object first and then defines its
+  properties in source order, as `Interp.ev/2` does. `new`
   of a plain function of the compiled code takes the short way of
   `Interp.construct_new/3`, which reads the record of the function once.
 
@@ -100,7 +106,7 @@ defmodule Browser.JS.Compile do
 
     * a block, a `for`, a `for-in`, a `for-of`, a `switch` or a `catch` that makes a block
       frame;
-    * a literal with a spread or a method;
+    * an array literal with a spread or a hole;
     * a call with a callee that the tree reads by name;
     * some rare forms of assignment and of `delete`.
 
@@ -114,7 +120,8 @@ defmodule Browser.JS.Compile do
   Every other node stays on the tree walker with all the nodes in it. Its closure gives the
   node to `Interp.ev/2`, `Interp.fstmt/3` or `Interp.tail_value/2`. These nodes are:
 
-    * functions and classes;
+    * classes, generators, async functions and the functions that the resolver did not
+      rewrite;
     * the reads and writes of a name that the resolver did not put in a slot;
     * `typeof` of a name that is not global, and `delete` of a name;
     * `super` and `import`;
@@ -127,6 +134,18 @@ defmodule Browser.JS.Compile do
   frame of a call, the operators, the property reads and writes, and the slot writes.
   Thus a compiled body and the tree walker give the same values, errors, steps and heap
   ids.
+
+  ## Function creation
+
+  At each creation of a function object, `make_fn/3` in `Interp` finds some facts of the
+  function node: the `Info` of the resolver, the number of the parameter name slots and
+  the key of the cache. A compiled creation finds these facts once, when the body that
+  holds the node compiles. When it runs, it adds one to the closure count, reads the root
+  of the frame and the cache, and makes the record of `make_fn/3` with one `alloc/1`
+  (`Interp.closure_map/2`). On the tree, `ev_named/3` and `name_fn/2` write the name of
+  the binding into the record after the creation. A compiled creation puts that name into
+  the record before the `alloc/1`. Thus the record, the heap ids and the steps are the
+  same as on the tree.
 
   ## Which functions compile
 
@@ -303,6 +322,7 @@ defmodule Browser.JS.Compile do
   alias Browser.JS.{Async, Awaits, Interp, Num}
   require Async
   require Interp
+  require Browser.JS.Obj, as: Obj
   alias Browser.JS.Resolve.Info
   require Browser.JS.Fast, as: Fast
 
@@ -585,7 +605,8 @@ defmodule Browser.JS.Compile do
 
   # The node shapes that take the name of the binding that they are assigned to (as the
   # guard of the same name in `Interp`). An assignment of such a value names it through
-  # `Interp.ev_named/3`, so it stays on the tree.
+  # `Interp.ev_named/3`, so it stays on the tree. A function that the resolver rewrote
+  # compiles with its name instead (`hinted?/2`).
   defguardp nameable(e)
             when (elem(e, 0) in [:fn, :class] and elem(e, 1) == nil) or
                    elem(e, 0) in [:gen, :async]
@@ -885,13 +906,25 @@ defmodule Browser.JS.Compile do
     end
   end
 
+  # The three constant globals. Their binding is not writable and not configurable, so a
+  # `{:gref}` read (a read that no scope shadows) always gives the value. (Not in check
+  # mode, where each `{:gref}` read passes the landing check.)
+  @const_globals %{"undefined" => :undefined, "NaN" => :nan, "Infinity" => :infinity}
+
+  if not @check do
+    defp expr_node({:gref, name}) when is_map_key(@const_globals, name) do
+      v = :erlang.map_get(name, @const_globals)
+      fn _env -> v end
+    end
+  end
+
   defp expr_node({:gref, name} = form) do
     # (the by-name read of `ev_id/2` takes this node, so it is built once)
     id = {:id, name}
 
     fn env ->
       if @check, do: Interp.check_landing(form, env)
-      Interp.ev_gref(id, Interp.root(env))
+      Interp.ev_own(id, Interp.root(env))
     end
   end
 
@@ -952,12 +985,18 @@ defmodule Browser.JS.Compile do
     end
   end
 
-  defp expr_node({kind, "=", {:slot, d, i, name}, value} = node)
+  # (a function value takes the name of the slot, as `ev_named/3` names it on the tree)
+  defp expr_node({kind, "=", {:slot, d, i, name} = target, value} = node)
        when kind in [:assign, :sassign] do
-    if nameable(value) do
-      fallback(node)
-    else
-      one(env, opnd(value), v, assign_slot(env, d, i, name, v))
+    cond do
+      hinted?(value, target) ->
+        one(env, {:f, hinted(value, name)}, v, assign_slot(env, d, i, name, v))
+
+      nameable(value) ->
+        fallback(node)
+
+      true ->
+        one(env, opnd(value), v, assign_slot(env, d, i, name, v))
     end
   end
 
@@ -1058,38 +1097,75 @@ defmodule Browser.JS.Compile do
     end
   end
 
+  # An object literal (design r16 4.9). A literal with constant keys whose values are plain
+  # values, functions that the resolver rewrote and methods takes the fast path
+  # `:literal`. Every other literal makes its object first and then defines its properties
+  # in source order, as `ev/2` does (`object/1`).
   defp expr_node({:object, props}) do
-    if Enum.all?(props, &plain_prop?/1) do
-      pcs = for {:init, {:str, k}, v} <- props, do: {k, opnd(v)}
-
-      if Fast.on?(:literal) do
+    cond do
+      Enum.all?(props, &lit_prop?/1) and Fast.on?(:literal) ->
         # The object gets its id first, as `ev/2` makes the object before it evaluates the
         # values, and its record in one write at the end (fast path `:literal`, see "object
         # literals" in `Browser.JS.Interp`). Nothing can see the object before the literal
-        # is done: no name refers to it, and the literal defines no method that needs the
-        # object as its home (`plain_prop?/1`). The key layout comes from the record API when the
-        # literal compiles, as `Interp.define_data/3` would make it: a key that comes two
-        # times keeps its first place and its last value. The layout holds only the
-        # constant keys and a shape. A shape holds no heap id and stays correct when the
-        # transition table is erased (`Browser.JS.Shape`), so the closure keeps it, also
-        # in a new heap.
-        layout = pcs |> Enum.map(&elem(&1, 0)) |> Browser.JS.Obj.literal_keys()
-        literal(layout, Enum.map(pcs, &elem(&1, 1)))
-      else
+        # is done: no name refers to it, and a method of the literal keeps only the id as
+        # its home (a garbage collection runs only between tasks). The key layout comes
+        # from the record API when the literal compiles, as `Interp.define_data/3` would
+        # make it: a key that comes two times keeps its first place and its last value.
+        # The layout holds only the constant keys and a shape. A shape holds no heap id and
+        # stays correct when the transition table is erased (`Browser.JS.Shape`), so the
+        # closure keeps it, also in a new heap. A function value takes its key as its name
+        # when the literal compiles.
+        layout = Obj.literal_keys(for {:init, {:str, k}, _} <- props, do: k)
+        vs = for {:init, {:str, k}, v} <- props, do: lit_value(k, v)
+
+        if Enum.any?(vs, &match?({:m, _, _}, &1)),
+          do: home_literal(layout, vs),
+          else: literal(layout, vs)
+
+      # (the old path, with the fast path `:literal` off)
+      Enum.all?(props, &plain_prop?/1) ->
+        pcs = for {:init, {:str, k}, v} <- props, do: {k, opnd(v)}
+
         fn env ->
           obj = Interp.new_object()
           props(pcs, obj, env)
           obj
         end
-      end
-    else
-      shell({:object, Enum.map(props, &cprop/1)})
+
+      true ->
+        object(props)
     end
   end
 
+  # (a comma expression of two to four parts is one closure, with no walk of the list)
   defp expr_node({:seq, es}) do
     cs = Enum.map(es, &expr/1)
-    fn env -> seq(cs, env) end
+
+    case cs do
+      [c1, c2] ->
+        fn env ->
+          c1.(env)
+          c2.(env)
+        end
+
+      [c1, c2, c3] ->
+        fn env ->
+          c1.(env)
+          c2.(env)
+          c3.(env)
+        end
+
+      [c1, c2, c3, c4] ->
+        fn env ->
+          c1.(env)
+          c2.(env)
+          c3.(env)
+          c4.(env)
+        end
+
+      _ ->
+        fn env -> seq(cs, env) end
+    end
   end
 
   # (as `ev/2`: the special forms of `typeof` read a name that can be missing)
@@ -1187,7 +1263,7 @@ defmodule Browser.JS.Compile do
 
     fn env ->
       if @check, do: Interp.check_landing(form, env)
-      Interp.ev_id(id, up(env, d))
+      Interp.ev_own(id, up(env, d))
     end
   end
 
@@ -1230,7 +1306,114 @@ defmodule Browser.JS.Compile do
   defp expr_node({:cps_leaf, i}),
     do: fn _env -> :erlang.element(i + 1, :erlang.get(:js_cps_vals)) end
 
+  # A function expression or an arrow that the resolver rewrote (see "Function creation").
+  # Every other function stays on the tree.
+  defp expr_node({:fn, name, _, _, _, %Info{rewritten: true}} = node), do: creation(node, name)
+
   defp expr_node(node), do: fallback(node)
+
+  # ── function creation ──────────────────────────────────────
+
+  # The facts of the rewritten function node `node` that `make_fn/3` finds at each
+  # creation: the name of the node, the parts of the record, the number of the parameter
+  # name slots, the key of the cache and the self name test of check mode.
+  defp fn_facts({:fn, node_name, params, body, mode, %Info{} = info}) do
+    {node_name, params, body, mode, info.src, info,
+     info.size - 5 - length(info.hidden) - length(info.template), {:jsc, info.uid},
+     is_binary(node_name) and mode == false}
+  end
+
+  # The work of a creation when it runs, for the facts `t` of `fn_facts/1`: the function
+  # object with the name `name` and the other keys `extra` of its closure record (the home
+  # of a method). `extra` is a keyword list when the code compiles.
+  defmacrop new_closure(t, env, name, extra) do
+    fields =
+      quote do
+        [
+          name: unquote(name),
+          params: params,
+          body: body,
+          mode: mode,
+          scope: env,
+          src: src,
+          info: info,
+          root: root,
+          nnames: nnames
+        ]
+      end
+
+    quote do
+      {node_name, params, body, mode, src, info, nnames, key, named?} = unquote(t)
+      env = unquote(env)
+
+      if @check do
+        Interp.check_closure_env(env)
+        Interp.check_self_slot(info, node_name, named?)
+      end
+
+      # (the closure count only goes up, see `make_fn/3`)
+      :erlang.put(:js_fns, :erlang.get(:js_fns) + 1)
+      root = Interp.root(env)
+      if @check, do: Interp.check_root(root, node_name)
+      c = Interp.closure_map(unquote(fields ++ extra), key)
+
+      {:obj,
+       Interp.alloc(
+         Obj.function_record(class: :function, fun: {:closure, c}, proto: Interp.proto(:function))
+       )}
+    end
+  end
+
+  # The creation of a function expression or an arrow that the resolver rewrote (design
+  # r16 4.8). At each creation, `make_fn/3` in `Interp` finds the `Info` in the place of the
+  # source text, the number of the parameter name slots and the key of the cache. The
+  # compiled creation finds these facts once, when the body that holds the node compiles.
+  # When it runs, it does the remaining work of `make_fn/3` in the same order: the checks
+  # of check mode, the closure count, the root of the frame, the read of the cache and one
+  # `alloc/1` of the same record (`Interp.closure_map/2`). A rewritten function keeps its
+  # own name in a slot of its frame, so it gets no scope for its name. The closure keeps
+  # only syntax, the `Info` and constants (the capture rule).
+  #
+  # `name` is the name of the function object: the name of the node, or the name that the
+  # tree gives with `ev_named/3` and `name_fn/2` after the creation. The record is then the
+  # same, with one write less.
+  defp creation(node, name) do
+    t = fn_facts(node)
+    fn env -> new_closure(t, env, name, []) end
+  end
+
+  # A creation whose name is known only when it runs (the key of a computed property).
+  defp new_fn(t, env, name), do: new_closure(t, env, name, [])
+
+  # The creation of a method or an accessor of an object literal: its home is the literal
+  # `home`, as `Interp.method_home/2` sets it on the tree.
+  defp new_fn(t, env, name, home), do: new_closure(t, env, name, home: home)
+
+  # True when the value `e` of a declaration or an assignment to the target `target`
+  # compiles with its name: an anonymous function that the resolver rewrote, and a slot
+  # with a name or a pattern. A pattern gives no name (`ev_named/3` evaluates the value with
+  # `ev/2`), so the value compiles with no name.
+  defp hinted?({:fn, nil, _, _, _, %Info{rewritten: true}}, target) do
+    case target do
+      {:slot, _, _, name} -> is_binary(name)
+      {:objpat, _, _} -> true
+      {:arrpat, _} -> true
+      _ -> false
+    end
+  end
+
+  defp hinted?(_e, _target), do: false
+
+  # The name that the target gives to a function value, or `nil`.
+  defp hint({:slot, _, _, name}), do: name
+  defp hint(_pat), do: nil
+
+  # The compiled creation of the function value `e` with the name `name` (a node of the
+  # body, so it counts for the memory bound).
+  defp hinted({:fn, nil, _, _, _, _} = e, name) do
+    count()
+    creation(e, name)
+  end
 
   # The operand form of `e` (see the section on operands). A negative number and `void` of
   # a number are constants, as in `expr/1`. The markers `{:in_tdz}` and `{:unnamed}` do
@@ -1239,6 +1422,14 @@ defmodule Browser.JS.Compile do
   defp opnd({:slot, 0, i, name}), do: {:s, i, name}
   defp opnd({:unary, "-", {:num, n}}), do: {:k, Num.neg(n)}
   defp opnd({:unary, "void", {:num, _}}), do: {:k, :undefined}
+
+  # (a parent reads `undefined`, `NaN` and `Infinity` inline, as `expr_node/1` makes them
+  # constants)
+  if not @check do
+    defp opnd({:gref, name}) when is_map_key(@const_globals, name),
+      do: {:k, :erlang.map_get(name, @const_globals)}
+  end
+
   defp opnd({:in_tdz, _names, e}), do: opnd(e)
   defp opnd({:unnamed, e}), do: opnd(e)
   defp opnd(e), do: {:f, expr(e)}
@@ -1249,9 +1440,20 @@ defmodule Browser.JS.Compile do
     do: Enum.all?(items, fn a -> a != :hole and not match?({:spread, _}, a) end)
 
   # A property of an object literal with a constant key and a value that takes no name.
-  # `ev/2` names a function value after its key, which stays on the tree.
   defp plain_prop?({:init, {:str, _}, v}), do: not nameable(v) and not method_node?(v)
   defp plain_prop?(_), do: false
+
+  # A property of an object literal for the fast path `:literal`: a constant key and a value
+  # that takes no name, or a function or a method that the resolver rewrote.
+  defp lit_prop?({:init, {:str, _}, v} = p), do: plain_prop?(p) or rewritten_fn?(v)
+  defp lit_prop?(_), do: false
+
+  # A function expression, an arrow or a method that the resolver rewrote (a creation
+  # compiles, see "function creation").
+  defp rewritten_fn?({:fn, name, _, _, _, %Info{rewritten: true}}),
+    do: name == nil or match?({:method, _}, name)
+
+  defp rewritten_fn?(_), do: false
 
   # (as `method_node?/1` in `Interp`)
   defp method_node?({:fn, {:method, _}, _, _, _, _}), do: true
@@ -1313,6 +1515,206 @@ defmodule Browser.JS.Compile do
       Interp.fill_new(id, proto, layout, lit_vals(os, env, []))
       {:obj, id}
     end
+  end
+
+  # The value form of the property `k: v` of an object literal for the fast path
+  # `:literal`: an operand form, a function with the key as its name, or `{:m, facts,
+  # name}` for a method, which needs the object as its home.
+  defp lit_value(k, {:fn, nil, _, _, _, %Info{rewritten: true}} = v), do: {:f, hinted(v, k)}
+
+  defp lit_value(k, {:fn, {:method, _} = name, _, _, _, %Info{rewritten: true}} = v) do
+    count()
+    {:m, fn_facts(v), method_name(name, k)}
+  end
+
+  defp lit_value(_k, v), do: opnd(v)
+
+  # The closure of an object literal of the fast path `:literal` with a method: the
+  # method gets the id of the object as its home before the object has its record. The
+  # values go to `Interp.fill_new/4` as a list in source order.
+  defp home_literal(layout, vs) do
+    fn env ->
+      id = Interp.reserve()
+      proto = Interp.proto(:object)
+      Interp.fill_new(id, proto, layout, home_vals(vs, env, {:obj, id}, []))
+      {:obj, id}
+    end
+  end
+
+  defp home_vals([], _env, _home, acc), do: :lists.reverse(acc)
+
+  defp home_vals([{:m, t, name} | rest], env, home, acc),
+    do: home_vals(rest, env, home, [new_fn(t, env, name, home) | acc])
+
+  defp home_vals([vo | rest], env, home, acc) do
+    v = av(vo, env)
+    home_vals(rest, env, home, [v | acc])
+  end
+
+  # The name of a method with the key name `fname` (a string or `nil`), as `name_fn/2` in
+  # `Interp` gives it: a method whose node has a name keeps it.
+  defp method_name({:method, n} = name, fname) when is_binary(n) or fname == nil, do: name
+  defp method_name({:method, _}, fname), do: {:method, fname}
+
+  # The closure of every other object literal, as `ev/2` runs it: a new object, then each
+  # property in source order (`oprops/3`). A property is a form of `oprop/1`.
+  defp object(props) do
+    forms = Enum.map(props, &oprop/1)
+
+    fn env ->
+      obj = Interp.new_object()
+      oprops(forms, obj, env)
+      obj
+    end
+  end
+
+  # The form of a property: `{:init, key, value}`, `{:proto, operand}`, `{:spread, operand}`
+  # or `{:getter | :setter, key, function}`. A key is `{:k, string}` or `{:c, operand}` for a
+  # computed key. A value is `{:v, operand}`, `{:fn, facts}` for a function that takes the
+  # computed key as its name, `{:m, facts, name}` for a method (the name is `:key` for a
+  # computed key), or `{:tree, node, method?}` for a value that `Interp.ev_named/3` makes
+  # on the tree (a class, a generator, an async function or a function that the resolver
+  # did not rewrite). A getter or a setter is `{:a, facts, name}`, `{:a, facts, prefix}`
+  # for a computed key (`prefix` is "get " or "set "), or `{:tree, node, prefix}`.
+  defp oprop({:init, {:str, k}, v}) do
+    cond do
+      plain_prop?({:init, {:str, k}, v}) -> {:init, {:k, k}, {:v, opnd(v)}}
+      rewritten_fn?(v) and elem(v, 1) == nil -> {:init, {:k, k}, {:v, {:f, hinted(v, k)}}}
+      rewritten_fn?(v) -> {:init, {:k, k}, method_value(v, method_name(elem(v, 1), k))}
+      true -> {:init, {:k, k}, tree_value(v)}
+    end
+  end
+
+  defp oprop({:init, {:computed, e}, v}) do
+    key = {:c, opnd(e)}
+
+    cond do
+      not nameable(v) and not method_node?(v) ->
+        {:init, key, {:v, opnd(v)}}
+
+      rewritten_fn?(v) and elem(v, 1) == nil ->
+        count()
+        {:init, key, {:fn, fn_facts(v)}}
+
+      rewritten_fn?(v) ->
+        {:init, key, method_value(v, :key)}
+
+      true ->
+        {:init, key, tree_value(v)}
+    end
+  end
+
+  defp oprop({:proto, e}), do: {:proto, opnd(e)}
+  defp oprop({:spread, e}), do: {:spread, opnd(e)}
+
+  defp oprop({kind, key, fun}) when kind in [:getter, :setter] do
+    prefix = if kind == :getter, do: "get ", else: "set "
+
+    case {key, fun} do
+      {{:str, k}, {:fn, {:method, _}, _, _, _, %Info{rewritten: true}}} ->
+        count()
+        {kind, {:k, k}, {:a, fn_facts(fun), {:method, prefix <> k}}}
+
+      {{:computed, e}, {:fn, {:method, _}, _, _, _, %Info{rewritten: true}}} ->
+        count()
+        {kind, {:c, opnd(e)}, {:a, fn_facts(fun), prefix}}
+
+      {{:str, k}, _} ->
+        {kind, {:k, k}, trace(:ev, fun, {:tree, fun, prefix})}
+
+      {{:computed, e}, _} ->
+        {kind, {:c, opnd(e)}, trace(:ev, fun, {:tree, fun, prefix})}
+    end
+  end
+
+  defp method_value(v, name) do
+    count()
+    {:m, fn_facts(v), name}
+  end
+
+  # A value that stays on the tree. The coverage test sees it as a node on the tree.
+  defp tree_value(v), do: trace(:ev, v, {:tree, v, method_node?(v)})
+
+  # The properties of an object literal of `object/1`, from the first to the last.
+  defp oprops([], _obj, _env), do: :ok
+
+  defp oprops([p | rest], obj, env) do
+    oprop_run(p, obj, env)
+    oprops(rest, obj, env)
+  end
+
+  # One property, as the clause of `ev/2` defines it: the key (a computed key converts
+  # before the value), the value with its name, then the property.
+  defp oprop_run({:init, kf, vf}, obj, env) do
+    k = okey(kf, env)
+    Interp.define_data(obj, k, ovalue(vf, k, obj, env))
+  end
+
+  # (a value that is not an object or `null` does not change the prototype)
+  defp oprop_run({:proto, o}, obj, env) do
+    case av(o, env) do
+      {:obj, _} = p -> Browser.JS.Props.set_prototype_of(obj, p)
+      :null -> Browser.JS.Props.set_prototype_of(obj, :null)
+      _ -> :ok
+    end
+  end
+
+  defp oprop_run({:spread, o}, obj, env), do: Interp.spread_into(obj, av(o, env))
+
+  defp oprop_run({:getter, kf, af}, obj, env) do
+    k = okey(kf, env)
+    Browser.JS.Props.define_accessor(obj, k, get: accessor(af, k, obj, env))
+  end
+
+  defp oprop_run({:setter, kf, af}, obj, env) do
+    k = okey(kf, env)
+    Browser.JS.Props.define_accessor(obj, k, set: accessor(af, k, obj, env))
+  end
+
+  defp okey({:k, k}, _env), do: k
+  defp okey({:c, o}, env), do: Interp.to_key(av(o, env))
+
+  # The value of a property with the key `k` of the object `obj` (see `oprop/1`).
+  defp ovalue({:v, o}, _k, _obj, env), do: av(o, env)
+  defp ovalue({:fn, t}, k, _obj, env), do: new_fn(t, env, Interp.key_fn_name(k))
+
+  defp ovalue({:m, t, :key}, k, obj, env),
+    do: new_fn(t, env, method_name(elem(t, 0), Interp.key_fn_name(k)), obj)
+
+  defp ovalue({:m, t, name}, _k, obj, env), do: new_fn(t, env, name, obj)
+
+  # (as `ev/2`: only a method that this literal defines gets the literal as its home)
+  defp ovalue({:tree, node, method?}, k, obj, env) do
+    fname = Interp.key_fn_name(k)
+    v = Interp.ev_named(node, env, if(fname, do: {:id, fname}))
+
+    if method? do
+      Interp.name_fn(v, fname)
+      Interp.method_home(v, obj)
+    end
+
+    v
+  end
+
+  # A getter or a setter: the function with the object as its home and the name "get k" or
+  # "set k", as `ev/2` makes it.
+  defp accessor({:a, t, {:method, _} = name}, _k, obj, env), do: new_fn(t, env, name, obj)
+
+  defp accessor({:a, t, prefix}, k, obj, env) do
+    name =
+      case Interp.key_fn_name(k) do
+        nil -> elem(t, 0)
+        fname -> {:method, prefix <> fname}
+      end
+
+    new_fn(t, env, name, obj)
+  end
+
+  defp accessor({:tree, fun, prefix}, k, obj, env) do
+    f = Interp.ev(fun, env)
+    Interp.method_home(f, obj)
+    if fname = Interp.key_fn_name(k), do: Interp.accessor_name(f, prefix <> fname)
+    f
   end
 
   # The values of a comma expression, from left to right. The value is the last one.
@@ -1833,6 +2235,45 @@ defmodule Browser.JS.Compile do
     end
   end
 
+  # An expression statement is its own link: the link runs the expression and goes on,
+  # with no closure of the statement between them and no completion case (an expression
+  # completes normally or throws). Not in check mode, where each statement passes the
+  # completion check.
+  if not @check do
+    defp link(loc, {:expr, e}, rest) do
+      count()
+      ec = expr(e)
+
+      case {loc, rest} do
+        {nil, nil} ->
+          fn env ->
+            ec.(env)
+            :ok
+          end
+
+        {nil, rest} ->
+          fn env ->
+            ec.(env)
+            rest.(env)
+          end
+
+        {loc, nil} ->
+          fn env ->
+            :erlang.put(:js_pos, loc)
+            ec.(env)
+            :ok
+          end
+
+        {loc, rest} ->
+          fn env ->
+            :erlang.put(:js_pos, loc)
+            ec.(env)
+            rest.(env)
+          end
+      end
+    end
+  end
+
   defp link(loc, s, rest), do: link(loc, s, stmt(s, []), rest)
 
   # The last statement of a list without a position is its own link, but not in check
@@ -2076,7 +2517,11 @@ defmodule Browser.JS.Compile do
   defp decl_form(kind, pat, init), do: {:bind, cpat(pat), kind, decl_value(pat, init)}
 
   defp decl_value(_pat, nil), do: {:k, :undefined}
-  defp decl_value(pat, init) when nameable(init), do: {:f, named(init, pat)}
+
+  defp decl_value(pat, init) when nameable(init) do
+    if hinted?(init, pat), do: {:f, hinted(init, hint(pat))}, else: {:f, named(init, pat)}
+  end
+
   defp decl_value(_pat, init), do: opnd(init)
 
   # The write of a declaration, with the checks of check mode. A frame below the size of
@@ -3140,18 +3585,6 @@ defmodule Browser.JS.Compile do
   defp carg(:hole), do: :hole
   defp carg({:spread, e}), do: {:spread, cc(e)}
   defp carg(e), do: cc(e)
-
-  # A property of an object literal. A value that takes a name (a function or a class
-  # without a name, or a method) keeps its node, because `ev/2` reads its shape. Getters
-  # and setters are functions, which the heap keeps, so they keep their nodes too.
-  defp cprop({:init, key, v}) do
-    v = if nameable(v) or method_node?(v), do: v, else: cc(v)
-    {:init, ckey(key), v}
-  end
-
-  defp cprop({:proto, e}), do: {:proto, cc(e)}
-  defp cprop({:spread, e}), do: {:spread, cc(e)}
-  defp cprop({kind, key, fun}) when kind in [:getter, :setter], do: {kind, ckey(key), fun}
 
   defp ckey({:computed, e}), do: {:computed, cc(e)}
   defp ckey(k), do: k

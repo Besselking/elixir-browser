@@ -16,7 +16,11 @@ defmodule Browser.JS.WebAssembly do
   alias Browser.Wasm
   alias Browser.Wasm.{Error, Func, Global, Memory, Num, Table, Tag}
 
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
+  # (a direct walk of the argument list: `Enum.at/3` slices the list, four calls and a list
+  # for each argument)
+  defp arg([a | _], 0), do: a
+  defp arg([_ | rest], i), do: arg(rest, i - 1)
+  defp arg([], _i), do: :undefined
   defp heap(id), do: Interp.deref(id)
 
   @doc """

@@ -11,12 +11,20 @@ defmodule Browser.JS.FunctionProto do
   @has_instance {:symbol, :hasInstance, "Symbol.hasInstance"}
 
   defp get(o, k), do: Interp.get(o, k)
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
+  # (a direct walk of the argument list: `Enum.at/3` slices the list, four calls and a list
+  # for each argument)
+  defp arg([a | _], 0), do: a
+  defp arg([_ | rest], i), do: arg(rest, i - 1)
+  defp arg([], _i), do: :undefined
 
   def install(p) do
     def_fn(p, "call", 1, fn this, args ->
       callable!(this, "Function.prototype.call")
-      call(this, arg(args, 0), Enum.drop(args, 1))
+
+      case args do
+        [t | rest] -> call(this, t, rest)
+        [] -> call(this, :undefined, [])
+      end
     end)
 
     def_fn(p, "apply", 2, fn this, args ->

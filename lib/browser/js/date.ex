@@ -15,7 +15,11 @@ defmodule Browser.JS.Date do
   @days ~w(Sun Mon Tue Wed Thu Fri Sat)
   @months ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
 
-  defp arg(args, i), do: Enum.at(args, i, :undefined)
+  # (a direct walk of the argument list: `Enum.at/3` slices the list, four calls and a list
+  # for each argument)
+  defp arg([a | _], 0), do: a
+  defp arg([_ | rest], i), do: arg(rest, i - 1)
+  defp arg([], _i), do: :undefined
 
   def install(scope) do
     proto = new_object()

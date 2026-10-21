@@ -61,8 +61,8 @@ defmodule Browser.JS.CompileCoverageTest do
 
   # The shells that stay on the tree (design r16 8.3): a statement with a block frame, a
   # call whose callee the tree reads by name, through `super` or through an optional chain,
-  # a private name, a literal with a spread or a method, a logical assignment, and the rare
-  # targets of an assignment.
+  # a private name, an array literal with a spread, a logical assignment, and the rare
+  # targets of an assignment. An object literal compiles (round 17).
   @allowed_shell MapSet.new(
                    [
                      {:switch, :framed},
@@ -77,7 +77,6 @@ defmodule Browser.JS.CompileCoverageTest do
                      {:call, :super_member},
                      {:member, :priv},
                      {:binary, :priv},
-                     :object,
                      :array
                    ] ++
                      for(
@@ -128,7 +127,9 @@ defmodule Browser.JS.CompileCoverageTest do
     "function f(o) { const {a, b: [c = 1] = []} = o; let {[o.k]: d, ...e} = o, g; var [h, , ...i] = o; ({a: o.x, b: o[o.k] = 2} = o); return [a, c, d, e, g, h, i] }",
     "function f(o) { const g = function () {}, h = () => 1; let k = class {}; var {m = function () {}} = o; return [g, h, k, m] }",
     "function f(o, k) { 'use strict'; delete o[k]; delete o.a; return delete o[k + 1] }",
-    "function f(x) { do { x-- } while (x > 0); if (x) ; else ; for (;;) ; return [arguments, typeof q, typeof arguments, /a/g] }"
+    "function f(x) { do { x-- } while (x > 0); if (x) ; else ; for (;;) ; return [arguments, typeof q, typeof arguments, /a/g] }",
+    # (r17) the creation of a function expression or an arrow, also with a name hint
+    "function f(o) { var g = function () {}, {h = () => 1} = o; let k; k = () => 2; return [g, h, k, x => x, function n() { return n }] }"
   ]
 
   # The programs of bench/js_runtime.exs. The script binds its program lists to variables,
@@ -272,8 +273,8 @@ defmodule Browser.JS.CompileCoverageTest do
 
   test "the bench programs keep no hot kind on the tree" do
     # The nine programs, the async programs and the step 3 programs use only kinds that
-    # compile: the functions and the classes that they make are the only nodes on the
-    # tree.
+    # compile: the classes, the generators and the async functions that they make are the
+    # only nodes on the tree. A function expression and an arrow compile (round 17).
     nodes =
       for src <- bench(),
           {how, _} = n <- elem(tree_nodes(src), 0),
@@ -281,7 +282,34 @@ defmodule Browser.JS.CompileCoverageTest do
           uniq: true,
           do: n
 
-    assert Enum.sort(nodes) --
-             [{:ev, :class}, {:ev, :fn}, {:ev, :gen}, {:ev, :async}] == []
+    assert Enum.sort(nodes) -- [{:ev, :class}, {:ev, :gen}, {:ev, :async}] == []
+  end
+
+  test "a rewritten function expression or arrow compiles, also with the name of its binding" do
+    # (r17, design r16 4.8) a declaration, an assignment to a slot, a pattern, an argument
+    # and a named function expression; a class value keeps `ev_named/3` on the tree
+    src =
+      "function f(o) { var g = function () {}; let h = () => 1; const k = function () {}, " <>
+        "{m = 1} = o, [n] = [function () {}]; var p; p = () => 2; o.q = function () {}; " <>
+        "o.r(x => x, function s() { return s }); return [g, h, k, m, n, p] }"
+
+    assert {[], n} = tree_nodes(src)
+    assert n > 1
+    assert {[ev: :class], 1} = tree_nodes("function f() { var c = class {}; return c }")
+  end
+
+  test "an object literal compiles, with its functions, methods and accessors" do
+    # (r17, design r16 4.9) the fast path and the literal in source order; a class value
+    # and a generator method stay on the tree as values, not the literal around them
+    src =
+      "function f(o, k) { return [{a: 1, f: function () {}, g: () => 2, m() { return this.x }}, " <>
+        "{a: o, ...o, __proto__: o, [k]: function () {}, [k + 1]() {}, get b() { return 1 }, " <>
+        "set b(v) {}, get [k + 2]() { return 2 }, m() {}}] }"
+
+    assert {[], n} = tree_nodes(src)
+    assert n > 1
+
+    assert {nodes, _} = tree_nodes("function f() { return {c: class {}, *g() {}, k: 1} }")
+    assert Enum.sort(nodes) == [ev: :class, ev: :gen]
   end
 end
