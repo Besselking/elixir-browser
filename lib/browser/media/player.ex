@@ -6,7 +6,7 @@ defmodule Browser.Media.Player do
       {:media_frame, player_pid, url, bmp_bytes}
 
   which the session turns into the message of a loaded picture (`"media:" <> url`), so the
-  page draws the frame like an image. Other messages to the owner: `{:media_state, player_pid, url, what, snapshot}` with `what` one of `:ready | :playing | :paused | :time | :ended | :failed` and a snapshot map of `:pos`, `:duration_ms`, `:width`, `:height`.
+  page draws the frame like an image. Other messages to the owner: `{:media_state, player_pid, url, what, snapshot}` with `what` one of `:ready | :playing | :paused | :time | :seeked | :ended | :failed` and a snapshot map of `:pos`, `:duration_ms`, `:width`, `:height`.
 
   A frame that comes too late (more than 200 ms) is not shown. At the end the player
   goes back to the first frame, paused.
@@ -31,6 +31,9 @@ defmodule Browser.Media.Player do
 
   @doc "Plays when paused, pauses when playing."
   def toggle(pid), do: GenServer.cast(pid, :toggle)
+
+  @doc "Jumps to `fraction` (0.0 to 1.0) of the length and shows the frame there."
+  def seek_fraction(pid, fraction), do: GenServer.cast(pid, {:seek_fraction, fraction})
 
   @doc "The state: `:loading | :paused | :playing | :failed`."
   def status(pid), do: GenServer.call(pid, :status)
@@ -87,6 +90,25 @@ defmodule Browser.Media.Player do
     do: {:noreply, do_pause(state)}
 
   def handle_cast(:toggle, state), do: {:noreply, do_play(state)}
+
+  def handle_cast({:seek_fraction, _}, %{media: nil} = state), do: {:noreply, state}
+
+  def handle_cast({:seek_fraction, fraction}, state) do
+    if state.timer, do: Process.cancel_timer(state.timer)
+    playing? = state.status == :playing
+    ms = round(min(max(fraction, 0.0), 1.0) * (state.media.info[:duration_ms] || 0))
+    state = %{state | timer: nil, held: nil, clock: nil}
+
+    with :ok <- Media.seek(state.media, ms),
+         {:frame, pts, _, _, bmp} <- Media.next_video(state.media) do
+      send(state.owner, {:media_frame, self(), state.url, bmp})
+      state = %{state | pos: pts, tu: pts}
+      notify(state, :seeked)
+      {:noreply, if(playing?, do: next_frame(state), else: state)}
+    else
+      _ -> {:noreply, state}
+    end
+  end
 
   # a decoded frame is due: show it, then decode the next one
   @impl true

@@ -1892,6 +1892,19 @@ defmodule Browser.UI do
     end)
   end
 
+  @doc """
+  The item with an element number painted topmost at window point `{x, y}`, and where the point
+  is in it: `{item, dx, dy}`, or nil.
+  """
+  def item_at(items, x, y, scroll) do
+    items
+    |> hits(x, y, scroll)
+    |> Enum.find_value(fn {it, _} ->
+      if is_integer(Map.get(it, :nid)) and it.type != :box and not Map.get(it, :hidden, false),
+        do: {it, x - it.x, y + scroll - it.y}
+    end)
+  end
+
   # where the item is, for the point `{x, y}` on the page as it is drawn
   defp item_space(%{xform: matrices}, x, y) do
     case Browser.Transform.unapply(matrices, x, y) do

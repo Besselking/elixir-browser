@@ -1646,6 +1646,7 @@ defmodule Browser.Session do
 
                 case UI.link_at(state.links, x, py) do
                   nil ->
+                    state = media_click(state, x, y)
                     state = js_pointer(state, x, y, ["mousedown", "mouseup", "click"])
                     {:noreply, page_click(state, x, py, count, shift)}
 
@@ -2914,6 +2915,27 @@ defmodule Browser.Session do
     end
   end
 
+  # A click on the controls of a video: the play button and the rest of the picture start or stop
+  # it, the bar jumps to the place (the controls are drawn by `media_controls` in the layout:
+  # the bar is the bottom 28 px, its line runs from x 40 to 16 px before the right edge).
+  defp media_click(state, x, y) do
+    with %Page{} = page <- state.page,
+         {%{type: :svg, nid: nid, w: w, h: h}, dx, dy} <-
+           UI.item_at(state.items, x, y, state.scroll),
+         url when is_binary(url) <- Page.media_url(page, nid),
+         {pid, state} <- media_player(state, nid) do
+      if dy >= h - 28 and dx >= 40 do
+        Browser.Media.Player.seek_fraction(pid, (dx - 40) / max(w - 56, 1))
+      else
+        Browser.Media.Player.toggle(pid)
+      end
+
+      state
+    else
+      _ -> state
+    end
+  end
+
   # what scripts read and the events they hear when a player reports `what`
   defp media_events(what, snap) do
     time = %{"currentTime" => (snap.pos || 0) / 1000}
@@ -2939,6 +2961,9 @@ defmodule Browser.Session do
 
       :time ->
         {time, ~w(timeupdate)}
+
+      :seeked ->
+        {time, ~w(seeking seeked timeupdate)}
 
       :ended ->
         {%{"paused" => true, "ended" => true, "currentTime" => Map.get(meta, "duration", 0.0)},

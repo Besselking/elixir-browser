@@ -162,6 +162,16 @@ defmodule Browser.MediaTest do
       assert Player.position(pid) >= pos
     end
 
+    test "seek_fraction shows the frame at that place", %{clip: clip} do
+      {pid, url} = player(clip)
+      assert_receive {:media_state, _pid, ^url, :ready, %{duration_ms: duration}}, 5000
+      Player.seek_fraction(pid, 0.5)
+      assert_receive {:media_state, _pid, ^url, :seeked, %{pos: pos}}, 2000
+      assert_receive {:media_frame, ^pid, ^url, <<"BM", _::binary>>}, 1000
+      assert abs(pos - duration / 2) < 400
+      assert Player.status(pid) == :paused
+    end
+
     test "a file that cannot be played fails", %{tmp_dir: dir} do
       path = Path.join(dir, "bad.mp4")
       File.write!(path, "junk")
