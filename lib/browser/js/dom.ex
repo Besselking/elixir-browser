@@ -3458,9 +3458,9 @@ defmodule Browser.JS.DOM do
       "currentTime" when n.tag in ["video", "audio"] ->
         secs = max(to_num_or_zero(v), 0)
 
-        update_node(nid, fn node ->
-          media = Map.put(node.props["media"] || %{}, "currentTime", secs * 1.0)
-          %{node | props: Map.put(node.props, "media", media)}
+        update_node(nid, fn n ->
+          media = Map.put(n.props["media"] || %{}, "currentTime", secs * 1.0)
+          %{n | props: Map.put(n.props, "media", media)}
         end)
 
         if n.tag == "video", do: out({:media_seek, ensure_nid(nid), round(secs * 1000)})
