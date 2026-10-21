@@ -148,6 +148,8 @@ defmodule Browser.Style do
   input, select, textarea, button { display: inline-block; font-size: 13.3333px; font-weight: normal; font-style: normal; color: #000000; text-align: left; line-height: normal; text-decoration: none; text-indent: 0; margin: 0; padding: 1px 2px; border: 1px solid #767676; border-radius: 2px; background-color: #ffffff; overflow: hidden }
   input { width: 170px }
   input[type=checkbox], input[type=radio] { width: 13px; height: 13px; margin: 3px 3px 3px 4px; padding: 0; text-align: center; line-height: 13px; font-size: 10px }
+  input[type=range], input[type=range]:disabled { width: 129px; height: 16px; margin: 2px; padding: 0; border: none; border-radius: 0; background-color: transparent; vertical-align: middle }
+  input[type=color] { width: 50px; height: 27px; padding: 3px; background-color: #efefef; border-radius: 3px; vertical-align: middle }
   input[type=checkbox] { border-radius: 2px }
   input[type=radio] { border-radius: 50% }
   input[type=checkbox][checked] { background-color: #0075ff; border-color: #0075ff; color: #ffffff }

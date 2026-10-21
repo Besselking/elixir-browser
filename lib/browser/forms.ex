@@ -133,13 +133,85 @@ defmodule Browser.Forms do
       disabled?: has?(attrs, "disabled"),
       inert?: inert?,
       readonly?: has?(attrs, "readonly"),
-      value: initial_value(tag, attrs, kids),
+      value: initial_value(tag, attrs, kids) |> range_initial(type, attrs) |> color_initial(type),
+      range: if(type == "range" and tag == "input", do: range_bounds(attrs)),
       checked: has?(attrs, "checked"),
       selected: initial_selected(options),
       options: options,
       maxlength: attrs |> attr("maxlength") |> Integer.parse() |> max_length(),
       placeholder?: attr(attrs, "placeholder") != ""
     }
+  end
+
+  # -- range sliders -------------------------------------------------------------------
+
+  @doc """
+  `{min, max, step}` of an `<input type=range>` (0, 100 and 1 when missing or not numbers).
+  `step="any"` is a very small step.
+  """
+  def range_bounds(attrs) do
+    min = number(attr(attrs, "min")) || 0.0
+    max = number(attr(attrs, "max")) || 100.0
+
+    step =
+      case {attr(attrs, "step"), number(attr(attrs, "step"))} do
+        {"any", _} -> 1.0e-6
+        {_, n} when is_number(n) and n > 0 -> n
+        _ -> 1.0
+      end
+
+    {min, max(max, min), step}
+  end
+
+  defp number(s) when is_binary(s) do
+    case Float.parse(String.trim(s)) do
+      {n, ""} -> n
+      _ -> nil
+    end
+  end
+
+  defp number(_), do: nil
+
+  defp range_initial(value, "range", attrs), do: range_value(value, range_bounds(attrs))
+  defp range_initial(value, _type, _attrs), do: value
+
+  # a colour input holds `#rrggbb` (black when it has no valid colour)
+  defp color_initial(value, "color"), do: Browser.Pickers.color_value(value)
+  defp color_initial(value, _type), do: value
+
+  @doc """
+  The value of a range with the number in `text` (the middle when it is not one), kept between
+  its bounds and on its step, as the text a control holds.
+  """
+  def range_value(text, {min, max, step}) do
+    v = number(text) || min + (max - min) / 2
+    v = min(max(v, min), max)
+    snapped = min + Float.round((v - min) / step) * step
+    snapped = min(snapped, max) |> Float.round(10)
+    format_number(snapped)
+  end
+
+  @doc "The value of a range with its thumb at `frac` (0.0 to 1.0) of the track."
+  def range_from_frac(frac, {min, max, _step} = bounds),
+    do: range_value(Float.to_string(min + (max - min) * min(max(frac, 0.0), 1.0)), bounds)
+
+  @doc "Where the thumb of a range with `value` is: 0.0 to 1.0 of the track."
+  def range_frac(value, {min, max, _step}) do
+    if max > min, do: min(max(((number(value) || min) - min) / (max - min), 0.0), 1.0), else: 0.0
+  end
+
+  @doc "The value after `delta` steps (negative: back) from `value`."
+  def range_step(value, delta, {min, max, step} = bounds),
+    do:
+      range_value(
+        Float.to_string(min(max((number(value) || min) + delta * step, min), max)),
+        bounds
+      )
+
+  defp format_number(v) do
+    if v == Float.round(v, 0) and abs(v) < 1.0e15,
+      do: v |> trunc() |> Integer.to_string(),
+      else: Float.to_string(v)
   end
 
   defp max_length({n, ""}) when n >= 0, do: n
@@ -483,6 +555,45 @@ defmodule Browser.Forms do
   defp default_check("radio", attrs, cur),
     do: if(cur.checked, do: [dot(attrs)], else: [text(@empty)])
 
+  # the chosen colour of a colour input
+  defp swatch(value) do
+    {r, g, b} = Browser.Pickers.rgb(value)
+
+    computed = %{
+      "display" => "block",
+      "width" => {:pct, 1.0},
+      "height" => {:pct, 1.0},
+      "background-color" => {r, g, b}
+    }
+
+    {:element, "control-swatch", [{"@computed", computed}], []}
+  end
+
+  # the calendar button at the right end of a date field
+  defp picker_icon do
+    computed = %{
+      "display" => "block",
+      "float" => "right",
+      "width" => 16.0,
+      "height" => 16.0,
+      "margin-left" => 2.0
+    }
+
+    {:element, "canvas", [{"@computed", computed}, {"@icon", :calendar}], []}
+  end
+
+  @doc "The types of inputs that open a picker."
+  def picker?(%{tag: "input", type: type}),
+    do: type in ["color", "date", "datetime-local", "month", "week"]
+
+  def picker?(_control), do: false
+
+  # the track and the thumb of a range: a canvas as big as the control that the layout draws
+  defp range_node(frac, disabled?) do
+    computed = %{"display" => "block", "width" => {:pct, 1.0}, "height" => {:pct, 1.0}}
+    {:element, "canvas", [{"@computed", computed}, {"@range", {frac, disabled?}}], []}
+  end
+
   defp content(%{tag: "input", type: type}, attrs, cur) do
     placeholder = attr(attrs, "placeholder")
 
@@ -507,6 +618,16 @@ defmodule Browser.Forms do
 
       "file" ->
         [text("Choose file")]
+
+      "range" ->
+        frac = range_frac(cur.value, range_bounds(attrs))
+        [range_node(frac, has?(attrs, "disabled"))]
+
+      "color" ->
+        [swatch(cur.value)]
+
+      t when t in ["date", "datetime-local", "month", "week"] ->
+        [picker_icon() | shown(cur.value, cur, placeholder, attrs)]
 
       "password" ->
         shown(bullets(cur.value), cur, placeholder, attrs)

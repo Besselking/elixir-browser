@@ -1999,6 +1999,61 @@ defmodule Browser.UI do
 
   def menu_base, do: @menu_base
 
+  # -- pickers ------------------------------------------------------------------------
+
+  @wx_ok 5100
+  @wx_all 240
+  @wx_vertical 8
+  @wx_ok_cancel 20
+
+  @doc "The system colour chooser, starting at `{r, g, b}`: `{:ok, {r, g, b}}` or `:cancel`."
+  def pick_color(%{panel: p}, {r, g, b}) do
+    data = :wxColourData.new()
+    :wxColourData.setColour(data, {r, g, b})
+    dialog = :wxColourDialog.new(p, [{:data, data}])
+
+    result =
+      if :wxDialog.showModal(dialog) == @wx_ok do
+        {r, g, b, _} = dialog |> :wxColourDialog.getColourData() |> :wxColourData.getColour()
+        {:ok, {r, g, b}}
+      else
+        :cancel
+      end
+
+    :wxColourDialog.destroy(dialog)
+    result
+  end
+
+  @doc "A calendar in a dialog, starting at `date`: `{:ok, %Date{}}` or `:cancel`."
+  def pick_date(%{panel: p}, %Date{} = date) do
+    dialog = :wxDialog.new(p, -1, ~c"Choose a date")
+
+    calendar =
+      :wxCalendarCtrl.new(dialog, -1, [{:date, {{date.year, date.month, date.day}, {0, 0, 0}}}])
+
+    sizer = :wxBoxSizer.new(@wx_vertical)
+    :wxSizer.add(sizer, calendar, [{:flag, @wx_all}, {:border, 8}])
+
+    :wxSizer.add(sizer, :wxDialog.createStdDialogButtonSizer(dialog, @wx_ok_cancel), [
+      {:flag, @wx_all},
+      {:border, 8}
+    ])
+
+    :wxWindow.setSizer(dialog, sizer)
+    :wxSizer.fit(sizer, dialog)
+
+    result =
+      if :wxDialog.showModal(dialog) == @wx_ok do
+        {{y, m, d}, _} = :wxCalendarCtrl.getDate(calendar)
+        {:ok, Date.new!(y, m, d)}
+      else
+        :cancel
+      end
+
+    :wxDialog.destroy(dialog)
+    result
+  end
+
   # -- context menu -------------------------------------------------------------------
 
   @context_base 2000

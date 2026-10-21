@@ -1886,7 +1886,13 @@ defmodule Browser.Layout do
         _ -> {dim.("width", 300), dim.("height", 150), []}
       end
 
+    # (the slider of an `<input type=range>`: drawn at the size of the control)
+    range = with {_, r} <- List.keyfind(attrs, "@range", 0), do: r
+    icon = with {_, kind} <- List.keyfind(attrs, "@icon", 0), do: kind
+
     extra = %{
+      range: range,
+      icon: icon,
       canvas: {max(bw, 1), max(bh, 1), ops},
       intrinsic: {max(bw, 1), max(bh, 1)},
       paint?: true,
@@ -5173,6 +5179,12 @@ defmodule Browser.Layout do
           %{scene: scene} ->
             ops = Browser.Svg.render(scene, cw, ch, current: spec.current)
             [Map.merge(item, %{type: :svg, ops: ops})]
+
+          %{range: {_, _} = range} ->
+            [Map.merge(item, %{type: :svg, ops: Browser.RangeControl.ops(cw, ch, range)})]
+
+          %{icon: kind} when kind != nil ->
+            [Map.merge(item, %{type: :svg, ops: Browser.RangeControl.icon_ops(kind, cw, ch)})]
 
           %{canvas: {bw, bh, ops}} ->
             ops = Browser.Canvas.scaled_ops(ops, cw / bw, ch / bh)
