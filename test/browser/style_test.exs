@@ -145,11 +145,24 @@ defmodule Browser.StyleTest do
       <link rel="icon" href="/f.ico">
       <link rel="stylesheet" href="/print.css" media="print">
       <link rel="stylesheet" href="/s.css" media="screen and (min-width: 1px)">
+      <link rel="stylesheet" href="/n.css" media="only screen and (max-width: 42em), handheld">
+      <link rel="stylesheet" href="/w.css" media="(min-width: 800px)">
+      <link rel="stylesheet" href="/all.css" media="screen">
+      <link rel="stylesheet" href="/speech.css" media="speech">
+      <style media="not print">b { color: red }</style>
       </head>
       """)
 
     assert Style.sheet_refs(nodes) ==
-             [{:style, "p { color: red }"}, {:link, "/a.css"}, {:link, "/s.css"}]
+             [
+               {:style, "p { color: red }"},
+               {:link, "/a.css"},
+               {:media, "screen and (min-width: 1px)", {:link, "/s.css"}},
+               {:media, "only screen and (max-width: 42em), handheld", {:link, "/n.css"}},
+               {:media, "(min-width: 800px)", {:link, "/w.css"}},
+               {:link, "/all.css"},
+               {:media, "not print", {:style, "b { color: red }"}}
+             ]
   end
 
   test "Page.build applies embedded <style> and returns the title" do

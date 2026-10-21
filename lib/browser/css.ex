@@ -6,10 +6,10 @@ defmodule Browser.CSS do
   `|=`, `^=`, `$=`, `*=`, `i` flag), the descendant/child/next-sibling/
   subsequent-sibling combinators, and these pseudo-classes: `:root`, `:empty`,
   `:first-child`, `:last-child`, `:only-child`, `:first-of-type`, `:nth-child()`,
-  `:nth-last-child()`, `:nth-of-type()`, `:modal`, `:open`, `::backdrop`, `:link`, `:disabled`, `:enabled`, `:checked` (as the page was written), and
-  `:not()`/`:is()`/`:where()` over lists of compound selectors. State-dependent
-  pseudo-classes (`:hover`, `:focus`, `:visited`, …) never match, which keeps
-  `:not(:focus)` true.
+  `:nth-last-child()`, `:nth-of-type()`, `:modal`, `:open`, `::backdrop`, `:link`, `:disabled`, `:enabled`, `:checked` (as the page was written),
+  `:hover` (the elements the page marks `"@hover"`, see `Browser.Page.set_hover/3`), and
+  `:not()`/`:is()`/`:where()` over lists of compound selectors. The other state-dependent
+  pseudo-classes (`:focus`, `:visited`, …) never match, which keeps `:not(:focus)` true.
 
   A selector may end in `::before`, `::after` (or the one-colon forms), `::marker` or
   `::placeholder`: its rule styles the generated box, marker or hint, and carries
@@ -834,8 +834,8 @@ defmodule Browser.CSS do
     end
   end
 
-  @never ~w(hover focus focus-within focus-visible active visited target indeterminate)
-  @simple ~w(root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked required optional read-write read-only modal open mb-backdrop popover-open host)
+  @never ~w(focus focus-within focus-visible active visited target indeterminate)
+  @simple ~w(hover root scope empty first-child last-child only-child first-of-type last-of-type only-of-type link any-link disabled enabled checked required optional read-write read-only modal open mb-backdrop popover-open host)
 
   defp pseudo_class(name) when name in @never, do: :never
 
@@ -856,7 +856,7 @@ defmodule Browser.CSS do
   defp balanced(<<_, r::binary>>, w, d, n), do: balanced(r, w, d, n + 1)
 
   # the argument of :has(): comma-separated relative selectors (`> a`, `+ b c`, `d`) as
-  # `[{combinator_to_the_anchor, parts}]`. One that needs a state we don't track (`a:hover`)
+  # `[{combinator_to_the_anchor, parts}]`. One that needs a state we don't track (`a:focus`)
   # can never match and is left out.
   defp relative_list(inner) do
     inner
@@ -1112,6 +1112,7 @@ defmodule Browser.CSS do
     :read_write,
     :read_only,
     :host,
+    :hover,
     :never
   ]
 
@@ -1194,6 +1195,7 @@ defmodule Browser.CSS do
     do: ctx.tag in ["a", "area"] and List.keymember?(ctx.attrs, "href", 0)
 
   defp pseudo?(:modal, ctx), do: List.keymember?(ctx.attrs, "@modal", 0)
+  defp pseudo?(:hover, ctx), do: List.keymember?(ctx.attrs, "@hover", 0)
   defp pseudo?(:popover_open, ctx), do: List.keymember?(ctx.attrs, "@popover", 0)
   defp pseudo?(:mb_backdrop, ctx), do: List.keymember?(ctx.attrs, "@backdrop", 0)
 

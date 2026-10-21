@@ -3128,6 +3128,25 @@ defmodule Browser.JS.DOM do
         # the list is a snapshot, but removing an attribute node through it empties it, so that
         # `while (el.attributes.length) el.removeAttributeNode(el.attributes[0])` ends
         for a <- attrs, do: put_hidden(a, "__list", list)
+        # a NamedNodeMap also has each attribute under its name (jQuery 1.9 reads
+        # `div.attributes["onfocusin"].expando`)
+        for {{k, _}, a} <- Enum.zip(n.attrs, attrs), do: put_hidden(list, k, a)
+        by_name = Map.new(Enum.zip(Enum.map(n.attrs, &elem(&1, 0)), attrs))
+
+        put_hidden(
+          list,
+          "getNamedItem",
+          native("getNamedItem", fn _this, args ->
+            Map.get(by_name, Str.downcase(to_str(arg(args, 0))), :null)
+          end)
+        )
+
+        put_hidden(
+          list,
+          "item",
+          native("item", fn _this, args -> Enum.at(attrs, to_int(arg(args, 0)), :null) end)
+        )
+
         {:ok, list}
 
       k when k in ~w(offsetWidth offsetHeight offsetTop offsetLeft clientWidth clientHeight
@@ -3562,8 +3581,61 @@ defmodule Browser.JS.DOM do
 
       case List.keyfind(style_decls(nid), prop, 0) do
         {_, v} -> {:ok, v}
-        nil -> {:ok, computed_default(n, prop)}
+        nil -> {:ok, cascaded(n, prop) || computed_default(n, prop)}
       end
+    end
+  end
+
+  @cascaded %{"display" => 0, "visibility" => 1, "position" => 2, "float" => 3, "overflow" => 4}
+
+  # What the page's style sheets give the element, from the layout (`Browser.Nids.styles/1`): an
+  # element the layout left out while its parent is in it is `display: none` (jQuery's `fadeIn`
+  # shows nothing it takes to be visible already). nil: the initial value, or not known.
+  defp cascaded(n, prop) do
+    with i when i != nil <- Map.get(@cascaded, prop),
+         {_, id} <- nid_entry(n.id),
+         %{} = styles <- styles_of(id) do
+      case styles do
+        %{^id => values} ->
+          elem(values, i)
+
+        _ ->
+          parent = n.parent && node(n.parent)
+
+          parent_id =
+            with %{internal: internal} <- parent,
+                 {_, pid} <- List.keyfind(internal, "@nid", 0),
+                 do: pid
+
+          if prop == "display" and is_map_key(styles, parent_id), do: "none"
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  # (an element the last layout did not style may be new: the page is laid out now, when the
+  # tree changed since the last layout for the scripts)
+  defp styles_of(id) do
+    case Map.get(rects_here(), :styles) do
+      %{^id => _} = styles ->
+        styles
+
+      _ ->
+        layout_now()
+        Map.get(rects_here(), :styles)
+    end
+  end
+
+  # (an element no layout was asked about has no number yet: laying out numbers it)
+  defp nid_entry(nid) do
+    case List.keyfind(node(nid).internal, "@nid", 0) do
+      nil ->
+        layout_now()
+        List.keyfind(node(nid).internal, "@nid", 0)
+
+      entry ->
+        entry
     end
   end
 

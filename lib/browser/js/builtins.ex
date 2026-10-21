@@ -2233,8 +2233,11 @@ defmodule Browser.JS.Builtins do
     declare(scope, "clearInterval", native("clearInterval", clear))
   end
 
-  @doc "Schedules the JS function `fun` after `delay` virtual milliseconds; returns the timer id."
-  def add_timer(fun, delay) do
+  @doc """
+  Schedules the JS function `fun` after `delay` virtual milliseconds, to be called with `args`;
+  returns the timer id.
+  """
+  def add_timer(fun, delay, args \\ []) do
     seq = Process.get(:js_timer_seq) + 1
     Process.put(:js_timer_seq, seq)
 
@@ -2243,7 +2246,7 @@ defmodule Browser.JS.Builtins do
       at: Process.get(:js_now) + delay,
       seq: seq,
       fun: fun,
-      args: [],
+      args: args,
       interval: nil,
       realm: Browser.JS.DOM.timer_realm()
     }

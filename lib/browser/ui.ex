@@ -138,6 +138,7 @@ defmodule Browser.UI do
     :wxPanel.connect(panel, :left_up)
     :wxPanel.connect(panel, :left_dclick)
     :wxPanel.connect(panel, :motion)
+    :wxPanel.connect(panel, :leave_window)
     # the event record does not say which way the wheel turned (a sideways swipe of a
     # trackpad is not a vertical scroll), so the callback tells the session
     me = self()

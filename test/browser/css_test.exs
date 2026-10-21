@@ -172,9 +172,20 @@ defmodule Browser.CSSTest do
     refute sm?("p:not(.x)", ctx("p", [{"class", "x"}]))
   end
 
-  test "state pseudo-classes never match, so :not() of them always does" do
+  test ":hover matches the elements marked as hovered" do
     el = ctx("a", [{"href", "/x"}])
+    hovered = ctx("a", [{"href", "/x"}, {"@hover", true}])
     refute sm?("a:hover", el)
+    assert sm?("a:hover", hovered)
+    assert sm?("a:not(:hover)", el)
+    li = ctx("li", [{"class", "dropdown"}, {"@hover", true}])
+    assert sm?(".dropdown:hover ul", ctx("ul", [], parent: li))
+    refute sm?(".dropdown:hover ul", ctx("ul", [], parent: ctx("li", [{"class", "dropdown"}])))
+    assert {:ok, %{spec: {0, 2, 0}}} = CSS.parse_selector(".a:hover")
+  end
+
+  test "other state pseudo-classes never match, so :not() of them always does" do
+    el = ctx("a", [{"href", "/x"}])
     refute sm?("a:focus", el)
     assert sm?("a:not(:focus)", el)
     assert sm?("a:not(:hover):not(:visited)", el)
@@ -286,6 +297,9 @@ defmodule Browser.CSSTest do
     assert {:ok, _} = CSS.parse_selector("li:has(> a, + b, ~ c d)")
 
     assert {:ok, %{parts: [{%{pseudos: [{:has, []}]}, nil}]}} =
+             CSS.parse_selector(":has(a:focus)")
+
+    assert {:ok, %{parts: [{%{pseudos: [{:has, [descendant: _]}]}, nil}]}} =
              CSS.parse_selector(":has(a:hover)")
   end
 

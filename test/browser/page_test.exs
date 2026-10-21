@@ -612,4 +612,110 @@ defmodule Browser.PageTest do
       assert page.rules |> Enum.filter(&(&1.origin == :author)) |> Enum.all?(&(&1.media != []))
     end
   end
+
+  # what archiveofourown.org needs: its sheets for phones have a `media` attribute, its menus
+  # open on `:hover` and hang below their button, its search field is `width: auto`
+  describe "a page like archiveofourown.org" do
+    defp measure(text, style), do: String.length(text) * div(round(style.size), 2)
+
+    defp lay(page, width \\ 1000) do
+      {items, _} = Browser.Layout.layout(page.nodes, width, &measure/2, 600)
+      items
+    end
+
+    defp word(items, text), do: Enum.find(items, &(Map.get(&1, :text) == text))
+
+    defp nid_of(nodes, id) do
+      Enum.find_value(nodes, fn
+        {:element, _, attrs, kids} ->
+          if List.keyfind(attrs, "id", 0) == {"id", id},
+            do: elem(List.keyfind(attrs, "@nid", 0), 1),
+            else: nid_of(kids, id)
+
+        _ ->
+          nil
+      end)
+    end
+
+    defp chain(page, id) do
+      parents = Browser.Nids.parents(page.pruned)
+      page.pruned |> nid_of(id) |> Stream.iterate(&parents[&1]) |> Enum.take_while(& &1)
+    end
+
+    test "a sheet with a media attribute applies only where its query holds" do
+      html = """
+      <style>p { color: rgb(0, 0, 255) }</style>
+      <style media="only screen and (max-width: 42em), handheld">p { color: rgb(255, 0, 0) }</style>
+      <p>x</p>
+      """
+
+      color = fn width ->
+        env = %{Browser.Style.default_env() | width: width}
+        word(lay(Page.build(html, "about:blank", env), width), "x").color
+      end
+
+      assert color.(1000) == {0, 0, 255}
+      assert color.(500) == {255, 0, 0}
+    end
+
+    test "two floats of 50% sit side by side in a box whose width is odd" do
+      html = """
+      <div style="width: 1092px"><div style="float: left; width: 36%">
+      <ul style="float: left; width: 100%; margin: 0; padding: 0">
+      <li style="float: left; width: 50%">One</li><li style="float: left; width: 50%">Two</li>
+      </ul></div></div>
+      """
+
+      items = lay(Page.build(html, "about:blank"), 1200)
+      assert word(items, "One").y == word(items, "Two").y
+    end
+
+    test "a text field with display: inline or width: auto keeps its size" do
+      html = """
+      <style>input { width: 100% } p input { width: auto; display: inline }</style>
+      <div style="float: right"><p><input id=f type=text> <input id=g type=text size=5></p></div>
+      """
+
+      page = Page.build(html, "about:blank")
+      rects = Browser.Nids.rects(lay(page), Browser.Nids.parents(page.pruned))
+      {_, _, w, _} = rects[nid_of(page.pruned, "f")]
+      {_, _, w5, _} = rects[nid_of(page.pruned, "g")]
+      assert w > 150
+      assert w5 < w and w5 > 30
+    end
+
+    test "a menu opens on :hover, below its button, without widening it" do
+      html = """
+      <style>
+      ul { list-style: none; margin: 0; padding: 0 }
+      .menu { display: none; position: absolute; z-index: 55; width: 300px; background: #ddd }
+      .dropdown:hover .menu { display: block }
+      .menu li, .menu a { position: relative; left: 1px }
+      </style>
+      <ul><li id=d class=dropdown style="float: left; position: relative">
+      <a id=b style="display: inline-block; padding: 6px">Fandoms</a>
+      <ul class=menu><li><a>Anime</a></li></ul>
+      </li><li style="float: left"><a>Browse</a></li></ul>
+      """
+
+      page = Page.build(html, "about:blank")
+      before = lay(page)
+      refute word(before, "Anime")
+      assert Page.hover_changes?(page, chain(page, "d"))
+      refute Page.hover_changes?(page, chain(page, "b") -- chain(page, "d"))
+
+      hovered = Page.set_hover(page, chain(page, "d"), Browser.Style.default_env())
+      items = lay(hovered)
+      anime = word(items, "Anime")
+      fandoms = word(items, "Fandoms")
+      assert anime.y >= fandoms.y + fandoms.h
+      assert word(items, "Browse").x == word(before, "Browse").x
+
+      # the entries paint above the menu's background
+      bg = Enum.find(items, &(&1.type == :rect and &1.w == 300))
+      assert anime.pz > bg.pz
+
+      assert lay(Page.set_hover(hovered, [], Browser.Style.default_env())) |> word("Anime") == nil
+    end
+  end
 end

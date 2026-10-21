@@ -44,6 +44,44 @@ defmodule Browser.Nids do
     max(own, max_nid(kids, none))
   end
 
+  @doc """
+  What `getComputedStyle` reads of the cascade, for the numbered elements of a styled tree:
+  `%{nid => {display, visibility, position, float, overflow}}` (nil: the property's initial
+  value). An element the cascade left out of the tree is `display: none`, or inside such an
+  element. The scripts get it with the boxes, under the key `:styles` (see
+  `Browser.JS.DOM.set_layout/4`).
+  """
+  def styles(nodes), do: styles(nodes, %{})
+
+  defp styles(nodes, acc) when is_list(nodes), do: Enum.reduce(nodes, acc, &styles/2)
+  defp styles({:text, _}, acc), do: acc
+
+  defp styles({:element, _tag, attrs, kids}, acc) do
+    acc =
+      case List.keyfind(attrs, "@nid", 0) do
+        {_, nid} ->
+          c =
+            case List.keyfind(attrs, "@computed", 0) do
+              {_, c} when is_map(c) -> c
+              _ -> %{}
+            end
+
+          Map.put(
+            acc,
+            nid,
+            {c["display"], c["visibility"], c["position"], c["float"], c["overflow-x"]}
+          )
+
+        nil ->
+          acc
+      end
+
+    styles(kids, acc)
+  end
+
+  @doc "The boxes of `rects/2` with the computed values of `styles/1` under `:styles`."
+  def with_styles(rects, nodes), do: Map.put(rects, :styles, styles(nodes))
+
   @doc "`%{nid => parent nid}` for the numbered elements of a (styled) tree."
   def parents(nodes), do: parents(nodes, nil, %{})
 
