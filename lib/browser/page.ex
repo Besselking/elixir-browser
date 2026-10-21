@@ -416,27 +416,45 @@ defmodule Browser.Page do
   def media_attrs(%__MODULE__{raw: raw}, nid),
     do: find_media(raw, nid, fn attrs, _url -> attrs end)
 
-  @doc "The element numbers of the videos with an `autoplay` attribute."
-  def autoplay_videos(%__MODULE__{raw: raw}), do: autoplay_videos(raw, [])
+  @doc """
+  The videos a page starts a player for when it is shown: `[{element number, :play | :preload}]`.
+  A video with `autoplay` plays; one with `controls` (and no `preload="none"`) is opened so its
+  length is known before the first play.
+  """
+  def start_videos(%__MODULE__{raw: raw}), do: start_videos(raw, [])
 
-  defp autoplay_videos(nodes, acc) when is_list(nodes),
-    do: Enum.reduce(nodes, acc, &autoplay_videos/2)
+  defp start_videos(nodes, acc) when is_list(nodes), do: Enum.reduce(nodes, acc, &start_videos/2)
 
-  defp autoplay_videos({:element, "video", attrs, kids}, acc) do
+  defp start_videos({:element, "video", attrs, kids}, acc) do
     acc =
       with {_, nid} <- List.keyfind(attrs, "@nid", 0),
-           true <- List.keymember?(attrs, "autoplay", 0),
            true <- List.keymember?(attrs, "@media", 0) do
-        acc ++ [nid]
+        cond do
+          List.keymember?(attrs, "autoplay", 0) ->
+            acc ++ [{nid, :play}]
+
+          List.keymember?(attrs, "controls", 0) and not preload_none?(attrs) ->
+            acc ++ [{nid, :preload}]
+
+          true ->
+            acc
+        end
       else
         _ -> acc
       end
 
-    autoplay_videos(kids, acc)
+    start_videos(kids, acc)
   end
 
-  defp autoplay_videos({:element, _tag, _attrs, kids}, acc), do: autoplay_videos(kids, acc)
-  defp autoplay_videos(_other, acc), do: acc
+  defp start_videos({:element, _tag, _attrs, kids}, acc), do: start_videos(kids, acc)
+  defp start_videos(_other, acc), do: acc
+
+  defp preload_none?(attrs) do
+    case List.keyfind(attrs, "preload", 0) do
+      {_, v} -> String.downcase(String.trim(v)) == "none"
+      nil -> false
+    end
+  end
 
   @doc """
   The pseudo image URL (`"media:..."`) of the picture of the video with element number `nid`:

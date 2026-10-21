@@ -6,7 +6,7 @@ defmodule Browser.Media.Player do
       {:media_frame, player_pid, url, bmp_bytes}
 
   which the session turns into the message of a loaded picture (`"media:" <> url`), so the
-  page draws the frame like an image. Other messages to the owner: `{:media_state, player_pid, url, what, snapshot}` with `what` one of `:ready | :playing | :paused | :time | :seeked | :ended | :failed` and a snapshot map of `:pos`, `:duration_ms`, `:width`, `:height`.
+  page draws the frame like an image. Other messages to the owner: `{:media_state, player_pid, url, what, snapshot}` with `what` one of `:ready | :playing | :paused | :time | :seeked | :ended | :failed | :skipped` and a snapshot map of `:pos`, `:duration_ms`, `:width`, `:height`.
 
   A frame that comes too late (more than 200 ms) is not shown. At the end the player
   goes back to the first frame, paused.
@@ -54,6 +54,8 @@ defmodule Browser.Media.Player do
       base: opts[:base],
       owner: opts[:owner],
       loop: opts[:loop] || false,
+      # a player that starts before anyone plays (`preload`) only takes small files
+      preload: opts[:preload] || false,
       media: nil,
       status: :loading,
       want_play: false,
@@ -75,6 +77,11 @@ defmodule Browser.Media.Player do
       notify(state, :ready)
       {:noreply, if(state.want_play, do: begin_playing(state), else: state)}
     else
+      # (a file that is too big to open before anyone plays it: no error, the player goes)
+      {:error, :skipped} ->
+        notify(state, :skipped)
+        {:stop, :normal, state}
+
       _ ->
         notify(state, :failed)
         {:noreply, %{state | status: :failed}}
@@ -224,6 +231,13 @@ defmodule Browser.Media.Player do
   end
 
   # -- loading -------------------------------------------------------------------------
+
+  defp download(%{preload: true} = state) do
+    case Browser.Images.check_media_size(state.url, state.base) do
+      :ok -> download(%{state | preload: false})
+      _ -> {:error, :skipped}
+    end
+  end
 
   defp download(state) do
     case Fetch.load(state.url, initiator: state.base) do

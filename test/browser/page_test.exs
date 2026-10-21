@@ -718,4 +718,18 @@ defmodule Browser.PageTest do
       assert lay(Page.set_hover(hovered, [], Browser.Style.default_env())) |> word("Anime") == nil
     end
   end
+
+  describe "start_videos/1" do
+    test "autoplay videos play, videos with controls are opened, the rest wait" do
+      page =
+        Browser.Page.build(
+          ~s(<video src="a.mp4" autoplay></video><video src="b.mp4" controls></video>) <>
+            ~s(<video src="c.mp4" controls preload="none"></video><video src="d.mp4"></video>) <>
+            ~s(<video controls></video>),
+          "http://example.test/"
+        )
+
+      assert [{_, :play}, {_, :preload}] = Browser.Page.start_videos(page)
+    end
+  end
 end

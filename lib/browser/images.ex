@@ -175,7 +175,10 @@ defmodule Browser.Images do
 
   # The whole file is fetched for one frame (the helper reads a file), so a big video is
   # not drawn until the helper can read a stream.
-  defp check_media_size("file:" <> _ = url, _base) do
+  @doc false
+  def check_media_size(url, base)
+
+  def check_media_size("file:" <> _ = url, _base) do
     case File.stat(URI.decode(URI.parse(url).path || "")) do
       {:ok, %{size: size}} when size <= @max_media_bytes -> :ok
       {:ok, _} -> {:error, "video too large for a picture"}
@@ -183,7 +186,7 @@ defmodule Browser.Images do
     end
   end
 
-  defp check_media_size(url, base) do
+  def check_media_size(url, base) do
     case Fetch.load(url, method: :head, full: true, initiator: base) do
       {:ok, %{headers: headers}, _final} ->
         case headers

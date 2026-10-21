@@ -461,10 +461,16 @@ defmodule Browser.Session do
   # a player says something: the page's scripts read it and hear the events
   def handle_info({:media_state, pid, _url, what, snap}, state) do
     case Enum.find(state.media, fn {_nid, p} -> p == pid end) do
+      {nid, _} when what == :skipped ->
+        {:noreply, %{state | media: Map.delete(state.media, nid)}}
+
       {nid, _} ->
         state = update_media_ui(state, nid, what, snap)
 
-        if state.js do
+        state =
+          if what == :failed, do: %{state | media: Map.delete(state.media, nid)}, else: state
+
+        if state.js && what != :skipped do
           {props, events} = media_events(what, snap)
           reply = Browser.JS.Runtime.media(js(state), nid, props, events)
           {:noreply, apply_js(state, reply)}
@@ -2994,7 +3000,7 @@ defmodule Browser.Session do
 
   # -- videos ----------------------------------------------------------------
 
-  defp media_player(%{media: media} = state, nid) do
+  defp media_player(%{media: media} = state, nid, opts \\ []) do
     case media do
       %{^nid => pid} ->
         {pid, state}
@@ -3008,6 +3014,7 @@ defmodule Browser.Session do
                  url: url,
                  base: page.base || state.url,
                  owner: self(),
+                 preload: opts[:preload] || false,
                  loop: List.keymember?(Page.media_attrs(page, nid) || [], "loop", 0)
                ) do
           Process.monitor(pid)
@@ -3154,12 +3161,13 @@ defmodule Browser.Session do
     end
   end
 
-  # the videos with `autoplay` start when the page is shown
+  # the videos with `autoplay` start when the page is shown, those with `controls` are opened
+  # (small files only) so that scripts and the bar know the length
   defp start_autoplay(%{page: %Page{} = page} = state) do
-    Enum.reduce(Page.autoplay_videos(page), state, fn nid, state ->
-      case media_player(state, nid) do
+    Enum.reduce(Page.start_videos(page), state, fn {nid, how}, state ->
+      case media_player(state, nid, preload: how == :preload) do
         {pid, state} ->
-          Browser.Media.Player.play(pid)
+          if how == :play, do: Browser.Media.Player.play(pid)
           state
 
         nil ->
