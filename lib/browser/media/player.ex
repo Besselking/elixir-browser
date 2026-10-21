@@ -32,6 +32,9 @@ defmodule Browser.Media.Player do
   @doc "Plays when paused, pauses when playing."
   def toggle(pid), do: GenServer.cast(pid, :toggle)
 
+  @doc "Jumps to `ms` and shows the frame there."
+  def seek_ms(pid, ms), do: GenServer.cast(pid, {:seek_ms, ms})
+
   @doc "Jumps to `fraction` (0.0 to 1.0) of the length and shows the frame there."
   def seek_fraction(pid, fraction), do: GenServer.cast(pid, {:seek_fraction, fraction})
 
@@ -50,6 +53,7 @@ defmodule Browser.Media.Player do
       url: opts[:url],
       base: opts[:base],
       owner: opts[:owner],
+      loop: opts[:loop] || false,
       media: nil,
       status: :loading,
       want_play: false,
@@ -93,10 +97,17 @@ defmodule Browser.Media.Player do
 
   def handle_cast({:seek_fraction, _}, %{media: nil} = state), do: {:noreply, state}
 
-  def handle_cast({:seek_fraction, fraction}, state) do
+  def handle_cast({:seek_fraction, fraction}, %{media: m} = state) do
+    ms = round(min(max(fraction, 0.0), 1.0) * (m.info[:duration_ms] || 0))
+    handle_cast({:seek_ms, ms}, state)
+  end
+
+  def handle_cast({:seek_ms, _}, %{media: nil} = state), do: {:noreply, state}
+
+  def handle_cast({:seek_ms, ms}, state) do
     if state.timer, do: Process.cancel_timer(state.timer)
     playing? = state.status == :playing
-    ms = round(min(max(fraction, 0.0), 1.0) * (state.media.info[:duration_ms] || 0))
+    ms = min(max(ms, 0), state.media.info[:duration_ms] || ms)
     state = %{state | timer: nil, held: nil, clock: nil}
 
     with :ok <- Media.seek(state.media, ms),
@@ -185,6 +196,16 @@ defmodule Browser.Media.Player do
 
   defp schedule(state, frame, delay) do
     %{state | held: frame, timer: Process.send_after(self(), {:show, frame}, delay)}
+  end
+
+  # a video with `loop` starts again at once
+  defp finish(%{loop: true} = state) do
+    state = %{state | held: nil, clock: nil, timer: nil}
+
+    case Media.seek(state.media, 0) do
+      :ok -> next_frame(%{state | pos: 0, tu: 0})
+      _ -> %{state | status: :paused, want_play: false}
+    end
   end
 
   # back to the first frame, paused

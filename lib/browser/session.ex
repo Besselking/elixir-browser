@@ -324,7 +324,12 @@ defmodule Browser.Session do
     publish_tabs(state)
 
     {:noreply,
-     state |> start_images() |> start_layout_job() |> adopt_or_start_js() |> sync_buttons()}
+     state
+     |> start_images()
+     |> start_layout_job()
+     |> adopt_or_start_js()
+     |> start_autoplay()
+     |> sync_buttons()}
   end
 
   # a runtime's scripts have run
@@ -2955,6 +2960,18 @@ defmodule Browser.Session do
     state
   end
 
+  # a video that jumps to a time a script set
+  defp js_effect({:media_seek, nid, ms}, state) do
+    case media_player(state, nid) do
+      {pid, state} ->
+        Browser.Media.Player.seek_ms(pid, ms)
+        state
+
+      nil ->
+        state
+    end
+  end
+
   # a video: start, pause or toggle its player (made the first time it is asked)
   defp js_effect({:media, nid, op}, state) do
     case media_player(state, nid) do
@@ -2987,7 +3004,12 @@ defmodule Browser.Session do
              true <- Browser.Media.available?(),
              url when is_binary(url) <- Page.media_url(page, nid),
              {:ok, pid} <-
-               Browser.Media.Player.start(url: url, base: page.base || state.url, owner: self()) do
+               Browser.Media.Player.start(
+                 url: url,
+                 base: page.base || state.url,
+                 owner: self(),
+                 loop: List.keymember?(Page.media_attrs(page, nid) || [], "loop", 0)
+               ) do
           Process.monitor(pid)
           {pid, %{state | media: Map.put(media, nid, pid)}}
         else
@@ -3131,6 +3153,22 @@ defmodule Browser.Session do
         {%{"paused" => true}, ~w(error)}
     end
   end
+
+  # the videos with `autoplay` start when the page is shown
+  defp start_autoplay(%{page: %Page{} = page} = state) do
+    Enum.reduce(Page.autoplay_videos(page), state, fn nid, state ->
+      case media_player(state, nid) do
+        {pid, state} ->
+          Browser.Media.Player.play(pid)
+          state
+
+        nil ->
+          state
+      end
+    end)
+  end
+
+  defp start_autoplay(state), do: state
 
   # the players of a page that is left
   defp stop_media(%{media: media} = state) do

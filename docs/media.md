@@ -28,7 +28,7 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
   `controls` start and stop it. A click on the bar jumps to that place in the video. The
   controls show a pause button and a progress line that moves while the video plays. A
   playing video hides its controls when the mouse has not moved over it for 2 seconds; they
-  come back when the mouse moves. A video with a `poster` shows the frames once it plays.
+  come back when the mouse moves. A video with a `poster` shows the frames once it plays. A video with `autoplay` starts when the page is shown, one with `loop` starts again at the end. Setting `currentTime` jumps to that time.
   `Browser.Media.Player` downloads the file (up to 256 MiB), decodes frame by frame and sends
   each frame in time. Each frame is drawn like a new picture of the same size. A late frame
   (more than 200 ms) is dropped. At the end the video goes back to its first frame, paused.
@@ -38,8 +38,7 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
   the events `loadedmetadata`, `loadeddata`, `canplay`, `play`, `playing`, `pause`,
   `timeupdate` (about every 250 ms), `ended` and `error`. The player starts on the first
   `play()` or click, so a video that nobody plays has `duration` NaN.
-- Not done yet: sound, setting `currentTime` (seeking), `autoplay` and `loop`, the `<source>`
-  choice by `type`, audio elements, `canPlayType`. `play()` returns a promise that is already
+- Not done yet: sound, the `<source>` choice by `type`, audio elements, `canPlayType`. `play()` returns a promise that is already
   resolved.
 
 ## Stages

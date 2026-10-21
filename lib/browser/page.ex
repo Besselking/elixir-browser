@@ -412,6 +412,32 @@ defmodule Browser.Page do
   @doc "The address of the video element with element number `nid` (`\"@media\"`), or nil."
   def media_url(%__MODULE__{raw: raw}, nid), do: find_media(raw, nid, fn _attrs, url -> url end)
 
+  @doc "The attributes of the video element with element number `nid`, or nil."
+  def media_attrs(%__MODULE__{raw: raw}, nid),
+    do: find_media(raw, nid, fn attrs, _url -> attrs end)
+
+  @doc "The element numbers of the videos with an `autoplay` attribute."
+  def autoplay_videos(%__MODULE__{raw: raw}), do: autoplay_videos(raw, [])
+
+  defp autoplay_videos(nodes, acc) when is_list(nodes),
+    do: Enum.reduce(nodes, acc, &autoplay_videos/2)
+
+  defp autoplay_videos({:element, "video", attrs, kids}, acc) do
+    acc =
+      with {_, nid} <- List.keyfind(attrs, "@nid", 0),
+           true <- List.keymember?(attrs, "autoplay", 0),
+           true <- List.keymember?(attrs, "@media", 0) do
+        acc ++ [nid]
+      else
+        _ -> acc
+      end
+
+    autoplay_videos(kids, acc)
+  end
+
+  defp autoplay_videos({:element, _tag, _attrs, kids}, acc), do: autoplay_videos(kids, acc)
+  defp autoplay_videos(_other, acc), do: acc
+
   @doc """
   The pseudo image URL (`"media:..."`) of the picture of the video with element number `nid`:
   where the frames of its player are drawn. nil when the video shows a poster instead.

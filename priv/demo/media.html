@@ -15,12 +15,16 @@ button { margin-right: 6px }
 <div class="card">
   <p>A video with <code>controls</code>, and buttons that call <code>play()</code> and <code>pause()</code>.</p>
   <video id="v" src="video/clip.mp4" width="320" height="180" controls></video>
-  <p><button onclick="document.getElementById('v').play()">Play</button><button onclick="document.getElementById('v').pause()">Pause</button></p>
+  <p><button onclick="document.getElementById('v').play()">Play</button><button onclick="document.getElementById('v').pause()">Pause</button><button onclick="document.getElementById('v').currentTime = 6">Jump to 6 s</button></p>
 </div>
 <div class="card">
   <p>A video with a <code>poster</code> picture, and a square video without one.</p>
   <video src="video/clip.mp4" poster="images/photo.png" width="160" height="90" controls></video>
   <video src="video/clip.mp4" width="90" height="90" controls></video>
+</div>
+<div class="card">
+  <p>A video with <code>autoplay</code> and <code>loop</code>:</p>
+  <video src="video/clip.mp4" width="160" height="90" autoplay loop></video>
 </div>
 <div class="card">
   <p>An audio element with <code>controls</code>:</p>

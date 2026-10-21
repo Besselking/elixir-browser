@@ -172,6 +172,25 @@ defmodule Browser.MediaTest do
       assert Player.status(pid) == :paused
     end
 
+    test "seek_ms shows the frame at that time", %{clip: clip} do
+      {pid, url} = player(clip)
+      assert_receive {:media_state, _pid, ^url, :ready, _}, 5000
+      Player.seek_ms(pid, 1000)
+      assert_receive {:media_state, _pid, ^url, :seeked, %{pos: pos}}, 2000
+      assert abs(pos - 1000) < 300
+    end
+
+    test "a video with loop starts again instead of ending", %{clip: clip} do
+      url = "file://" <> clip
+      {:ok, pid} = Player.start(url: url, base: url, owner: self(), loop: true)
+      assert_receive {:media_state, _pid, ^url, :ready, _}, 5000
+      Player.play(pid)
+      Process.sleep(3500)
+      refute_received {:media_state, _pid, ^url, :ended, _}
+      assert Player.status(pid) == :playing
+      Player.pause(pid)
+    end
+
     test "a file that cannot be played fails", %{tmp_dir: dir} do
       path = Path.join(dir, "bad.mp4")
       File.write!(path, "junk")
