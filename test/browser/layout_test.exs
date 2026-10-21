@@ -1956,6 +1956,17 @@ defmodule Browser.LayoutTest do
       assert [%{w: 160, h: 90, ops: [_ | _]}] = Enum.filter(items, &(&1.type == :svg))
     end
 
+    test "a video is never fixed in size for its picture: the box changes into a picture" do
+      page =
+        Page.build(
+          ~s(<video src="v.mp4" poster="p.png" width="10" height="10"></video><img src="p.png" width="10" height="10">),
+          @base
+        )
+
+      refute Layout.image_size_fixed?(page.nodes, "http://example.test/dir/p.png")
+      assert Layout.image_size_fixed?(page.nodes, "http://example.test/dir/other.png")
+    end
+
     test "a percentage height attribute is of a containing block with a height" do
       {items, _} =
         im(~s(<div style="height:200px"><img src="a.png" height="50%"></div>), loaded(30, 30))

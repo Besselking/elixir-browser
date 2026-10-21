@@ -1748,6 +1748,10 @@ defmodule Browser.Layout do
       )
   end
 
+  # a video swaps its black box for the picture (its poster or first frame): always a new layout
+  def image_size_fixed?({:element, "video", attrs, kids}, url),
+    do: attr_value(attrs, "@src") != url and image_size_fixed?(kids, url)
+
   def image_size_fixed?({:element, _tag, _attrs, kids}, url), do: image_size_fixed?(kids, url)
   def image_size_fixed?(_text, _url), do: true
 

@@ -1,0 +1,41 @@
+<!doctype html>
+<html><head><title>Video and frames</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #f4f6fa }
+.page { max-width: 640px; margin: 12px auto; padding: 0 14px }
+h1 { margin: 6px 0 10px }
+.card { background: #fff; border: 1px solid #c4cad6; border-radius: 8px; padding: 10px 14px; margin: 10px 0 }
+.card p { margin: 6px 0 }
+video { border: 1px solid #999; vertical-align: top }
+iframe { vertical-align: top }
+button { margin-right: 6px }
+</style></head>
+<body><div class="page">
+<h1>Video and frames</h1>
+<div class="card">
+  <p>A video with <code>controls</code>. It shows its first frame (no sound yet). Click it, or use the buttons, to play and pause.</p>
+  <video id="v" src="video/clip.mp4" width="320" height="180" controls></video>
+  <p><button onclick="document.getElementById('v').play()">Play</button><button onclick="document.getElementById('v').pause()">Pause</button></p>
+</div>
+<div class="card">
+  <p>A video with a <code>poster</code> picture, and one scaled to a small box (the picture keeps its shape):</p>
+  <video src="video/clip.mp4" poster="images/photo.png" width="160" height="90" controls></video>
+  <video src="video/clip.mp4" width="90" height="90"></video>
+</div>
+<div class="card">
+  <p>An audio element with <code>controls</code> (a bar only; no sound yet):</p>
+  <audio controls src="video/clip.mp4"></audio>
+</div>
+<div class="card">
+  <p>Iframes. The first is made by a script that writes a page into it. The second has a <code>src</code>: for now it is only a box (loading the page in it is not done yet).</p>
+  <span id="frame-host"></span>
+  <iframe width="260" height="90" src="sample.html"></iframe>
+</div>
+</div>
+<script>
+var f = document.createElement("iframe");
+f.setAttribute("width", "260"); f.setAttribute("height", "90");
+document.getElementById("frame-host").appendChild(f);
+f.contentDocument.write("<body style='font-family:sans-serif;background:#eef'><p>Hello from a <b>script</b> frame.</p></body>");
+</script>
+</body></html>

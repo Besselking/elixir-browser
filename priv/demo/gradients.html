@@ -1,0 +1,45 @@
+<!doctype html>
+<html><head><title>Gradients</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #f4f6fa }
+.page { max-width: 640px; margin: 12px auto; padding: 0 14px }
+h1 { margin: 6px 0 10px }
+.card { background: #fff; border: 1px solid #c4cad6; border-radius: 8px; padding: 10px 14px; margin: 10px 0 }
+.card p { margin: 6px 0 }
+.g { display: inline-block; width: 180px; height: 70px; margin: 0 8px 8px 0; border: 1px solid #888; vertical-align: top }
+.big { display: block; width: auto; height: 90px }
+small { display: block; color: #555 }
+</style></head>
+<body><div class="page">
+<h1>Gradients</h1>
+<div class="card">
+  <p>Linear gradients: a direction, an angle, colour stops with positions, and transparency.</p>
+  <div class="g" style="background: linear-gradient(red, blue)"></div>
+  <div class="g" style="background: linear-gradient(to right, #fc0, #f60 60%, #c00)"></div>
+  <div class="g" style="background: linear-gradient(135deg, #36c, #6cf, #fff)"></div>
+  <div class="g" style="background: linear-gradient(to bottom right, rgba(0,0,0,0), #000)"></div>
+</div>
+<div class="card">
+  <p>Radial gradients: circle and ellipse, with a centre and hard stops.</p>
+  <div class="g" style="background: radial-gradient(circle, #fff, #36c)"></div>
+  <div class="g" style="background: radial-gradient(ellipse at top left, #fc0, #c00)"></div>
+  <div class="g" style="background: radial-gradient(circle at 70% 30%, #fff 0 10%, #36c 10% 40%, #003 40%)"></div>
+</div>
+<div class="card">
+  <p>Repeating linear gradients: stripes, a fade that repeats, a thin line pattern.</p>
+  <div class="g" style="background: repeating-linear-gradient(45deg, red 0 10px, blue 10px 20px)"></div>
+  <div class="g" style="background: repeating-linear-gradient(to right, #fff, #000 20px)"></div>
+  <div class="g" style="background: repeating-linear-gradient(#fc0 0 5px, #fff 5px 10px)"></div>
+</div>
+<div class="card">
+  <p>Repeating radial gradients: rings and a stretched ellipse.</p>
+  <div class="g" style="background: repeating-radial-gradient(circle at center, #06c 0 10px, #fff 10px 20px)"></div>
+  <div class="g" style="background: repeating-radial-gradient(#f60, #fff 15px)"></div>
+</div>
+<div class="card">
+  <p>Gradients as backgrounds of larger boxes, with a size and a repeat (<code>background-size</code>):</p>
+  <div class="g big" style="width: 100%; background: linear-gradient(to right, #36c, #c36)"></div>
+  <div class="g big" style="width: 100%; background: linear-gradient(90deg, #eee 50%, #ccc 50%) 0 0 / 40px 100%"></div>
+  <small>Not supported yet: <code>conic-gradient</code> (draws nothing).</small>
+</div>
+</div></body></html>
