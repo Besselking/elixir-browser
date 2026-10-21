@@ -1930,8 +1930,10 @@ defmodule Browser.LayoutTest do
     @base "http://example.test/dir/page.html"
     @img "http://example.test/dir/a.png"
 
+    @reset "<style>body{margin:0} p,div{margin:0}</style>"
+
     defp im(html, images, width \\ 500) do
-      page = Page.build("<style>body{margin:0} p,div{margin:0}</style>" <> html, @base)
+      page = Page.build(@reset <> html, @base)
       Layout.layout(page.nodes, width, &measure/2, 600, images: images)
     end
 
@@ -1944,16 +1946,43 @@ defmodule Browser.LayoutTest do
       assert [%{url: @img, w: 120, h: 80, x: 4}] = pics(items)
     end
 
+    # the pseudo URL of the picture of the (first) video of `html`, as the page indexes it
+    defp video_pic(html, key \\ "@src") do
+      page = Page.build(@reset <> html, @base)
+      {_, url} = List.keyfind(find_video(page.raw), key, 0)
+      url
+    end
+
+    defp find_video(nodes) when is_list(nodes), do: Enum.find_value(nodes, &find_video/1)
+    defp find_video({:element, "video", attrs, _}), do: attrs
+    defp find_video({:element, _, _, kids}), do: find_video(kids)
+    defp find_video(_), do: nil
+
     test "a video shows its loaded first frame as a picture, with its controls over it" do
-      frame = %{"media:http://example.test/dir/v.mp4" => {:ok, 160, 90}}
+      pic = video_pic(~s(<video src="v.mp4"></video>))
+      assert "media:http://example.test/dir/v.mp4#nid=" <> _ = pic
+      frame = %{pic => {:ok, 160, 90}}
 
       {items, _} = im(~s(<video src="v.mp4"></video>), frame)
-      assert [%{url: "media:http://example.test/dir/v.mp4", w: 160, h: 90}] = pics(items)
+      assert [%{url: ^pic, w: 160, h: 90}] = pics(items)
       assert Enum.filter(items, &(&1.type == :svg)) == []
 
       {items, _} = im(~s(<video src="v.mp4" controls></video>), frame)
       assert [%{w: 160, h: 90}] = pics(items)
       assert [%{w: 160, h: 90, ops: [_ | _]}] = Enum.filter(items, &(&1.type == :svg))
+    end
+
+    test "a video with a poster shows the frames of its player once there are some" do
+      html = ~s(<video src="v.mp4" poster="p.png" controls></video>)
+      frame = video_pic(html, "@frame")
+      poster = "http://example.test/dir/p.png"
+
+      {items, _} = im(html, %{poster => {:ok, 50, 50}})
+      assert [%{url: ^poster, w: 50, h: 50}] = pics(items)
+
+      {items, _} = im(html, %{poster => {:ok, 50, 50}, frame => {:ok, 160, 90}})
+      assert [%{url: ^frame, w: 160, h: 90}] = pics(items)
+      refute Layout.image_size_fixed?(Page.build(@reset <> html, @base).nodes, frame)
     end
 
     test "a video is never fixed in size for its picture: the box changes into a picture" do

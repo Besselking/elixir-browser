@@ -410,20 +410,34 @@ defmodule Browser.Page do
   end
 
   @doc "The address of the video element with element number `nid` (`\"@media\"`), or nil."
-  def media_url(%__MODULE__{raw: raw}, nid), do: find_media(raw, nid)
+  def media_url(%__MODULE__{raw: raw}, nid), do: find_media(raw, nid, fn _attrs, url -> url end)
 
-  defp find_media(nodes, nid) do
+  @doc """
+  The pseudo image URL (`"media:..."`) of the picture of the video with element number `nid`:
+  where the frames of its player are drawn. nil when the video shows a poster instead.
+  """
+  def media_picture(%__MODULE__{raw: raw}, nid) do
+    find_media(raw, nid, fn attrs, _url ->
+      case {List.keyfind(attrs, "@frame", 0), List.keyfind(attrs, "@src", 0)} do
+        {{_, "media:" <> _ = pic}, _} -> pic
+        {_, {_, "media:" <> _ = pic}} -> pic
+        _ -> nil
+      end
+    end)
+  end
+
+  defp find_media(nodes, nid, pick) do
     Enum.find_value(nodes, fn
       {:element, "video", attrs, kids} ->
         with {_, ^nid} <- List.keyfind(attrs, "@nid", 0),
              {_, url} <- List.keyfind(attrs, "@media", 0) do
-          url
+          pick.(attrs, url)
         else
-          _ -> find_media(kids, nid)
+          _ -> find_media(kids, nid, pick)
         end
 
       {:element, _tag, _attrs, kids} ->
-        find_media(kids, nid)
+        find_media(kids, nid, pick)
 
       _ ->
         nil

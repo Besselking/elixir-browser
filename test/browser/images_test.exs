@@ -23,6 +23,17 @@ defmodule Browser.ImagesTest do
       assert video_urls(html) == ["media:https://example.com/m.webm"]
     end
 
+    test "each video has a picture of its own, so frames do not go to other videos" do
+      html = ~s(<video src="c.mp4"></video><video src="c.mp4"></video>)
+
+      {nodes, _} =
+        html |> HTML.parse() |> Browser.Nids.index() |> Images.index("https://example.com/")
+
+      pics = for {:element, "video", attrs, _} <- nodes, do: List.keyfind(attrs, "@src", 0)
+      assert [{_, "media:https://example.com/c.mp4#nid=" <> a}, {_, "media:" <> _ = b}] = pics
+      refute "media:https://example.com/c.mp4#nid=" <> a == b
+    end
+
     test "a poster is an ordinary picture" do
       assert video_urls(~s(<video src="c.mp4" poster="p.png"></video>)) ==
                ["https://example.com/a/p.png"]

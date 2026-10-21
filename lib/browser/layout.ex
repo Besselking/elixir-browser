@@ -1705,6 +1705,7 @@ defmodule Browser.Layout do
     url = with "" <- attr_value(attrs, "@src"), do: nil
     images = Process.get(:layout_images)
     info = if url && images, do: Map.get(images, url)
+
     alt = attr_value(attrs, "alt")
     declared = declared_size(attrs)
 
@@ -1750,7 +1751,9 @@ defmodule Browser.Layout do
 
   # a video swaps its black box for the picture (its poster or first frame): always a new layout
   def image_size_fixed?({:element, "video", attrs, kids}, url),
-    do: attr_value(attrs, "@src") != url and image_size_fixed?(kids, url)
+    do:
+      attr_value(attrs, "@src") != url and attr_value(attrs, "@frame") != url and
+        image_size_fixed?(kids, url)
 
   def image_size_fixed?({:element, _tag, _attrs, kids}, url), do: image_size_fixed?(kids, url)
   def image_size_fixed?(_text, _url), do: true
@@ -1905,6 +1908,15 @@ defmodule Browser.Layout do
     url = with "" <- attr_value(attrs, "@src"), do: nil
     images = Process.get(:layout_images)
     info = if url && images, do: Map.get(images, url)
+
+    # a video with a poster shows the frames of its player instead, once there are some
+    {url, info} =
+      with "media:" <> _ = frame <- attr_value(attrs, "@frame"),
+           {:ok, _, _} = frame_info <- images && Map.get(images, frame) do
+        {frame, frame_info}
+      else
+        _ -> {url, info}
+      end
 
     # a loaded poster or first frame is a picture, like an <img>
     if tag == "video" and match?({:ok, _, _}, info) do

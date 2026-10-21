@@ -443,10 +443,14 @@ defmodule Browser.Session do
   def handle_info({:images_done, _stale, _urls}, state), do: {:noreply, state}
 
   # a frame of a playing video arrives like a picture that has loaded
-  def handle_info({:media_frame, pid, url, bmp}, state) do
-    if pid in Map.values(state.media),
-      do: handle_info({:image, state.nonce, "media:" <> url, {:ok, bmp, :bmp}}, state),
-      else: {:noreply, state}
+  def handle_info({:media_frame, pid, _url, bmp}, state) do
+    with {nid, _} <- Enum.find(state.media, fn {_nid, p} -> p == pid end),
+         %Page{} = page <- state.page,
+         pic when is_binary(pic) <- Page.media_picture(page, nid) do
+      handle_info({:image, state.nonce, pic, {:ok, bmp, :bmp}}, state)
+    else
+      _ -> {:noreply, state}
+    end
   end
 
   # a player says something: the page's scripts read it and hear the events
@@ -3057,6 +3061,12 @@ defmodule Browser.Session do
 
   # swaps the controls of the video in the items and repaints them
   defp redraw_media_ui(state, nid, m) do
+    File.write!(
+      "/tmp/mui.log",
+      "#{inspect({nid, m})} items=#{Enum.count(state.items, &Map.get(&1, :video_controls))}\n",
+      [:append]
+    )
+
     state = %{state | media_ui: Map.put(state.media_ui, nid, m)}
     items = Browser.Media.Controls.apply(state.items, %{nid => media_ui_states(state)[nid]})
     UI.update(state.ui, items, overlay(state), state.scroll, state.caret_on, :diff)

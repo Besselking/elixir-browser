@@ -52,12 +52,18 @@ defmodule Browser.Images do
 
     url =
       case attr(attrs, "poster") |> String.trim() do
-        "" -> media && "media:" <> media
+        "" -> media && media_picture(media, attrs)
         poster -> Fetch.resolve(base, poster)
       end
 
     # `@media` is the address of the video itself, which the player needs when there is a poster
     attrs = if media, do: attrs ++ [{"@media", media}], else: attrs
+
+    # (with a poster, the frames of the player are drawn from the pseudo URL in `@frame`)
+    attrs =
+      if media && url != "media:" <> media && !String.starts_with?(url || "", "media:"),
+        do: attrs ++ [{"@frame", media_picture(media, attrs)}],
+        else: attrs
 
     if url do
       {{:element, "video", attrs ++ [{"@src", url}], kids}, [url | acc]}
@@ -92,6 +98,15 @@ defmodule Browser.Images do
 
   @doc "The `url()` addresses in a computed `background-image` list."
   def background_urls(images), do: Browser.Backgrounds.urls(images)
+
+  # The pseudo URL of the picture of a video: its own for each element (`#nid=` and the element
+  # number), so that a playing video does not draw its frames into other videos of the same file.
+  defp media_picture(media, attrs) do
+    case List.keyfind(attrs, "@nid", 0) do
+      {_, nid} -> "media:" <> media <> "#nid=" <> to_string(nid)
+      nil -> "media:" <> media
+    end
+  end
 
   # the address of the `src` of a video or of its first `<source>`
   defp media_source(attrs, kids, base) do
@@ -140,6 +155,8 @@ defmodule Browser.Images do
   comes back parsed: `{:ok, scene, :svg}` (see `Browser.Svg`).
   """
   def fetch("media:" <> url, base) do
+    [url | _] = String.split(url, "#nid=", parts: 2)
+
     with :ok <- check_allowed(url, base),
          :ok <- check_media_size(url, base),
          {:ok, bytes} <- load(url, base),
