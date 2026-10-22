@@ -102,13 +102,9 @@ defmodule Browser.RangeControl do
     surface =
       if color && frac > 0 do
         surface
-        |> Canvas.save()
         |> Canvas.begin_path()
-        |> Canvas.round_rect(0, 0, w, h, radii)
-        |> Canvas.clip()
-        |> Canvas.fill_rect(0, 0, max(w * frac, 1.0), h, {:color, color}, 1.0)
-        |> Canvas.restore()
-        |> elem(0)
+        |> fill_shape(max(w * frac, 1.0), w, h)
+        |> Canvas.fill({:color, color}, :nonzero, 1.0)
       else
         surface
       end
@@ -118,6 +114,37 @@ defmodule Browser.RangeControl do
     |> Canvas.round_rect(0.5, 0.5, w - 1, h - 1, [r, r, r, r])
     |> Canvas.stroke(edge, %{width: 1.0, cap: :butt, join: :miter, miter: 10.0}, 1.0)
     |> Canvas.ops()
+  end
+
+  # The part of a bar (a rounded track `w` x `h`) that is left of `fw`: the end caps are
+  # half circles, so the path follows them where the fill reaches into one.
+  defp fill_shape(surface, fw, w, h) when fw >= w - 0.5 do
+    surface |> Canvas.round_rect(0, 0, w, h, List.duplicate(h / 2, 4))
+  end
+
+  defp fill_shape(surface, fw, _w, h) when fw <= h / 2 do
+    r = h / 2
+    beta = :math.acos((fw - r) / r)
+    surface |> Canvas.arc(r, r, r, beta, 2 * :math.pi() - beta, false) |> Canvas.close_path()
+  end
+
+  defp fill_shape(surface, fw, w, h) do
+    r = h / 2
+    pi = :math.pi()
+    left = Canvas.arc(surface, r, r, r, pi / 2, 3 * pi / 2, false)
+
+    if fw <= w - r do
+      left |> Canvas.line_to(fw, 0) |> Canvas.line_to(fw, h) |> Canvas.close_path()
+    else
+      cap = :math.acos((fw - (w - r)) / r)
+
+      left
+      |> Canvas.line_to(w - r, 0)
+      |> Canvas.arc(w - r, r, r, -pi / 2, -cap, false)
+      |> Canvas.line_to(fw, r + r * :math.sin(cap))
+      |> Canvas.arc(w - r, r, r, cap, pi / 2, false)
+      |> Canvas.close_path()
+    end
   end
 
   defp bar(surface, _x, _cy, w, _color) when w <= 0, do: surface
