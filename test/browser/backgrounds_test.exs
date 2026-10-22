@@ -121,7 +121,7 @@ defmodule Browser.BackgroundsTest do
     end
 
     test "unsupported gradients read as none" do
-      assert B.parse_images("conic-gradient(red, blue)") == [:none]
+      assert B.parse_images("conic-gradient(red)") == [:none]
       assert B.parse_images("image-set(url(a.png) 1x)") == [:none]
     end
 
@@ -617,6 +617,41 @@ defmodule Browser.BackgroundsTest do
 
     test "a pathological 1px tile is capped" do
       assert length(B.tiles({0, 0, 1, 1}, {:repeat, :repeat}, {0, 0, 5000, 5000})) == 4000
+    end
+  end
+
+  describe "conic gradients" do
+    test "parse from, at and stops given as angles" do
+      assert [{:conic, %{from: 90.0, at: {{:pct, 0.25}, {:pct, 0.5}}, repeating: false}, stops}] =
+               B.parse_images("conic-gradient(from 90deg at 25% 50%, red 0deg, blue 180deg)")
+
+      assert [%{pos: {:pct, +0.0}}, %{pos: {:pct, 0.5}}] = stops
+    end
+
+    test "a plain one starts at the top, in the middle" do
+      assert [{:conic, %{from: +0.0, at: {{:pct, 0.5}, {:pct, 0.5}}}, [_, _]}] =
+               B.parse_images("conic-gradient(red, blue)")
+
+      assert [{:conic, %{repeating: true}, _}] =
+               B.parse_images("repeating-conic-gradient(red 0 10%, blue 0 20%)")
+    end
+
+    test "wedges are split at the hard stops" do
+      stops = [
+        {0.0, {255, 0, 0, 255}},
+        {0.25, {255, 0, 0, 255}},
+        {0.25, {0, 0, 255, 255}},
+        {1.0, {0, 0, 255, 255}}
+      ]
+
+      wedges = B.conic_wedges(stops, 8)
+      assert {+0.0, 0.125, {255, 0, 0, 255}} = hd(wedges)
+
+      assert Enum.all?(wedges, fn {a, _, c} ->
+               if a < 0.25, do: c == {255, 0, 0, 255}, else: c == {0, 0, 255, 255}
+             end)
+
+      assert {_, 1.0, _} = List.last(wedges)
     end
   end
 end

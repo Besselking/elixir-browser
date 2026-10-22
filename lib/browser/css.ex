@@ -13,7 +13,7 @@ defmodule Browser.CSS do
 
   A selector may end in `::before`, `::after` (or the one-colon forms), `::marker` or
   `::placeholder`: its rule styles the generated box, marker or hint, and carries
-  `pseudo: :before | :after | :marker | :placeholder | :first_letter` (nil for other rules).
+  `pseudo: :before | :after | :marker | :placeholder | :first_letter | :first_line` (nil for other rules).
   Selectors using anything else (`:has()`, …) are dropped. `@media` (see
   `Browser.MediaQuery`), `@supports` (assumed true unless it starts with `not`)
   and `@layer` blocks are entered (a rule carries its `layer`, nil when it is in none, for the
@@ -586,7 +586,7 @@ defmodule Browser.CSS do
   defp split_pseudo_element(str) do
     case Regex.run(
            re(
-             ~r/\A(.*?)(?:::(before|after|marker|placeholder|backdrop|first-letter)|:(before|after|first-letter))\z/su
+             ~r/\A(.*?)(?:::(before|after|marker|placeholder|backdrop|first-letter|first-line)|:(before|after|first-letter|first-line))\z/su
            ),
            str
          ) do

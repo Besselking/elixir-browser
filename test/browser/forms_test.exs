@@ -633,4 +633,28 @@ defmodule Browser.FormsTest do
       assert closed == first
     end
   end
+
+  describe "progress and meter bars" do
+    defp bar(tag, attrs), do: Forms.meter_bar(tag, Enum.map(attrs, fn {k, v} -> {k, v} end))
+
+    test "a progress bar shows value over max, or is busy without a value" do
+      assert {:progress, 0.35} = bar("progress", [{"value", "35"}, {"max", "100"}])
+      assert {:progress, 0.5} = bar("progress", [{"value", "0.5"}])
+      assert {:progress, 1.0} = bar("progress", [{"value", "9"}])
+      assert {:progress, nil} = bar("progress", [])
+    end
+
+    test "a meter is green near the optimum, yellow next to it and red far from it" do
+      range = [{"min", "0"}, {"max", "100"}, {"low", "40"}, {"high", "80"}, {"optimum", "20"}]
+      assert {:meter, 0.3, :good} = bar("meter", [{"value", "30"} | range])
+      assert {:meter, 0.6, :warn} = bar("meter", [{"value", "60"} | range])
+      assert {:meter, 0.95, :bad} = bar("meter", [{"value", "95"} | range])
+    end
+
+    test "the bar replaces the content of the element" do
+      html = ~s(<progress value="1" max="2">fallback</progress>)
+      assert [{:element, "canvas", attrs, []}] = kids(html, "progress")
+      assert {"@bar", {:progress, 0.5}} = List.keyfind(attrs, "@bar", 0)
+    end
+  end
 end

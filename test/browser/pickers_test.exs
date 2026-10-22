@@ -102,4 +102,13 @@ defmodule Browser.PickersTest do
       assert [%{w: 16, h: 16}] = icons
     end
   end
+
+  describe "time" do
+    test "the clock of a time field" do
+      assert Pickers.clock_of("14:05") == {14, 5}
+      assert Pickers.clock_of("") == {0, 0}
+      assert Pickers.clock_of("99:99") == {23, 59}
+      assert Pickers.clock_text({7, 5}) == "07:05"
+    end
+  end
 end

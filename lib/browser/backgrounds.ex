@@ -4,7 +4,7 @@ defmodule Browser.Backgrounds do
 
   Values are comma-separated lists of layers (the first layer is on top). Parsed:
 
-    * `parse_images/1` -> `:none | {:url, url} | {:linear, dir, stops} | {:radial, opts, stops}`
+    * `parse_images/1` -> `:none | {:url, url} | {:linear, dir, stops} | {:radial, opts, stops} | {:conic, opts, stops}`
       (a conic gradient is not supported and reads as `:none`; a repeating one has `{:repeating, dir}`
       as its direction, or `repeating: true` in its options)
     * `parse_repeat/1` -> `{x, y}` with `:repeat | :no_repeat`
@@ -136,9 +136,54 @@ defmodule Browser.Backgrounds do
             else: {:radial, Map.put(opts, :repeating, true), stops}
         end
 
+      m = Regex.run(re(~r/\A(repeating-)?conic-gradient\((.*)\)\z/is), s) ->
+        with {:conic, opts, stops} <- conic(Enum.at(m, 2)) do
+          {:conic, Map.put(opts, :repeating, Enum.at(m, 1) != ""), stops}
+        end
+
       true ->
         :none
     end
+  end
+
+  # `from <angle>` and `at <position>` first, then stops at angles or percentages
+  defp conic(inner) do
+    [first | rest] = args = split_top(inner)
+
+    {opts, stop_args} =
+      if Regex.match?(re(~r/\A(from|at)\s/i), first),
+        do: {conic_opts(first), rest},
+        else: {conic_opts(""), args}
+
+    stop_args = Enum.map(stop_args, &angles_to_percent/1)
+    with [_, _ | _] = stops <- stops(stop_args), do: {:conic, opts, stops}, else: (_ -> :none)
+  end
+
+  defp conic_opts(arg) do
+    lower = String.downcase(arg)
+    [head | at] = String.split(lower, re(~r/\bat\b/), parts: 2)
+
+    from =
+      case Regex.run(re(~r/from\s+(\S+)/), head) do
+        [_, angle] -> with {:angle, deg} <- direction(angle), do: deg, else: (_ -> 0.0)
+        nil -> 0.0
+      end
+
+    at =
+      case at do
+        [pos] -> position_pair(tokens(pos))
+        [] -> {{:pct, 0.5}, {:pct, 0.5}}
+      end
+
+    %{from: from, at: at}
+  end
+
+  # "red 90deg" -> "red 25%": a full turn is 100%
+  defp angles_to_percent(arg) do
+    Regex.replace(re(~r/([+-]?(?:\d+\.?\d*|\.\d+))(deg|turn|rad|grad)\b/i), arg, fn _, n, unit ->
+      {:angle, deg} = direction(n <> unit)
+      "#{deg / 3.6}%"
+    end)
   end
 
   defp linear(inner) do
@@ -646,7 +691,7 @@ defmodule Browser.Backgrounds do
   `{x, y, w, h}`. `sizes` maps image urls to `{:ok, w, h}` or `{:svg, w, h, scene}` (images not loaded yet are
   skipped) and `current` is the colour for `currentcolor`.
 
-  A layer is `%{kind: :image | :svg | :linear | :radial, tile: {x, y, w, h}, repeat: {rx, ry},
+  A layer is `%{kind: :image | :svg | :linear | :radial | :conic, tile: {x, y, w, h}, repeat: {rx, ry},
   clip: clip, ...}` where gradient geometry is relative to the tile's top-left corner.
   """
   def paint_layers(spec, area, clip, sizes, current, viewport \\ nil) do
@@ -706,6 +751,7 @@ defmodule Browser.Backgrounds do
 
   defp image_content({:linear, dir, stops}, _sizes), do: {:linear, {dir, stops}, nil}
   defp image_content({:radial, opts, stops}, _sizes), do: {:radial, {opts, stops}, nil}
+  defp image_content({:conic, opts, stops}, _sizes), do: {:conic, {opts, stops}, nil}
   defp image_content(_, _sizes), do: nil
 
   defp finish(:image, url, _tw, _th, _current), do: %{url: url}
@@ -731,6 +777,29 @@ defmodule Browser.Backgrounds do
     stops = normalize_stops(stops, rx, current)
     stops = if opts[:repeating], do: repeat_stops(stops), else: stops
     %{center: {cx, cy}, radii: {rx, ry}, stops: stops}
+  end
+
+  defp finish(:conic, {opts, stops}, tw, th, current) do
+    {ax, ay} = opts.at
+    stops = normalize_stops(stops, 1, current)
+    stops = if opts.repeating, do: repeat_stops(stops), else: stops
+    %{center: {place(ax, tw), place(ay, th)}, from: opts.from, stops: stops}
+  end
+
+  @doc """
+  The wedges of a conic gradient: `[{from, to, color}]` with positions as fractions of a turn,
+  split at the stops and at least `steps` times per turn.
+  """
+  def conic_wedges(stops, steps) do
+    cuts =
+      for({pos, _} <- stops, pos > 0.0 and pos < 1.0, do: pos)
+      |> Enum.concat(for i <- 0..steps, do: i / steps)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    cuts
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.map(fn [a, b] -> {a, b, color_at(stops, (a + b) / 2)} end)
   end
 
   @max_repeats 500

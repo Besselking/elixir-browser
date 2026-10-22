@@ -386,6 +386,17 @@ defmodule Browser.Forms do
     end
   end
 
+  # the bar of <progress> and <meter>: a canvas as big as the element that the layout draws
+  defp render_node({:element, tag, attrs, _} = node, _state, _controls, prev)
+       when tag in ["progress", "meter"] do
+    computed = %{"display" => "block", "width" => {:pct, 1.0}, "height" => {:pct, 1.0}}
+
+    bar =
+      {:element, "canvas", [{"@computed", computed}, {"@bar", meter_bar(tag, attrs)}], []}
+
+    classify({:element, tag, attrs, [bar]}, node, prev)
+  end
+
   defp render_node({:element, "details", attrs, kids} = node, state, controls, prev) do
     kids =
       with {_, cid} <- List.keyfind(attrs, "@summary", 0),
@@ -476,7 +487,7 @@ defmodule Browser.Forms do
 
   defp hot_node({:element, tag, attrs, kids}, set) do
     {kids?, set} = hot_list(kids, set)
-    hot? = kids? or tag in ~w(input select textarea details summary)
+    hot? = kids? or tag in ~w(input select textarea details summary progress meter)
 
     case List.keyfind(attrs, "@nid", 0) do
       {_, nid} when hot? -> {true, MapSet.put(set, nid)}
@@ -570,7 +581,7 @@ defmodule Browser.Forms do
   end
 
   # the calendar button at the right end of a date field
-  defp picker_icon do
+  defp picker_icon(type) do
     computed = %{
       "display" => "block",
       "float" => "right",
@@ -579,14 +590,54 @@ defmodule Browser.Forms do
       "margin-left" => 2.0
     }
 
-    {:element, "canvas", [{"@computed", computed}, {"@icon", :calendar}], []}
+    {:element, "canvas",
+     [{"@computed", computed}, {"@icon", if(type == "time", do: :clock, else: :calendar)}], []}
   end
 
   @doc "The types of inputs that open a picker."
   def picker?(%{tag: "input", type: type}),
-    do: type in ["color", "date", "datetime-local", "month", "week"]
+    do: type in ["color", "date", "datetime-local", "month", "week", "time"]
 
   def picker?(_control), do: false
+
+  @doc "What a `<progress>` or `<meter>` bar shows: `{:progress, frac | nil}` or `{:meter, frac, level}`."
+  def meter_bar("progress", attrs) do
+    max = number(attr(attrs, "max"), 1.0)
+    max = if max > 0, do: max, else: 1.0
+
+    case number(attr(attrs, "value"), nil) do
+      nil -> {:progress, nil}
+      value -> {:progress, clamp01(value / max)}
+    end
+  end
+
+  def meter_bar("meter", attrs) do
+    min = number(attr(attrs, "min"), 0.0)
+    max = max(number(attr(attrs, "max"), 1.0), min)
+    value = number(attr(attrs, "value"), 0.0) |> max(min) |> min(max)
+    low = number(attr(attrs, "low"), min) |> max(min) |> min(max)
+    high = number(attr(attrs, "high"), max) |> max(low) |> min(max)
+    optimum = number(attr(attrs, "optimum"), (min + max) / 2) |> max(min) |> min(max)
+    region = fn v -> if(v < low, do: 0, else: if(v > high, do: 2, else: 1)) end
+
+    level =
+      case abs(region.(value) - region.(optimum)) do
+        0 -> :good
+        1 -> :warn
+        _ -> :bad
+      end
+
+    {:meter, if(max > min, do: clamp01((value - min) / (max - min)), else: 0.0), level}
+  end
+
+  defp number(text, default) do
+    case Float.parse(String.trim(to_string(text))) do
+      {n, _} -> n
+      :error -> default
+    end
+  end
+
+  defp clamp01(f), do: f |> max(0.0) |> min(1.0)
 
   # the track and the thumb of a range: a canvas as big as the control that the layout draws
   defp range_node(frac, disabled?) do
@@ -626,8 +677,8 @@ defmodule Browser.Forms do
       "color" ->
         [swatch(cur.value)]
 
-      t when t in ["date", "datetime-local", "month", "week"] ->
-        [picker_icon() | shown(cur.value, cur, placeholder, attrs)]
+      t when t in ["date", "datetime-local", "month", "week", "time"] ->
+        [picker_icon(t) | shown(cur.value, cur, placeholder, attrs)]
 
       "password" ->
         shown(bullets(cur.value), cur, placeholder, attrs)

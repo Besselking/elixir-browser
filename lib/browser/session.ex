@@ -1302,6 +1302,15 @@ defmodule Browser.Session do
     end
   end
 
+  defp pick(state, %{type: "time"} = control) do
+    old = control_value(state, control)
+
+    case UI.pick_time(state.ui, Browser.Pickers.clock_of(old)) do
+      {:ok, time} -> set_picked(state, control, Browser.Pickers.clock_text(time))
+      :cancel -> state
+    end
+  end
+
   defp pick(state, %{type: type} = control) do
     old = control_value(state, control)
 
