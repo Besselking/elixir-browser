@@ -15,6 +15,7 @@ Native GUI web browser in Elixir (`:wx`): HTTP(S), HTML parser, CSS engine, layo
 4. `mix js.test262 --fetch --check --timeout 30000 [--shard N/4]`: a test in `test262.baseline` must keep passing. CI skips it for PRs that touch nothing JS-related.
 5. `mix reftest --fetch --check --layout-check [--shard N/3]` against `reftest.baseline` (WPT reftests of layout/paint; `--sweep`, `--dump DIR`, `-v`, `--failures FILE`; `mix help reftest`). The WPT pass count is the layout regression check.
 - `--update` rewrites a baseline. Do NOT commit a baseline from a local `js.test262 --update`: local PCRE/OTP differs for RegExp tests (~388 spurious "regressions" locally, extra passing RegExp entries that fail on CI). Take `origin/main`'s baseline plus only the new non-RegExp entries. `--update` refuses `--shard`.
+- Speed: `mix.exs` sets `infer_signatures: false` (inference on the 15k-line `layout.ex` cost over 2 min of a full compile). `mix test` leaves out tests tagged `:slow` unless `CI` is set; use `mix test --include slow` before a push that touches the JS engine. Tag new tests that take over 1 s `@tag :slow`. After a change to `layout.ex` the compile still takes ~1.5 min (type check of Browser.Layout); other files rebuild in seconds.
 - Memory: `mix test` alone peaks about 11 GB RSS. Never run two test VMs, or tests plus test262, at the same time (OOM kill).
 - Workflow files: cloud sessions cannot push `.github/workflows` edits; propose the file and let Bess apply it.
 

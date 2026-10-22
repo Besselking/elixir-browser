@@ -8,6 +8,7 @@ defmodule Browser.MixProject do
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       deps: [],
+      elixirc_options: [infer_signatures: false],
       # The corpus files and the runner of the JS oracles are loaded by the tests that use
       # them.
       test_ignore_filters: [

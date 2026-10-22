@@ -26,6 +26,7 @@ defmodule Browser.JS.ElemsFormTest do
 
   defp sparse(on?), do: fn -> Process.put(:js_elems_sparse, on?) end
 
+  @tag :slow
   test "all arrays sparse, then dense: the outcomes, the heap ids and the heap count agree" do
     assert length(@programs) > 600
 
@@ -35,6 +36,7 @@ defmodule Browser.JS.ElemsFormTest do
     )
   end
 
+  @tag :slow
   test "the same with a forced collection before each top-level statement" do
     HeapOracle.assert_same(
       HeapOracle.both(@programs, sparse(true), sparse(false), ids: true, gc: true),

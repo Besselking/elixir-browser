@@ -208,6 +208,7 @@ defmodule Browser.JS.AttrIndexTest do
   """
 
   for seed <- [1, 7, 42, 2024, 99_991] do
+    @tag :slow
     test "the searches by attribute value agree with a walk of the tree after random changes (seed #{seed})" do
       {logs, errors} = run(String.replace(@oracle, "SEED", to_string(unquote(seed))), @body)
       assert errors == []

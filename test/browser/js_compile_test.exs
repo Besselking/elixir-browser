@@ -888,11 +888,13 @@ defmodule Browser.JS.CompileTest do
   # ── 5.1: the differential oracle ───────────────────────────
 
   describe "5.1: the differential oracle at level 4" do
+    @tag :slow
     test "the corpus gives the same result, console, steps, heap ids, heap count and position" do
       assert length(@corpus) > 600
       assert_same(both(@corpus, []), "with compilation on")
     end
 
+    @tag :slow
     test "the same with a forced collection before each top-level statement" do
       # A compiled fun that held a frame id would keep that frame from the collector's
       # walk. The collection then frees a live frame, and the oracle sees the difference.
@@ -1209,6 +1211,7 @@ defmodule Browser.JS.CompileTest do
   # ── 5.5: the matrix ────────────────────────────────────────
 
   describe "5.5: the matrix" do
+    @tag :slow
     test "the new snippets give the same outcome with compilation on and off at every level" do
       # Levels 1 to 3 mix rewritten functions with old-path functions in one program.
       for level <- @levels, do: assert_same(both(@small, level: level), "at #{inspect(level)}")
@@ -1241,6 +1244,7 @@ defmodule Browser.JS.CompileTest do
       end
     end
 
+    @tag :slow
     test "the new snippets give the same outcome at :off, 1 and 4 with the forced collections" do
       # Three levels are enough here: one with no frames, one that mixes the two paths, and
       # the default. The corpus runs with the forced collections at level 4 in 5.1.

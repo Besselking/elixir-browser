@@ -88,6 +88,7 @@ defmodule Browser.JS.ShapesTest do
   end
 
   describe "the shapes oracle" do
+    @tag :slow
     test "fast records off, then on: the outcomes, the heap ids and the heap count agree" do
       assert length(@programs) > 600
 
@@ -97,6 +98,7 @@ defmodule Browser.JS.ShapesTest do
       )
     end
 
+    @tag :slow
     test "the same with a forced collection before each top-level statement" do
       # (the shape ids of the runs must be ids of objects that a program makes)
       assert inspect_run("", fn -> :erlang.get(:js_next) end) < @first_sid
@@ -124,6 +126,7 @@ defmodule Browser.JS.ShapesTest do
           do: assert({name, got} == {name, want})
     end
 
+    @tag :slow
     test "each fast record of the corpus has a correct form, and the switch turns them off" do
       count = fn ->
         rs = records()

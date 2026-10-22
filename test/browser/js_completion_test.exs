@@ -331,6 +331,7 @@ defmodule Browser.JS.CompletionTest do
   ]
 
   describe "6.2: the snippet rows" do
+    @tag :slow
     test "each row gives its value at :off and at level 4" do
       for {n, src, value} <- @rows, level <- @levels do
         assert eval(src, level) == {:ok, value, []}, "row #{n} at #{level}: #{src}"
@@ -1049,6 +1050,7 @@ defmodule Browser.JS.CompletionTest do
   ]
 
   describe "the step 3 bench programs" do
+    @tag :slow
     test "each program gives its value at :off and at level 4" do
       for {name, body, expected} <- @bench_3, level <- @levels do
         src = "(function(){ function f(){ #{body} } return f() })()"

@@ -4241,6 +4241,7 @@ defmodule Browser.JS.FramesTest do
     end
 
     @tag timeout: 600_000
+    @tag :slow
     test "the bench programs of steps 2b to 2e give their values at level 4" do
       for {name, body, expected} <- @bench ++ @bench_2d ++ @bench_2e do
         src = "(function(){ function f(){ #{body} } return f() })()"

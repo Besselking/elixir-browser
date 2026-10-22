@@ -415,6 +415,7 @@ defmodule Browser.StyleTwinTest do
   # the session that adopts each style state as it comes: each request gets one answer, that of
   # a cold layout of its tree. At the end all the processes of the runs stopped, and the gate has
   # no run and no twin.
+  @tag :slow
   test "requests at random times during a prewarm each get one right answer" do
     rows = String.duplicate(~s(<div class="r"><p>row</p><span>s</span></div>), 1500)
     # (the rows come first: the requests change only what comes after them, so the twin can
