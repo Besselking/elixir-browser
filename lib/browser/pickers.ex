@@ -50,22 +50,30 @@ defmodule Browser.Pickers do
     end
   end
 
-  @doc "The text of a field of `type` after the user chose `date` (`old` is what it held)."
-  def date_text("date", date, _old), do: Date.to_iso8601(date)
-  def date_text("month", date, _old), do: String.slice(Date.to_iso8601(date), 0, 7)
+  @doc "The `{hour, minute}` that the text of a datetime-local field shows (00:00 when it shows none)."
+  def time_of(text) do
+    case Regex.run(~r/T(\d{2}):(\d{2})/, to_string(text)) do
+      [_, h, m] -> {min(String.to_integer(h), 23), min(String.to_integer(m), 59)}
+      nil -> {0, 0}
+    end
+  end
 
-  def date_text("week", date, _old) do
+  @doc """
+  The text of a field of `type` after the user chose `date` (`old` is what it held) and, for
+  datetime-local, `time` (`nil` keeps the old time).
+  """
+  def date_text(type, date, old, time \\ nil)
+  def date_text("date", date, _old, _time), do: Date.to_iso8601(date)
+  def date_text("month", date, _old, _time), do: String.slice(Date.to_iso8601(date), 0, 7)
+
+  def date_text("week", date, _old, _time) do
     {year, week} = :calendar.iso_week_number({date.year, date.month, date.day})
     "#{year}-W#{week |> Integer.to_string() |> String.pad_leading(2, "0")}"
   end
 
-  def date_text("datetime-local", date, old) do
-    time =
-      case Regex.run(~r/T(\d{2}:\d{2}(?::\d{2})?)\z/, to_string(old)) do
-        [_, t] -> t
-        nil -> "00:00"
-      end
-
-    Date.to_iso8601(date) <> "T" <> time
+  def date_text("datetime-local", date, old, time) do
+    {h, m} = time || time_of(old)
+    pad = &(&1 |> Integer.to_string() |> String.pad_leading(2, "0"))
+    Date.to_iso8601(date) <> "T" <> pad.(h) <> ":" <> pad.(m)
   end
 end

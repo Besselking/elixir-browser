@@ -87,6 +87,12 @@ defmodule Browser.PickersTest do
       assert Pickers.date_text("week", d, "") == "2026-W43"
       assert Pickers.date_text("datetime-local", d, "2026-01-01T09:30") == "2026-10-21T09:30"
       assert Pickers.date_text("datetime-local", d, "") == "2026-10-21T00:00"
+
+      assert Pickers.date_text("datetime-local", d, "2026-01-01T09:30", {7, 5}) ==
+               "2026-10-21T07:05"
+
+      assert Pickers.time_of("2026-01-01T09:30") == {9, 30}
+      assert Pickers.time_of("") == {0, 0}
     end
 
     test "a date field is a text field with a calendar button" do

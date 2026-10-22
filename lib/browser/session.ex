@@ -1305,9 +1305,14 @@ defmodule Browser.Session do
   defp pick(state, %{type: type} = control) do
     old = control_value(state, control)
 
-    case UI.pick_date(state.ui, Browser.Pickers.date_of(type, old)) do
-      {:ok, date} -> set_picked(state, control, Browser.Pickers.date_text(type, date, old))
-      :cancel -> state
+    time = if type == "datetime-local", do: Browser.Pickers.time_of(old)
+
+    case UI.pick_date(state.ui, Browser.Pickers.date_of(type, old), time) do
+      {:ok, date, time} ->
+        set_picked(state, control, Browser.Pickers.date_text(type, date, old, time))
+
+      :cancel ->
+        state
     end
   end
 
