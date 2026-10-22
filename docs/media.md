@@ -19,8 +19,9 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
   button and a bar.
 - `<audio controls>` is a 300 x 54 px bar. `<audio>` without `controls` is not shown.
 - `<iframe>` is an inline box. It is 300 x 150 px, or the size of its `width` and
-  `height` attributes. The page inside is not loaded. (Frames that a script makes with
-  `document.write` or `srcdoc` use their own path.)
+  `height` attributes. The page in its `src` or `srcdoc` is loaded and drawn inside the
+  box, with its own scripts and style sheets. Frames that a script makes with
+  `document.write` work the same way.
 - A video with a `poster` shows the poster. Without one it shows its first frame, if the
   helper is built and the file is at most 32 MiB (the helper reads a file; streaming is
   a later step). The picture is scaled to the box like an image (`object-fit: contain`).
@@ -28,7 +29,7 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
   `controls` start and stop it. A click on the bar jumps to that place in the video. The
   controls show a pause button and a progress line that moves while the video plays. A
   playing video hides its controls when the mouse has not moved over it for 2 seconds; they
-  come back when the mouse moves. A video with a `poster` shows the frames once it plays.
+  come back when the mouse moves. A video with a `poster` shows the frames once it plays. A video with `autoplay` starts when the page is shown, one with `loop` starts again at the end. Setting `currentTime` jumps to that time.
   `Browser.Media.Player` downloads the file (up to 256 MiB), decodes frame by frame and sends
   each frame in time. Each frame is drawn like a new picture of the same size. A late frame
   (more than 200 ms) is dropped. At the end the video goes back to its first frame, paused.
@@ -36,10 +37,11 @@ pkg-config (apt on Debian and Ubuntu, Homebrew on macOS). A new session has them
 - Scripts can read `paused`, `ended`, `currentTime`, `duration`, `readyState`, `videoWidth`
   and `videoHeight` of a video. The player tells the page about changes, and the page gets
   the events `loadedmetadata`, `loadeddata`, `canplay`, `play`, `playing`, `pause`,
-  `timeupdate` (about every 250 ms), `ended` and `error`. The player starts on the first
-  `play()` or click, so a video that nobody plays has `duration` NaN.
-- Not done yet: sound, setting `currentTime` (seeking), `autoplay` and `loop`, the `<source>`
-  choice by `type`, audio elements, `canPlayType`. `play()` returns a promise that is already
+  `timeupdate` (about every 250 ms), `ended` and `error`. A video with `controls` is opened when the page is shown (unless it has
+  `preload="none"` or the file is bigger than 32 MiB), so its length is known before the
+  first play. Other videos start their player on the first `play()` or click.
+- A `<source>` is chosen by its `type`, and `canPlayType()` answers `"maybe"` or `"probably"` for the common types once the helper is built.
+- Not done yet: sound, audio elements. `play()` returns a promise that is already
   resolved.
 
 ## Stages

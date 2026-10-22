@@ -46,7 +46,10 @@ defmodule Browser.Page do
     # match `:hover` (see `set_hover/3`)
     hover: [],
     # what of the rules can match `:hover` (`hover_rules/1`): nil before it is worked out
-    hover_rules: nil
+    hover_rules: nil,
+    # the content sizes of the query containers of the last layout (`Browser.Container`): what
+    # the `@container` rules were matched against
+    cq_sizes: %{}
   ]
 
   @doc "Fetches and builds `url` for the viewport `env` (see `Browser.MediaQuery`)."
@@ -191,7 +194,7 @@ defmodule Browser.Page do
   def restyle(%__MODULE__{} = page, env) do
     key =
       {Style.media_key(page.queries, env), page.viewport_units && {env.width, env.height},
-       page.hover}
+       page.hover, page.cq_sizes}
 
     if key == page.key and page.nodes != nil do
       page
@@ -210,15 +213,20 @@ defmodule Browser.Page do
                 nil -> nil
               end
 
+            # (what a container query matches is not in the memo's key)
+            old = if Map.get(index, :cq), do: nil, else: old
+            Process.put(:style_container_sizes, page.cq_sizes)
+
             Process.delete(:style_vu)
             raw = page.raw |> Browser.Modal.backdrops() |> mark_hover(MapSet.new(page.hover))
             {pruned, memo} = Style.prune(raw, index, old)
+            Process.delete(:style_container_sizes)
 
             # (a new style attribute with viewport units: the memo and the cache now hold for
             # this window size only)
             key =
               if Process.delete(:style_vu) == true and not page.viewport_units,
-                do: {elem(key, 0), {env.width, env.height}, page.hover},
+                do: {elem(key, 0), {env.width, env.height}, page.hover, page.cq_sizes},
                 else: key
 
             defs = Browser.Svg.defs(page.raw, pruned)
@@ -239,6 +247,28 @@ defmodule Browser.Page do
       }
 
       render(page, page.form_state)
+    end
+  end
+
+  @doc "Does a rule of the page depend on the size of a container (`@container`)?"
+  def cq?(%__MODULE__{rules: rules}), do: Enum.any?(rules, &Map.has_key?(&1, :cq))
+
+  @doc """
+  Lays `page` out with `layout` (a function from a page to `{items, height}`, run with the
+  `boxes: true` option) and, when it has `@container` rules, styles it again with the sizes of its
+  containers that the layout gave, until they stop changing (three times at most). Returns
+  `{page, {items, height}}`.
+  """
+  def settle(%__MODULE__{} = page, env, layout), do: settle(page, env, layout, layout.(page), 0)
+
+  defp settle(page, env, layout, {items, _height} = laid_out, round) do
+    sizes = if round < 3 and cq?(page), do: Browser.Container.sizes(page.pruned || [], items)
+
+    if sizes == nil or sizes == page.cq_sizes do
+      {page, laid_out}
+    else
+      page = restyle(%{page | cq_sizes: sizes}, env)
+      settle(page, env, layout, layout.(page), round + 1)
     end
   end
 
@@ -355,7 +385,7 @@ defmodule Browser.Page do
   # `refresh_sheets/3`.)
   # (the hovered elements do not matter: they are marked in the tree, and a changed mark is a
   # changed element)
-  defp memo_fits?({media, size, _hover}, env) do
+  defp memo_fits?({media, size, _hover, _cq}, env) do
     (size == false or size == {env.width, env.height}) and
       Enum.all?(media, fn {query, result} -> MediaQuery.eval(query, env) == result end)
   end
@@ -411,6 +441,50 @@ defmodule Browser.Page do
 
   @doc "The address of the video element with element number `nid` (`\"@media\"`), or nil."
   def media_url(%__MODULE__{raw: raw}, nid), do: find_media(raw, nid, fn _attrs, url -> url end)
+
+  @doc "The attributes of the video element with element number `nid`, or nil."
+  def media_attrs(%__MODULE__{raw: raw}, nid),
+    do: find_media(raw, nid, fn attrs, _url -> attrs end)
+
+  @doc """
+  The videos a page starts a player for when it is shown: `[{element number, :play | :preload}]`.
+  A video with `autoplay` plays; one with `controls` (and no `preload="none"`) is opened so its
+  length is known before the first play.
+  """
+  def start_videos(%__MODULE__{raw: raw}), do: start_videos(raw, [])
+
+  defp start_videos(nodes, acc) when is_list(nodes), do: Enum.reduce(nodes, acc, &start_videos/2)
+
+  defp start_videos({:element, "video", attrs, kids}, acc) do
+    acc =
+      with {_, nid} <- List.keyfind(attrs, "@nid", 0),
+           true <- List.keymember?(attrs, "@media", 0) do
+        cond do
+          List.keymember?(attrs, "autoplay", 0) ->
+            acc ++ [{nid, :play}]
+
+          List.keymember?(attrs, "controls", 0) and not preload_none?(attrs) ->
+            acc ++ [{nid, :preload}]
+
+          true ->
+            acc
+        end
+      else
+        _ -> acc
+      end
+
+    start_videos(kids, acc)
+  end
+
+  defp start_videos({:element, _tag, _attrs, kids}, acc), do: start_videos(kids, acc)
+  defp start_videos(_other, acc), do: acc
+
+  defp preload_none?(attrs) do
+    case List.keyfind(attrs, "preload", 0) do
+      {_, v} -> String.downcase(String.trim(v)) == "none"
+      nil -> false
+    end
+  end
 
   @doc """
   The pseudo image URL (`"media:..."`) of the picture of the video with element number `nid`:
@@ -528,7 +602,22 @@ defmodule Browser.Page do
   end
 
   @doc "True when the page has a `<script>` element or something editable (the runtime holds its document)."
-  def scripts?(%__MODULE__{raw: raw}), do: has_tag?(raw, "script") or editable?(raw)
+  def scripts?(%__MODULE__{raw: raw}),
+    do: has_tag?(raw, "script") or editable?(raw) or frames?(raw)
+
+  # an `<iframe>` with a `src` or `srcdoc` is a document of its own: the runtime loads it
+  defp frames?(nodes) when is_list(nodes), do: Enum.any?(nodes, &frames?/1)
+
+  defp frames?({:element, "iframe", attrs, kids}) do
+    case {List.keyfind(attrs, "srcdoc", 0), List.keyfind(attrs, "src", 0)} do
+      {nil, nil} -> frames?(kids)
+      {nil, {_, v}} -> String.trim(to_string(v)) not in ["", "about:blank"] or frames?(kids)
+      _ -> true
+    end
+  end
+
+  defp frames?({:element, _tag, _attrs, kids}), do: frames?(kids)
+  defp frames?(_), do: false
 
   defp editable?(nodes) when is_list(nodes), do: Enum.any?(nodes, &editable?/1)
 

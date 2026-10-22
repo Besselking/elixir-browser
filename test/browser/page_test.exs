@@ -147,6 +147,13 @@ defmodule Browser.PageTest do
       assert Page.scripts?(Page.build("<script>1</script>", @url))
       refute Page.scripts?(Page.build("<p>no</p>", @url))
     end
+
+    test "scripts? is true for an iframe with a srcdoc or a src" do
+      assert Page.scripts?(Page.build("<iframe srcdoc='<p>x</p>'></iframe>", @url))
+      assert Page.scripts?(Page.build("<div><iframe src='a.html'></iframe></div>", @url))
+      refute Page.scripts?(Page.build("<iframe></iframe>", @url))
+      refute Page.scripts?(Page.build("<iframe src='about:blank'></iframe>", @url))
+    end
   end
 
   describe "viewport units" do
@@ -716,6 +723,20 @@ defmodule Browser.PageTest do
       assert anime.pz > bg.pz
 
       assert lay(Page.set_hover(hovered, [], Browser.Style.default_env())) |> word("Anime") == nil
+    end
+  end
+
+  describe "start_videos/1" do
+    test "autoplay videos play, videos with controls are opened, the rest wait" do
+      page =
+        Browser.Page.build(
+          ~s(<video src="a.mp4" autoplay></video><video src="b.mp4" controls></video>) <>
+            ~s(<video src="c.mp4" controls preload="none"></video><video src="d.mp4"></video>) <>
+            ~s(<video controls></video>),
+          "http://example.test/"
+        )
+
+      assert [{_, :play}, {_, :preload}] = Browser.Page.start_videos(page)
     end
   end
 end

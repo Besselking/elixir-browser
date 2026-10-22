@@ -145,6 +145,8 @@ defmodule Browser.Session do
       # one end), and whether the mouse is dragging it out
       fanchor: nil,
       fdrag: false,
+      # the range slider that the mouse is dragging, if any
+      rdrag: nil,
       # the page being fetched, `{url, mode, fetch options}`, until it arrives
       loading: nil,
       # the scripts' first run has not reported back yet
@@ -324,7 +326,12 @@ defmodule Browser.Session do
     publish_tabs(state)
 
     {:noreply,
-     state |> start_images() |> start_layout_job() |> adopt_or_start_js() |> sync_buttons()}
+     state
+     |> start_images()
+     |> start_layout_job()
+     |> adopt_or_start_js()
+     |> start_autoplay()
+     |> sync_buttons()}
   end
 
   # a runtime's scripts have run
@@ -456,10 +463,16 @@ defmodule Browser.Session do
   # a player says something: the page's scripts read it and hear the events
   def handle_info({:media_state, pid, _url, what, snap}, state) do
     case Enum.find(state.media, fn {_nid, p} -> p == pid end) do
+      {nid, _} when what == :skipped ->
+        {:noreply, %{state | media: Map.delete(state.media, nid)}}
+
       {nid, _} ->
         state = update_media_ui(state, nid, what, snap)
 
-        if state.js do
+        state =
+          if what == :failed, do: %{state | media: Map.delete(state.media, nid)}, else: state
+
+        if state.js && what != :skipped do
           {props, events} = media_events(what, snap)
           reply = Browser.JS.Runtime.media(js(state), nid, props, events)
           {:noreply, apply_js(state, reply)}
@@ -770,7 +783,24 @@ defmodule Browser.Session do
     end
   end
 
+  # a range slider is let go: its `change` event
+  def handle_info(wx(event: wxMouse(type: :left_up)), %{rdrag: cid} = state) when cid != nil do
+    state = %{state | rdrag: nil} |> js_notify(cid, ["change"]) |> end_drag()
+    {:noreply, state}
+  end
+
   def handle_info(wx(event: wxMouse(type: :left_up)), state), do: {:noreply, end_drag(state)}
+
+  # dragging the thumb of a range slider
+  def handle_info(
+        wx(event: wxMouse(type: :motion, x: wx_x, leftDown: down)),
+        %{rdrag: cid} = state
+      )
+      when cid != nil do
+    if down,
+      do: {:noreply, range_drag(state, cid, wx_x + state.scroll_x)},
+      else: {:noreply, end_drag(%{state | rdrag: nil})}
+  end
 
   # dragging out a selection in a text field
   def handle_info(
@@ -1176,6 +1206,8 @@ defmodule Browser.Session do
       Forms.editable?(control) -> edit_key(state, control, key)
       control.type in ["checkbox", "radio"] -> toggle_key(state, control, key)
       control.tag == "select" -> select_key(state, control, key)
+      control.type == "range" -> range_key(state, control, key)
+      control.type == "color" and key in [:enter, {:char, " "}] -> pick(state, control)
       button?(control) -> button_key(state, control, key)
       true -> page_key(state, key)
     end
@@ -1251,6 +1283,110 @@ defmodule Browser.Session do
       :down -> step_option(state, control, 1)
       k when k in [:enter, {:char, " "}] -> open_select(state, control)
       _ -> page_key(state, key)
+    end
+  end
+
+  # the last 24 px of a date field
+  defp in_picker_icon?(state, cid, x) do
+    case state.controls[cid] do
+      %{} = b -> x >= b.x + b.w - 24
+      nil -> false
+    end
+  end
+
+  # the system chooser for a colour, a calendar for a date: the choice is the new value
+  defp pick(state, %{type: "color"} = control) do
+    case UI.pick_color(state.ui, Browser.Pickers.rgb(control_value(state, control))) do
+      {:ok, rgb} -> set_picked(state, control, Browser.Pickers.color_text(rgb))
+      :cancel -> state
+    end
+  end
+
+  defp pick(state, %{type: type} = control) do
+    old = control_value(state, control)
+
+    time = if type == "datetime-local", do: Browser.Pickers.time_of(old)
+
+    case UI.pick_date(state.ui, Browser.Pickers.date_of(type, old), time) do
+      {:ok, date, time} ->
+        set_picked(state, control, Browser.Pickers.date_text(type, date, old, time))
+
+      :cancel ->
+        state
+    end
+  end
+
+  defp set_picked(state, control, value) do
+    if control_value(state, control) == value do
+      state
+    else
+      state.page.form_state
+      |> Forms.put(control.cid, value: value)
+      |> then(&set_form_state(state, &1))
+      |> relayout()
+      |> js_notify(control.cid, ["input", "change"])
+    end
+  end
+
+  # the arrow keys move the thumb of a range slider by a step, page up and down by ten
+  defp range_key(state, control, key) do
+    cur = Forms.current(control, state.page.form_state)
+    {min, max, _step} = bounds = control.range
+
+    value =
+      case key do
+        k when k in [:left, :down] -> Forms.range_step(cur.value, -1, bounds)
+        k when k in [:right, :up] -> Forms.range_step(cur.value, 1, bounds)
+        :page_down -> Forms.range_step(cur.value, -10, bounds)
+        :page_up -> Forms.range_step(cur.value, 10, bounds)
+        :home -> Forms.range_value(Float.to_string(min), bounds)
+        :end -> Forms.range_value(Float.to_string(max), bounds)
+        _ -> nil
+      end
+
+    if value do
+      before = cur.value
+      state = set_range(state, control, value)
+
+      if control_value(state, control) == before,
+        do: state,
+        else: js_notify(state, control.cid, ["change"])
+    else
+      page_key(state, key)
+    end
+  end
+
+  defp control_value(state, control), do: Forms.current(control, state.page.form_state).value
+
+  # the value of a range slider for a mouse at page position `x`
+  defp range_to(state, control, x) do
+    case state.controls[control.cid] do
+      %{} = b ->
+        frac = Browser.RangeControl.frac_at(x - b.x, b.w)
+        set_range(state, control, Forms.range_from_frac(frac, control.range))
+
+      nil ->
+        state
+    end
+  end
+
+  defp range_drag(state, cid, x) do
+    case control(state, cid) do
+      %{} = control -> range_to(state, control, x)
+      nil -> %{state | rdrag: nil}
+    end
+  end
+
+  # (the scripts hear `input` for each new value)
+  defp set_range(state, control, value) do
+    if control_value(state, control) == value do
+      state
+    else
+      state.page.form_state
+      |> Forms.put(control.cid, value: value)
+      |> then(&set_form_state(state, &1))
+      |> relayout(:diff)
+      |> js_notify(control.cid, ["input"])
     end
   end
 
@@ -1885,6 +2021,10 @@ defmodule Browser.Session do
       control == nil or control.disabled? or Map.get(control, :inert?, false) ->
         state
 
+      # the calendar button at the right end of a date field
+      Forms.picker?(control) and Forms.editable?(control) and in_picker_icon?(state, cid, x) ->
+        state |> focus(cid, 0) |> pick(control)
+
       Forms.editable?(control) ->
         cur = Forms.current(control, state.page.form_state)
 
@@ -1916,6 +2056,12 @@ defmodule Browser.Session do
 
       control.tag == "select" ->
         state |> focus(cid, 0) |> relayout() |> open_select(control)
+
+      control.type == "range" ->
+        state |> focus(cid, 0) |> range_to(control, x) |> Map.put(:rdrag, cid)
+
+      control.type == "color" ->
+        state |> focus(cid, 0) |> relayout() |> pick(control)
 
       button?(control) ->
         # a script can keep the focus (and the selection) where it is by cancelling `mousedown`
@@ -2864,14 +3010,16 @@ defmodule Browser.Session do
         :wx.set_env(wx_env)
         page = build.(base, env)
 
-        {items, height} =
-          LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
-            scrollers: true,
-            boxes: boxes,
-            metrics: true,
-            images: images,
-            svg_defs: page.svg_defs
-          )
+        {page, {items, height}} =
+          Page.settle(page, env, fn page ->
+            LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
+              scrollers: true,
+              boxes: boxes or Page.cq?(page),
+              metrics: true,
+              images: images,
+              svg_defs: page.svg_defs
+            )
+          end)
 
         send(me, {:page_done, ref, nonce, page, items, height, width, images})
       end)
@@ -2955,6 +3103,18 @@ defmodule Browser.Session do
     state
   end
 
+  # a video that jumps to a time a script set
+  defp js_effect({:media_seek, nid, ms}, state) do
+    case media_player(state, nid) do
+      {pid, state} ->
+        Browser.Media.Player.seek_ms(pid, ms)
+        state
+
+      nil ->
+        state
+    end
+  end
+
   # a video: start, pause or toggle its player (made the first time it is asked)
   defp js_effect({:media, nid, op}, state) do
     case media_player(state, nid) do
@@ -2977,7 +3137,7 @@ defmodule Browser.Session do
 
   # -- videos ----------------------------------------------------------------
 
-  defp media_player(%{media: media} = state, nid) do
+  defp media_player(%{media: media} = state, nid, opts \\ []) do
     case media do
       %{^nid => pid} ->
         {pid, state}
@@ -2987,7 +3147,13 @@ defmodule Browser.Session do
              true <- Browser.Media.available?(),
              url when is_binary(url) <- Page.media_url(page, nid),
              {:ok, pid} <-
-               Browser.Media.Player.start(url: url, base: page.base || state.url, owner: self()) do
+               Browser.Media.Player.start(
+                 url: url,
+                 base: page.base || state.url,
+                 owner: self(),
+                 preload: opts[:preload] || false,
+                 loop: List.keymember?(Page.media_attrs(page, nid) || [], "loop", 0)
+               ) do
           Process.monitor(pid)
           {pid, %{state | media: Map.put(media, nid, pid)}}
         else
@@ -3131,6 +3297,23 @@ defmodule Browser.Session do
         {%{"paused" => true}, ~w(error)}
     end
   end
+
+  # the videos with `autoplay` start when the page is shown, those with `controls` are opened
+  # (small files only) so that scripts and the bar know the length
+  defp start_autoplay(%{page: %Page{} = page} = state) do
+    Enum.reduce(Page.start_videos(page), state, fn {nid, how}, state ->
+      case media_player(state, nid, preload: how == :preload) do
+        {pid, state} ->
+          if how == :play, do: Browser.Media.Player.play(pid)
+          state
+
+        nil ->
+          state
+      end
+    end)
+  end
+
+  defp start_autoplay(state), do: state
 
   # the players of a page that is left
   defp stop_media(%{media: media} = state) do
@@ -3289,15 +3472,17 @@ defmodule Browser.Session do
         :wx.set_env(wx_env)
         page = Page.restyle(base, env)
 
-        {items, height} =
-          LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
-            scrollers: true,
-            boxes: boxes,
-            metrics: true,
-            focus: focus,
-            images: images,
-            svg_defs: page.svg_defs
-          )
+        {page, {items, height}} =
+          Page.settle(page, env, fn page ->
+            LayoutWorker.layout(worker, tid, page.nodes, width, measure, view_h,
+              scrollers: true,
+              boxes: boxes or Page.cq?(page),
+              metrics: true,
+              focus: focus,
+              images: images,
+              svg_defs: page.svg_defs
+            )
+          end)
 
         send(me, {:layout_done, ref, base.ver, page, items, height, width, images})
       end)
@@ -3976,7 +4161,7 @@ defmodule Browser.Session do
   # its jobs running: `park/1` stops them and `resume/1` starts again what was cut short.
   @tab_keys ~w(history page nodes items base scrollers soff links controls hit_controls sticky images media media_ui height scroll
     scroll_x content_w wheel_rem wheel_rem_x url focus caret menu sel sel_anchor drag sel_texts
-    sel_items click fanchor fdrag hover hover_nid hover_chain js scripts_pending page_edits fragment loading tid ed efocus
+    sel_items click fanchor fdrag rdrag hover hover_nid hover_chain js scripts_pending page_edits fragment loading tid ed efocus
     esel edrag egoal)a
 
   defp blank_tab do
@@ -4014,6 +4199,7 @@ defmodule Browser.Session do
       click: nil,
       fanchor: nil,
       fdrag: false,
+      rdrag: nil,
       hover: {nil, :arrow},
       hover_nid: nil,
       hover_chain: nil,

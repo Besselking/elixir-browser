@@ -172,6 +172,47 @@ defmodule Browser.MediaTest do
       assert Player.status(pid) == :paused
     end
 
+    test "seek_ms shows the frame at that time", %{clip: clip} do
+      {pid, url} = player(clip)
+      assert_receive {:media_state, _pid, ^url, :ready, _}, 5000
+      Player.seek_ms(pid, 1000)
+      assert_receive {:media_state, _pid, ^url, :seeked, %{pos: pos}}, 2000
+      assert abs(pos - 1000) < 300
+    end
+
+    test "a video with loop starts again instead of ending", %{clip: clip} do
+      url = "file://" <> clip
+      {:ok, pid} = Player.start(url: url, base: url, owner: self(), loop: true)
+      assert_receive {:media_state, _pid, ^url, :ready, _}, 5000
+      Player.play(pid)
+      Process.sleep(3500)
+      refute_received {:media_state, _pid, ^url, :ended, _}
+      assert Player.status(pid) == :playing
+      Player.pause(pid)
+    end
+
+    test "a player that opens a big file before anyone plays skips it", %{tmp_dir: dir} do
+      big = Path.join(dir, "big.mp4")
+      File.write!(big, "")
+
+      File.open!(big, [:write], fn f ->
+        :file.position(f, 40 * 1024 * 1024) && IO.binwrite(f, "x")
+      end)
+
+      url = "file://" <> big
+      {:ok, pid} = Player.start(url: url, base: url, owner: self(), preload: true)
+      ref = Process.monitor(pid)
+      assert_receive {:media_state, ^pid, ^url, :skipped, _}, 5000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1000
+    end
+
+    test "a small file is opened by a preload player", %{clip: clip} do
+      url = "file://" <> clip
+      {:ok, _pid} = Player.start(url: url, base: url, owner: self(), preload: true)
+      assert_receive {:media_state, _pid, ^url, :ready, %{duration_ms: ms}}, 5000
+      assert ms > 1000
+    end
+
     test "a file that cannot be played fails", %{tmp_dir: dir} do
       path = Path.join(dir, "bad.mp4")
       File.write!(path, "junk")

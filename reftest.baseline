@@ -3687,6 +3687,7 @@ css/css-display/display-contents-block-001.html
 css/css-display/display-contents-block-002.html
 css/css-display/display-contents-details-001.html
 css/css-display/display-contents-fieldset.html
+css/css-display/display-contents-first-letter-001.html
 css/css-display/display-contents-first-letter-002.html
 css/css-display/display-contents-first-line-002.html
 css/css-display/display-contents-flex-001.html
@@ -3709,6 +3710,8 @@ css/css-display/display-contents-tr-001.html
 css/css-display/display-contents-whitespace-inside-inline.html
 css/css-display/display-flow-root-001.html
 css/css-display/display-flow-root-002.html
+css/css-display/run-in/counter-increment-applies-to-011.xht
+css/css-display/run-in/counter-reset-applies-to-011.xht
 css/css-display/run-in/font-style-applies-to-004.xht
 css/css-display/run-in/font-variant-applies-to-004.xht
 css/css-display/run-in/font-weight-applies-to-004.xht
@@ -4115,6 +4118,7 @@ css/css-flexbox/flexbox-safe-overflow-position-002.html
 css/css-flexbox/flexbox-safe-overflow-position-003.html
 css/css-flexbox/flexbox-safe-overflow-position-004.html
 css/css-flexbox/flexbox-safe-overflow-position-005.html
+css/css-flexbox/flexbox-safe-overflow-position-006.html
 css/css-flexbox/flexbox-single-line-clamp-1.html
 css/css-flexbox/flexbox-single-line-clamp-2.html
 css/css-flexbox/flexbox-single-line-clamp-3.html
@@ -5701,6 +5705,7 @@ css/css-text/white-space/tab-stop-threshold-002.html
 css/css-text/white-space/text-wrap-balance-002.html
 css/css-text/white-space/text-wrap-balance-003.html
 css/css-text/white-space/text-wrap-balance-004.html
+css/css-text/white-space/text-wrap-balance-005.html
 css/css-text/white-space/text-wrap-balance-align-001.html
 css/css-text/white-space/text-wrap-balance-before-after-001.html
 css/css-text/white-space/text-wrap-balance-before-after-002.html
@@ -5710,6 +5715,7 @@ css/css-text/white-space/text-wrap-balance-float-003.html
 css/css-text/white-space/text-wrap-balance-float-004.html
 css/css-text/white-space/text-wrap-balance-float-006.html
 css/css-text/white-space/text-wrap-balance-line-clamp-001.html
+css/css-text/white-space/text-wrap-balance-line-clamp-005.html
 css/css-text/white-space/text-wrap-balance-overflow-001.html
 css/css-text/white-space/text-wrap-balance-text-indent-001.html
 css/css-text/white-space/text-wrap-nowrap-001.html
@@ -5993,6 +5999,7 @@ css/css-variables/variable-reference-35.html
 css/css-variables/variable-reference-38.html
 css/css-variables/variable-reference-39.html
 css/css-variables/variable-reference-40.html
+css/css-variables/variable-reference-without-whitespace.html
 css/css-variables/variable-supports-01.html
 css/css-variables/variable-supports-02.html
 css/css-variables/variable-supports-03.html
@@ -6073,6 +6080,7 @@ css/selectors/dir-selector-white-space-001.html
 css/selectors/dir-style-01a.html
 css/selectors/dir-style-02a.html
 css/selectors/dir-style-03a.html
+css/selectors/first-letter-flag-001.html
 css/selectors/floating-first-letter-05d0.html
 css/selectors/floating-first-letter-feff.html
 css/selectors/has-style-sharing-001.html

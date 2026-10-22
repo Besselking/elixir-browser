@@ -1886,7 +1886,13 @@ defmodule Browser.Layout do
         _ -> {dim.("width", 300), dim.("height", 150), []}
       end
 
+    # (the slider of an `<input type=range>`: drawn at the size of the control)
+    range = with {_, r} <- List.keyfind(attrs, "@range", 0), do: r
+    icon = with {_, kind} <- List.keyfind(attrs, "@icon", 0), do: kind
+
     extra = %{
+      range: range,
+      icon: icon,
       canvas: {max(bw, 1), max(bh, 1), ops},
       intrinsic: {max(bw, 1), max(bh, 1)},
       paint?: true,
@@ -2472,8 +2478,11 @@ defmodule Browser.Layout do
     end
   end
 
+  # (a box that clamps its lines is not balanced: the clamp counts the lines of the plain wrap)
   defp balance_text?(c),
-    do: "balance" in split_words(to_string(c["text-wrap-style"] || c["text-wrap"]))
+    do:
+      "balance" in split_words(to_string(c["text-wrap-style"] || c["text-wrap"])) and
+        line_clamp(c) == nil
 
   # `text-indent`: the first line of a block starts that far in, as if an inline box of that
   # width led it (`lead`); a percentage is of the block's own width. Nothing carries over from
@@ -2590,6 +2599,11 @@ defmodule Browser.Layout do
       minpct: pct_of(c["min-height"]) || calc_pct(c["min-height"]),
       minoff: calc_px(c["min-height"]),
       clip: clips?(c),
+      # (it has no effect on a flex or grid container)
+      ellipsis:
+        c["text-overflow"] == "ellipsis" and clips?(c) and
+          c["display"] in [nil, "block", "list-item", "inline-block", "flow-root", "table-cell"],
+      clamp: line_clamp(c),
       cpath: plain_inset?(c["clip-path"]),
       scroll: scroll_axes(c),
       # (`contain: size`: asked how wide it wants to be, it says its `contain-intrinsic-size`)
@@ -2611,7 +2625,8 @@ defmodule Browser.Layout do
       spec.xform || spec.bg || spec.bgimg || spec.shadows != [] || bt + br + bb + bl > 0 || spec.h ||
         spec.min || spec.ratio || spec.maxpct ||
         spec.max || spec.pos || spec.cisw ||
-        spec.clip || spec.bfc || spec.width || spec.minw || spec.maxw || spec.ml == :auto ||
+        spec.clip || spec.clamp || spec.bfc || spec.width || spec.minw || spec.maxw ||
+        spec.ml == :auto ||
         spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag)) ||
         spec.hstretch || (spec.nid != nil and Process.get(:layout_boxes, false))
 
@@ -2643,6 +2658,14 @@ defmodule Browser.Layout do
   defp scroll_kind("scroll"), do: :scroll
   defp scroll_kind("auto"), do: :auto
   defp scroll_kind(_), do: nil
+
+  # `-webkit-line-clamp: n` (or `line-clamp: n`): the box shows n lines of text
+  defp line_clamp(c) do
+    case c["-webkit-line-clamp"] || c["line-clamp"] do
+      n when is_number(n) and n >= 1 -> trunc(n)
+      _ -> nil
+    end
+  end
 
   defp clips?(c) do
     Map.get(c, "overflow-x", "visible") in ~w(hidden clip scroll auto) or
@@ -5163,6 +5186,12 @@ defmodule Browser.Layout do
             ops = Browser.Svg.render(scene, cw, ch, current: spec.current)
             [Map.merge(item, %{type: :svg, ops: ops})]
 
+          %{range: {_, _} = range} ->
+            [Map.merge(item, %{type: :svg, ops: Browser.RangeControl.ops(cw, ch, range)})]
+
+          %{icon: kind} when kind != nil ->
+            [Map.merge(item, %{type: :svg, ops: Browser.RangeControl.icon_ops(kind, cw, ch)})]
+
           %{canvas: {bw, bh, ops}} ->
             ops = Browser.Canvas.scaled_ops(ops, cw / bw, ch / bh)
             [Map.merge(item, %{type: :svg, ops: ops})]
@@ -6096,6 +6125,8 @@ defmodule Browser.Layout do
 
   defp finish_box(st, %{o: o} = box) do
     {bt, br, bb, bl} = o.bw
+    {st, o} = clamp_lines(st, box, o)
+    st = if o.ellipsis, do: ellipsize_lines(st, box, o), else: st
     natural = st.y - box.top
     extra = bt + o.pt + o.pb + bb
     content = natural - extra
@@ -6482,6 +6513,99 @@ defmodule Browser.Layout do
 
   # drop whatever was created inside the box entirely below `limit` (an element still has its
   # box for the scripts, drawn or not: `:bounds` stay)
+  # `-webkit-line-clamp: n`: the box is as high as n lines (it clips) and the last line shows an
+  # ellipsis. The lines are the distinct `y` of the text; the first one sits `lead` below the top
+  # of the content, and so does the line after the last one.
+  defp clamp_lines(st, box, %{clamp: n} = o) when is_integer(n) do
+    {new, old} = split_entries(st.items, st.n - box.n0, [])
+    items = flat_items(new)
+    ys = for %{type: :text, hidden: false, y: y} <- items, uniq: true, do: y
+    ys = Enum.sort(ys)
+
+    if length(ys) > n do
+      {bt, _br, bb, _bl} = o.bw
+      top = box.top + bt + o.pt
+      limit = Enum.at(ys, n) - (hd(ys) - top)
+      line = Enum.at(ys, n - 1)
+      extra = if o.sizing == :border, do: bt + o.pt + o.pb + bb, else: 0
+      right = box.x + box.w - elem(o.bw, 1) - o.pr
+
+      items =
+        items
+        |> Enum.reject(&(&1.type == :text and &1.y >= limit))
+        |> ellipsize_line(line, right, true)
+
+      st = %{st | items: items ++ old, n: box.n0 + length(items)}
+      {st, %{o | clip: true, max: limit - top + extra}}
+    else
+      {st, o}
+    end
+  end
+
+  defp clamp_lines(st, _box, o), do: {st, o}
+
+  # `text-overflow: ellipsis` on a box that clips: a line of text that is wider than the box ends
+  # in an ellipsis
+  defp ellipsize_lines(st, box, o) do
+    {new, old} = split_entries(st.items, st.n - box.n0, [])
+    right = box.x + box.w - elem(o.bw, 1) - o.pr
+    items = flat_items(new)
+
+    over? =
+      Enum.any?(items, fn it ->
+        it.type == :text and not it.hidden and it.x + it.w > right + 0.5
+      end)
+
+    if over? do
+      lines = for %{type: :text, y: y} <- items, uniq: true, do: y
+      items = Enum.reduce(lines, items, &ellipsize_line(&2, &1, right, false))
+      %{st | items: items ++ old, n: box.n0 + length(items)}
+    else
+      st
+    end
+  end
+
+  # The text items on the line at `y` that reach beyond `right`: the first of them is cut so that
+  # it and an ellipsis fit, those after it go. With `force` the last item of the line gets the
+  # ellipsis even when it fits (the lines after it were cut).
+  defp ellipsize_line(items, y, right, force) do
+    line = for %{type: :text, hidden: false, y: ^y} = it <- items, do: it
+    last = Enum.max_by(line, &(&1.x + &1.w), fn -> nil end)
+
+    cut =
+      Enum.find(Enum.sort_by(line, & &1.x), fn it -> it.x + it.w > right + 0.5 end) ||
+        if(force, do: last)
+
+    if cut == nil do
+      items
+    else
+      measure = Process.get(:layout_measure)
+      keep = cut_text(measure, cut, max(right - cut.x, 0))
+      w = measure.(keep, cut)
+
+      Enum.flat_map(items, fn
+        ^cut -> [%{cut | text: keep, w: w}]
+        %{type: :text, hidden: false, y: ^y, x: x} when x > cut.x -> []
+        it -> [it]
+      end)
+    end
+  end
+
+  # the longest start of the text of `it` that fits with an ellipsis after it in `room` px
+  defp cut_text(measure, it, room) do
+    ell = "\u2026"
+    chars = String.graphemes(it.text)
+    n = length(chars)
+
+    fit =
+      Enum.find(n..0//-1, 0, fn k ->
+        measure.(Enum.join(Enum.take(chars, k)) <> ell, it) <= room
+      end)
+
+    text = chars |> Enum.take(fit) |> Enum.join() |> String.trim_trailing()
+    text <> ell
+  end
+
   defp drop_below(st, box, limit) do
     keep? = &(&1.y < limit or &1.type == :bounds)
     {new_items, old_items} = split_entries(st.items, st.n - box.n0, [])

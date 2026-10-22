@@ -3053,7 +3053,7 @@ defmodule Browser.JS.DOM do
     end
   end
 
-  @bool_attrs ~w(disabled hidden readonly required multiple autofocus selected)
+  @bool_attrs ~w(disabled hidden readonly required multiple autofocus selected loop autoplay muted controls)
   @media_props ~w(paused ended currentTime duration readyState videoWidth videoHeight)
 
   defp element_get(n, key, _self) do
@@ -3452,6 +3452,18 @@ defmodule Browser.JS.DOM do
 
       "style" ->
         set_attr(nid, "style", to_str(v))
+        :ok
+
+      # setting the time of a video or audio element seeks (the player jumps and reports back)
+      "currentTime" when n.tag in ["video", "audio"] ->
+        secs = max(to_num_or_zero(v), 0)
+
+        update_node(nid, fn n ->
+          media = Map.put(n.props["media"] || %{}, "currentTime", secs * 1.0)
+          %{n | props: Map.put(n.props, "media", media)}
+        end)
+
+        if n.tag == "video", do: out({:media_seek, ensure_nid(nid), round(secs * 1000)})
         :ok
 
       "htmlFor" ->
@@ -7356,7 +7368,9 @@ defmodule Browser.JS.DOM do
       promise
     end)
 
-    def_fn(p, "canPlayType", fn _this, _ -> "" end)
+    def_fn(p, "canPlayType", fn _this, args ->
+      Browser.Media.can_play_type(to_str(arg(args, 0)))
+    end)
 
     def_fn(p, "getContext", fn this, args -> canvas_context(this, to_str(arg(args, 0))) end)
 

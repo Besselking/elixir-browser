@@ -13,7 +13,7 @@ defmodule Browser.CSS do
 
   A selector may end in `::before`, `::after` (or the one-colon forms), `::marker` or
   `::placeholder`: its rule styles the generated box, marker or hint, and carries
-  `pseudo: :before | :after | :marker | :placeholder` (nil for other rules).
+  `pseudo: :before | :after | :marker | :placeholder | :first_letter` (nil for other rules).
   Selectors using anything else (`:has()`, …) are dropped. `@media` (see
   `Browser.MediaQuery`), `@supports` (assumed true unless it starts with `not`)
   and `@layer` blocks are entered (a rule carries its `layer`, nil when it is in none, for the
@@ -49,11 +49,21 @@ defmodule Browser.CSS do
           selector: parts,
           specificity: spec,
           decls: decls,
-          media: Enum.reject(conds, &(match?({:layer, _}, &1) or &1 == :registered)),
+          media:
+            Enum.reject(
+              conds,
+              &(match?({:layer, _}, &1) or match?({:container, _, _}, &1) or &1 == :registered)
+            ),
           layer: layer_path(conds),
           pseudo: pseudo
         }
         |> then(&if(:registered in conds, do: Map.put(&1, :registered, true), else: &1))
+        |> then(fn rule ->
+          case for({:container, name, query} <- conds, do: {name, query}) do
+            [] -> rule
+            cq -> Map.put(rule, :cq, cq)
+          end
+        end)
       end
     end)
   end
@@ -243,12 +253,27 @@ defmodule Browser.CSS do
               "media" -> blocks(body, conds ++ [MediaQuery.parse(prelude)], [])
               "supports" -> if supports?(prelude), do: blocks(body, conds, []), else: []
               "layer" -> blocks(body, conds ++ [{:layer, layer_name(prelude)}], [])
+              "container" -> blocks(body, conds ++ [container_cond(prelude)], [])
               "property" -> registered_default(prelude, body, conds)
               _ -> []
             end
 
           {Enum.reverse(inner) ++ acc, rest}
         end
+    end
+  end
+
+  # `@container sidebar (min-width: 400px)` -> {"sidebar", query}: the name is nil without one; the
+  # query is a media query on the size of the container (see `Browser.Container`)
+  defp container_cond(prelude) do
+    prelude = String.trim(prelude)
+
+    case Regex.run(re(~r/\A([\w-]+)\s*(\(.*|not\b.*)\z/su), prelude) do
+      [_, name, query] when name not in ["not", "and", "or", "style"] ->
+        {:container, name, query}
+
+      _ ->
+        {:container, nil, prelude}
     end
   end
 
@@ -560,16 +585,20 @@ defmodule Browser.CSS do
   # `a::before` -> {"a", :before}; a bare `::after` styles the box of every element
   defp split_pseudo_element(str) do
     case Regex.run(
-           re(~r/\A(.*?)(?:::(before|after|marker|placeholder|backdrop)|:(before|after))\z/su),
+           re(
+             ~r/\A(.*?)(?:::(before|after|marker|placeholder|backdrop|first-letter)|:(before|after|first-letter))\z/su
+           ),
            str
          ) do
       # a backdrop is a box of its own (see `Browser.Modal`) that only these rules match
       [_, head, "backdrop"] -> {head_or_any(head) <> ":mb-backdrop", nil}
-      [_, head, which] -> {head_or_any(head), String.to_atom(which)}
-      [_, head, "", which] -> {head_or_any(head), String.to_atom(which)}
+      [_, head, which] -> {head_or_any(head), pseudo_atom(which)}
+      [_, head, "", which] -> {head_or_any(head), pseudo_atom(which)}
       nil -> {str, nil}
     end
   end
+
+  defp pseudo_atom(name), do: name |> String.replace("-", "_") |> String.to_atom()
 
   defp head_or_any(""), do: "*"
   defp head_or_any(head), do: head

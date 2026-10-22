@@ -25,6 +25,8 @@ defmodule Browser.Fetch do
     {"margins.html", "Margins", "negative margins, collapsing, percentage margins and padding"},
     {"transforms.html", "Transforms", "rotate, scale, skew, translate and transform-origin"},
     {"fonts.html", "Fonts", "font-family lists: generic families and installed fonts"},
+    {"text.html", "Text and containers",
+     "ellipsis and line clamp, first letter, counters, container queries"},
     {"whitespace.html", "White space", "normal, nowrap, pre, pre-wrap and pre-line"},
     {"script.html", "Scripts", "JavaScript modules, events, the DOM, forms, history"},
     {"sticky.html", "Sticky and fixed",

@@ -102,13 +102,18 @@ defmodule Mix.Tasks.Browser.Screenshot do
     measure = Browser.UI.snapshot_start()
     images = fetch_images(page)
 
-    {laid_out, page_height} =
-      Browser.Layout.layout(page.nodes, width, measure, 800,
-        scrollers: true,
-        metrics: &measure.(:content_height, &1),
-        images: images,
-        svg_defs: page.svg_defs
-      )
+    env = %{Browser.Style.default_env() | width: width, height: 800}
+
+    {_page, {laid_out, page_height}} =
+      Browser.Page.settle(page, env, fn page ->
+        Browser.Layout.layout(page.nodes, width, measure, 800,
+          scrollers: true,
+          metrics: &measure.(:content_height, &1),
+          images: images,
+          svg_defs: page.svg_defs,
+          boxes: Browser.Page.cq?(page)
+        )
+      end)
 
     {base, scrollers} = Scrollers.index(laid_out)
 
@@ -176,10 +181,15 @@ defmodule Mix.Tasks.Browser.Screenshot do
   end
 
   defp svg_screenshot(page, out, width, max_height) do
-    {items, height} =
-      Browser.Layout.layout(page.nodes, width, &Browser.Screenshot.measure/2, 800,
-        svg_defs: page.svg_defs
-      )
+    env = %{Browser.Style.default_env() | width: width, height: 800}
+
+    {_page, {items, height}} =
+      Browser.Page.settle(page, env, fn page ->
+        Browser.Layout.layout(page.nodes, width, &Browser.Screenshot.measure/2, 800,
+          svg_defs: page.svg_defs,
+          boxes: Browser.Page.cq?(page)
+        )
+      end)
 
     height = min(max_height || height, 6000) |> max(1)
 

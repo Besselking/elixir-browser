@@ -24,5 +24,11 @@ lines of text.</textarea></div>
   <div class="row"><input type="submit" name="go" value="Submit"> <button class="primary">Primary</button> <input type="reset"> <button disabled>Disabled</button> <input type="text" value="disabled" disabled></div>
   <fieldset><legend>Options</legend><label><input type="checkbox"> one</label> <label><input type="checkbox" checked> two</label></fieldset>
 </form>
+<form class="card">
+  <div class="row"><label>Volume <input type="range" name="vol" value="30"></label> <label>Wide, step 5 <input type="range" name="wide" min="0" max="100" step="5" value="65" style="width: 220px"></label> <label>Off <input type="range" value="40" disabled></label></div>
+  <div class="row"><label>Colour <input type="color" name="c1" value="#ff6600"></label> <label><input type="color" name="c2" value="#2a5db0"></label></div>
+  <div class="row"><label>Date <input type="date" name="d" value="2026-10-21"></label> <label>Month <input type="month" name="m" value="2026-10"></label> <label>Week <input type="week" name="w" value="2026-W43"></label></div>
+  <div class="row"><label>Date and time <input type="datetime-local" name="dt" value="2026-10-21T09:30"></label> <label>Empty <input type="date" name="e"></label></div>
+</form>
 <form class="card" method="post" action="/echo"><div class="row"><input name="msg" value="posted text"> <input type="submit" value="Send by POST"></div></form>
 </div></body></html>

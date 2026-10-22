@@ -1,0 +1,71 @@
+<!doctype html>
+<html><head><title>Text and containers</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #f4f6fa }
+.page { max-width: 640px; margin: 12px auto; padding: 0 14px }
+h1 { margin: 6px 0 10px }
+.card { background: #fff; border: 1px solid #c4cad6; border-radius: 8px; padding: 10px 14px; margin: 10px 0 }
+.card p { margin: 6px 0 }
+.box { border: 1px solid #99a; padding: 4px 6px; margin: 6px 0; background: #fafbff }
+
+.ellip { white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.clamp { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden }
+.c2 { -webkit-line-clamp: 2 }
+.c3 { -webkit-line-clamp: 3 }
+
+.drop::first-letter { float: left; font-size: 46px; line-height: 1; padding: 2px 6px 0 0; color: #b03 }
+.cap::first-letter { font-size: 150%; color: #036; font-weight: bold }
+
+.outline { counter-reset: h1 }
+.outline h3 { counter-reset: h2; counter-increment: h1; margin: 8px 0 2px }
+.outline h3::before { content: counter(h1) ". " }
+.outline h4 { counter-increment: h2; margin: 2px 0 2px 16px; font-weight: normal }
+.outline h4::before { content: counter(h1) "." counter(h2, lower-alpha) " " }
+.nest, .nest ol { counter-reset: item; list-style: none; padding-left: 18px; margin: 2px 0 }
+.nest li { counter-increment: item }
+.nest li::before { content: counters(item, ".") " " }
+
+.cards { display: block }
+.q { container-type: inline-size; border: 1px solid #99a; border-radius: 6px; background: #fafbff; padding: 6px; margin: 6px 0 }
+.q .name { font-weight: bold }
+.q .more { display: none; color: #555 }
+@container (min-width: 260px) { .q .more { display: block } }
+@container (min-width: 420px) { .q .name { font-size: 22px; color: #036 } .q { background: #eef6ff } }
+</style></head>
+<body><div class="page">
+<h1>Text and containers</h1>
+
+<div class="card">
+  <p>A line of text that is wider than its box ends in an ellipsis; a clamp shows a number of lines.</p>
+  <div class="box ellip" style="width: 180px">Single line text that is cut with an ellipsis at the end of the box</div>
+  <div class="box ellip" style="width: 320px">Single line text that is cut with an ellipsis at the end of the box</div>
+  <div class="box ellip" style="width: 520px">Single line text that is cut with an ellipsis at the end of the box</div>
+  <div class="box clamp c2" style="width: 300px">Two lines are shown. The rest of this paragraph is hidden, so the text that follows the second line does not take any room in the page.</div>
+  <div class="box clamp c3" style="width: 300px">Three lines are shown. The rest of this paragraph is hidden, so the text that follows the third line does not take any room in the page at all, however long it is.</div>
+</div>
+
+<div class="card">
+  <p>The first letter of a paragraph in a style of its own: a drop cap, and a bigger letter.</p>
+  <p class="drop">Once upon a time there was a small browser. It had a layout engine of its own, a style engine, and a JavaScript engine too. The first letter of this paragraph is a drop cap.</p>
+  <p class="cap">"Quoted text" starts with a bigger letter, and the quote mark goes with it.</p>
+</div>
+
+<div class="card">
+  <p>Counters number headings and nested lists.</p>
+  <div class="outline">
+    <h3>Parts</h3><h4>Wheels</h4><h4>Frame</h4><h4>Saddle</h4>
+    <h3>Tools</h3><h4>Wrench</h4><h4>Pump</h4>
+  </div>
+  <ol class="nest">
+    <li>One<ol><li>One one</li><li>One two<ol><li>One two one</li></ol></li></ol></li>
+    <li>Two<ol><li>Two one</li></ol></li>
+  </ol>
+</div>
+
+<div class="card">
+  <p>The same card in containers of three widths: the content depends on the width of its container, not of the window.</p>
+  <div style="width: 200px"><div class="q"><div class="name">Card</div><div class="more">More text appears in a wider container.</div></div></div>
+  <div style="width: 330px"><div class="q"><div class="name">Card</div><div class="more">More text appears in a wider container.</div></div></div>
+  <div style="width: 560px"><div class="q"><div class="name">Card</div><div class="more">More text appears in a wider container.</div></div></div>
+</div>
+</div></body></html>

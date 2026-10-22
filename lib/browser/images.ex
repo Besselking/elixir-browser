@@ -113,10 +113,20 @@ defmodule Browser.Images do
     src =
       case attr(attrs, "src") |> String.trim() do
         "" ->
-          Enum.find_value(kids, "", fn
-            {:element, "source", a, _} -> attr(a, "src") |> String.trim()
-            _ -> nil
-          end)
+          sources = for {:element, "source", a, _} <- kids, do: a
+
+          # the first source whose `type` can be played (all of them are tried in order)
+          playable =
+            Enum.find(sources, fn a ->
+              attr(a, "src") |> String.trim() != "" and
+                (attr(a, "type") |> String.trim() == "" or
+                   Browser.Media.can_play_type(attr(a, "type")) != "")
+            end)
+
+          case playable || List.first(sources) do
+            nil -> ""
+            a -> attr(a, "src") |> String.trim()
+          end
 
         src ->
           src
@@ -175,7 +185,10 @@ defmodule Browser.Images do
 
   # The whole file is fetched for one frame (the helper reads a file), so a big video is
   # not drawn until the helper can read a stream.
-  defp check_media_size("file:" <> _ = url, _base) do
+  @doc false
+  def check_media_size(url, base)
+
+  def check_media_size("file:" <> _ = url, _base) do
     case File.stat(URI.decode(URI.parse(url).path || "")) do
       {:ok, %{size: size}} when size <= @max_media_bytes -> :ok
       {:ok, _} -> {:error, "video too large for a picture"}
@@ -183,7 +196,7 @@ defmodule Browser.Images do
     end
   end
 
-  defp check_media_size(url, base) do
+  def check_media_size(url, base) do
     case Fetch.load(url, method: :head, full: true, initiator: base) do
       {:ok, %{headers: headers}, _final} ->
         case headers

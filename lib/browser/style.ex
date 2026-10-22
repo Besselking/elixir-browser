@@ -32,7 +32,7 @@ defmodule Browser.Style do
             stroke-linejoin stroke-miterlimit stroke-dasharray stop-color stop-opacity text-anchor
             transition transition-property pointer-events transform translate
             flex-wrap flex-line-count justify-content align-content align-items align-self flex-grow flex-shrink flex-basis content
-            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode text-wrap-style tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character
+            row-gap column-gap column-count column-width column-height column-wrap column-fill column-span break-before break-after column-rule-width column-rule-style column-rule-color order border-spacing border-collapse table-layout float clear rotate scale transform-origin z-index white-space text-wrap text-wrap-mode text-wrap-style tab-size letter-spacing word-spacing word-space-transform text-transform text-align-last text-justify word-break line-break overflow-wrap word-wrap hyphens hyphenate-character text-overflow -webkit-line-clamp line-clamp counter-reset counter-increment counter-set container-type container-name
             grid-template-columns grid-template-rows grid-auto-rows grid-column grid-column-start grid-column-end justify-items justify-self)
   @inherited ~w(border-spacing border-collapse visibility text-indent color font-size font-weight font-style font-family
                 text-decoration-line text-align direction list-style-type line-height
@@ -148,6 +148,8 @@ defmodule Browser.Style do
   input, select, textarea, button { display: inline-block; font-size: 13.3333px; font-weight: normal; font-style: normal; color: #000000; text-align: left; line-height: normal; text-decoration: none; text-indent: 0; margin: 0; padding: 1px 2px; border: 1px solid #767676; border-radius: 2px; background-color: #ffffff; overflow: hidden }
   input { width: 170px }
   input[type=checkbox], input[type=radio] { width: 13px; height: 13px; margin: 3px 3px 3px 4px; padding: 0; text-align: center; line-height: 13px; font-size: 10px }
+  input[type=range], input[type=range]:disabled { width: 129px; height: 16px; margin: 2px; padding: 0; border: none; border-radius: 0; background-color: transparent; vertical-align: middle }
+  input[type=color] { width: 50px; height: 27px; padding: 3px; background-color: #efefef; border-radius: 3px; vertical-align: middle }
   input[type=checkbox] { border-radius: 2px }
   input[type=radio] { border-radius: 50% }
   input[type=checkbox][checked] { background-color: #0075ff; border-color: #0075ff; color: #ffffff }
@@ -363,7 +365,7 @@ defmodule Browser.Style do
           scope_class: scope_classes(ranked)
         },
         fn {rule, order}, idx ->
-          idx = note_pseudo(idx, rule)
+          idx = idx |> note_pseudo(rule) |> note_counters(rule) |> note_container(rule)
           rule = Map.put(rule, :order, order - Map.get(bases, scope_key(rule), 0))
 
           Map.update(
@@ -418,6 +420,10 @@ defmodule Browser.Style do
   defp note_pseudo(idx, %{pseudo: :placeholder}),
     do: %{idx | pseudo: MapSet.put(idx.pseudo, :placeholder)}
 
+  # a `::first-letter` rule styles part of the text of its element: it needs no `content`
+  defp note_pseudo(idx, %{pseudo: :first_letter}),
+    do: %{idx | pseudo: MapSet.put(idx.pseudo, :first_letter)}
+
   defp note_pseudo(idx, %{pseudo: which, decls: decls}) when which != nil do
     if Enum.any?(decls, fn {p, v, _} -> p == "content" and v not in ["none", "normal"] end),
       do: %{idx | pseudo: MapSet.put(idx.pseudo, which)},
@@ -425,6 +431,20 @@ defmodule Browser.Style do
   end
 
   defp note_pseudo(idx, _rule), do: idx
+
+  # a rule that sets a counter: the pruned tree is gone over to give each `counter()` its value
+  defp note_counters(idx, %{decls: decls}) do
+    if Enum.any?(decls, fn {p, _, _} -> p in ~w(counter-reset counter-increment counter-set) end),
+      do: Map.put(idx, :counters, true),
+      else: idx
+  end
+
+  defp note_counters(idx, _rule), do: idx
+
+  # a rule in an `@container` block depends on the size of an ancestor: such a page is styled
+  # again when the sizes change, and its elements do not share what they declare
+  defp note_container(idx, %{cq: _}), do: Map.put(idx, :cq, true)
+  defp note_container(idx, _rule), do: idx
 
   @doc "Convenience: `parse_sheets/1` followed by `index_rules/2`."
   def index(sheets, env \\ @default_env), do: sheets |> parse_sheets() |> index_rules(env)
@@ -551,6 +571,7 @@ defmodule Browser.Style do
         from_host <- [from_shadow?(rule, ctx)],
         from_host or rule.origin == :ua or Map.get(rule, :scope) == Map.get(ctx, :scope),
         CSS.matches?(rule.selector, ctx),
+        Map.get(rule, :cq) == nil or Browser.Container.match?(rule.cq, ctx),
         {prop, value, important?} <- rule.decls do
       # (what the page says about a shadow host beats the `:host` rules in its shadow tree)
       {prop,
@@ -704,6 +725,17 @@ defmodule Browser.Style do
       end
 
     [{"flex-grow", grow, imp}, {"flex-shrink", shrink, imp}, {"flex-basis", basis, imp}]
+  end
+
+  # `container: <name> / <type>`
+  defp expand({"container", value, imp}) do
+    {name, type} =
+      case String.split(value, "/", parts: 2) do
+        [name, type] -> {String.trim(name), String.trim(type)}
+        [name] -> {String.trim(name), "normal"}
+      end
+
+    [{"container-name", name, imp}, {"container-type", type, imp}]
   end
 
   # `flex-flow: <direction> || <wrap>`: what is not given is the initial value
@@ -1301,7 +1333,9 @@ defmodule Browser.Style do
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
     start_signs()
-    pruned = prune_children(nodes, nil, idx)
+    Process.put(:style_no_share, Map.get(idx, :cq, false))
+    pruned = nodes |> prune_children(nil, idx) |> resolve_counters(idx)
+    Process.delete(:style_no_share)
     Process.delete(:style_share)
     Process.delete(:style_inline)
     Process.delete(:style_custom)
@@ -1329,7 +1363,9 @@ defmodule Browser.Style do
     Process.put(:style_share, %{})
     Process.put(:style_inline, %{})
     start_signs()
-    pruned = prune_children(nodes, nil, idx)
+    Process.put(:style_no_share, Map.get(idx, :cq, false))
+    pruned = nodes |> prune_children(nil, idx) |> resolve_counters(idx)
+    Process.delete(:style_no_share)
     Process.delete(:style_share)
     Process.delete(:style_inline)
     end_signs()
@@ -1342,6 +1378,9 @@ defmodule Browser.Style do
     Process.delete(:style_custom_from)
     {pruned, memo}
   end
+
+  defp resolve_counters(pruned, %{counters: true}), do: Browser.Counters.resolve(pruned)
+  defp resolve_counters(pruned, _idx), do: pruned
 
   defp prune_children(nodes, parent, idx) do
     count = Enum.count(nodes, &match?({:element, _, _, _}, &1))
@@ -1817,6 +1856,7 @@ defmodule Browser.Style do
           attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
           kids = prune_children(kids, ctx, idx)
           kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
+          kids = first_letter(idx, ctx, computed, kids)
           node = {:element, tag, attrs, kids}
           {[node | acc], node}
         end
@@ -1827,6 +1867,86 @@ defmodule Browser.Style do
   end
 
   defp kids_of(_tag, _attrs, kids), do: kids
+
+  # `::first-letter`: the first letter of the first line of a block (with the punctuation before
+  # it) is in a span of its own that has the style of the rule
+  @first_letter_displays [nil, "block", "list-item", "inline-block", "table-cell", "flow-root"]
+
+  defp first_letter(idx, ctx, computed, kids) do
+    with true <- MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), :first_letter),
+         true <- computed["display"] in @first_letter_displays,
+         decl when decl != [] and decl != %{} <- declared(idx, ctx, :first_letter) do
+      {c, _custom, _own} = compute(idx, ctx, ctx, :first_letter)
+      # what the rule itself sets stays; the rest is inherited from the element that holds the
+      # letter, not from the block
+      own = for {k, _} <- decl, do: k
+      {kids, _done} = wrap_first_letter(kids, {c, own}, %{})
+      kids
+    else
+      _ -> kids
+    end
+  end
+
+  # -> {kids, done?}; `inherit` is what the elements between the block and the letter pass on
+  defp wrap_first_letter([], _span, _inherit), do: {[], false}
+
+  defp wrap_first_letter([{:text, text} = node | rest], {c, _own} = span, inherit) do
+    case Regex.run(re(~r/\A(\s*)([\p{P}\p{S}]*[\p{L}\p{N}]|[\p{P}\p{S}]+)(.*)\z/su), text) do
+      [_, ws, letter, tail] ->
+        letter = {:element, "span", [{"@computed", Map.merge(c, inherit)}], [{:text, letter}]}
+        before = if ws == "", do: [], else: [{:text, ws}]
+        tail = if tail == "", do: [], else: [{:text, tail}]
+        {before ++ [letter | tail] ++ rest, true}
+
+      nil ->
+        # (white space only: the letter is in what follows; anything else has no letter)
+        if String.trim(text) == "" do
+          {more, done?} = wrap_first_letter(rest, span, inherit)
+          {[node | more], done?}
+        else
+          {[node | rest], true}
+        end
+    end
+  end
+
+  defp wrap_first_letter([{:element, tag, attrs, ekids} = node | rest], {_, own} = span, inherit) do
+    cond do
+      tag in ~w(img br input select textarea button svg video canvas iframe hr) ->
+        {[node | rest], true}
+
+      floated_or_positioned?(attrs) ->
+        skip_node(node, rest, span, inherit)
+
+      true ->
+        inner =
+          case List.keyfind(attrs, "@computed", 0) do
+            {_, %{} = ec} -> Map.merge(inherit, Map.drop(Map.take(ec, @inherited), own))
+            _ -> inherit
+          end
+
+        case wrap_first_letter(ekids, span, inner) do
+          {ekids, true} -> {[{:element, tag, attrs, ekids} | rest], true}
+          {_, false} -> skip_node(node, rest, span, inherit)
+        end
+    end
+  end
+
+  defp wrap_first_letter([node | rest], span, inherit), do: skip_node(node, rest, span, inherit)
+
+  defp skip_node(node, rest, span, inherit) do
+    {more, done?} = wrap_first_letter(rest, span, inherit)
+    {[node | more], done?}
+  end
+
+  defp floated_or_positioned?(attrs) do
+    case List.keyfind(attrs, "@computed", 0) do
+      {_, %{} = c} ->
+        c["float"] not in [nil, "none"] or c["position"] in ["absolute", "fixed"]
+
+      _ ->
+        false
+    end
+  end
 
   # `::marker { content }` of list items (the text drawn instead of the bullet or number) and
   # summaries. A summary's marker may depend on whether its `<details>` is open, so both are
@@ -1992,7 +2112,7 @@ defmodule Browser.Style do
     parts =
       Regex.scan(
         re(
-          ~r/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|attr\(\s*([\w-]+)\s*\)|open-quote|close-quote/su
+          ~r/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|attr\(\s*([\w-]+)\s*\)|open-quote|close-quote|counters\(\s*([\w-]+)\s*,\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*(?:,\s*([\w-]+)\s*)?\)|counter\(\s*([\w-]+)\s*(?:,\s*([\w-]+)\s*)?\)/su
         ),
         value
       )
@@ -2004,11 +2124,20 @@ defmodule Browser.Style do
         [_, s] -> css_string(s)
         [_, "", s] -> css_string(s)
         [_, "", "", name] -> attr(attrs, String.downcase(name))
+        [_, "", "", "", name, sep] -> counters_marker(name, sep, "decimal")
+        [_, "", "", "", name, sep, style] -> counters_marker(name, sep, style)
+        [_, "", "", "", "", "", "", name] -> Browser.Counters.marker(name, "decimal")
+        [_, "", "", "", "", "", "", name, style] -> Browser.Counters.marker(name, style)
         ["open-quote"] -> "“"
         ["close-quote"] -> "”"
         _ -> ""
       end)
     end
+  end
+
+  defp counters_marker(name, sep, style) do
+    sep = sep |> String.slice(1..-2//1) |> css_string()
+    Browser.Counters.marker(name, sep, style)
   end
 
   # `\201C` and `\"` in a CSS string
@@ -2875,6 +3004,17 @@ defmodule Browser.Style do
 
   defp typed("font-style", v, _env, _pc),
     do: {:ok, if(v in ["italic", "oblique"], do: "italic", else: "normal")}
+
+  # the old flexbox box of `-webkit-line-clamp` is a block (its lines stack the same way)
+  defp typed("display", "-webkit-box", _env, _pc), do: {:ok, "block"}
+  defp typed("display", "-webkit-inline-box", _env, _pc), do: {:ok, "inline-block"}
+
+  defp typed(prop, v, _env, _pc) when prop in ["-webkit-line-clamp", "line-clamp"] do
+    case Integer.parse(v) do
+      {n, ""} when n >= 1 -> {:ok, n}
+      _ -> :skip
+    end
+  end
 
   defp typed(_prop, v, _env, _pc), do: {:ok, v}
 

@@ -633,5 +633,24 @@ defmodule Browser.JS.ActivationTest do
       reply = Runtime.media(pid, nid, %{"paused" => true, "ended" => true}, ["pause", "ended"])
       assert ["pause true 1.25 12", "ended true 1.25 12"] = logs(reply)
     end
+
+    test "setting currentTime seeks, and loop, autoplay and muted are attributes" do
+      {_pid, r} =
+        start(~S"""
+        <video id="v" controls autoplay></video>
+        <script>
+        var v = document.getElementById("v");
+        console.log(v.autoplay + " " + v.loop + " " + v.muted + " " + v.controls);
+        v.loop = true; v.muted = true; v.autoplay = false;
+        console.log(v.hasAttribute("loop") + " " + v.hasAttribute("muted") + " " + v.hasAttribute("autoplay"));
+        v.currentTime = 2.5;
+        console.log(v.currentTime);
+        </script>
+        """)
+
+      assert ["true false false true", "true true false", "2.5"] = logs(r)
+      assert [{:media_seek, nid, 2500}] = Enum.filter(r.outbox, &match?({:media_seek, _, _}, &1))
+      assert is_integer(nid)
+    end
   end
 end

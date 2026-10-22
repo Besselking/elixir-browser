@@ -1999,6 +1999,93 @@ defmodule Browser.UI do
 
   def menu_base, do: @menu_base
 
+  # -- pickers ------------------------------------------------------------------------
+
+  @wx_ok 5100
+  @wx_all 240
+  @wx_vertical 8
+  @wx_horizontal 4
+  @wx_ok_cancel 20
+
+  @doc "The system colour chooser, starting at `{r, g, b}`: `{:ok, {r, g, b}}` or `:cancel`."
+  def pick_color(%{panel: p}, {r, g, b}) do
+    data = :wxColourData.new()
+    :wxColourData.setColour(data, {r, g, b})
+    dialog = :wxColourDialog.new(p, [{:data, data}])
+
+    result =
+      if :wxDialog.showModal(dialog) == @wx_ok do
+        {r, g, b, _} = dialog |> :wxColourDialog.getColourData() |> :wxColourData.getColour()
+        {:ok, {r, g, b}}
+      else
+        :cancel
+      end
+
+    :wxColourDialog.destroy(dialog)
+    result
+  end
+
+  @doc """
+  A calendar in a dialog, starting at `date`: `{:ok, %Date{}, time}` or `:cancel`. With a
+  `{hour, minute}` as `time` the dialog also has hour and minute fields, and `time` in the
+  answer is the choice; else it is `nil`.
+  """
+  def pick_date(%{panel: p}, %Date{} = date, time \\ nil) do
+    dialog = :wxDialog.new(p, -1, ~c"Choose a date")
+
+    calendar =
+      :wxCalendarCtrl.new(dialog, -1, [{:date, {{date.year, date.month, date.day}, {0, 0, 0}}}])
+
+    sizer = :wxBoxSizer.new(@wx_vertical)
+    :wxSizer.add(sizer, calendar, [{:flag, @wx_all}, {:border, 8}])
+    spins = time && time_row(dialog, sizer, time)
+
+    :wxSizer.add(sizer, :wxDialog.createStdDialogButtonSizer(dialog, @wx_ok_cancel), [
+      {:flag, @wx_all},
+      {:border, 8}
+    ])
+
+    :wxWindow.setSizer(dialog, sizer)
+    :wxSizer.fit(sizer, dialog)
+
+    result =
+      if :wxDialog.showModal(dialog) == @wx_ok do
+        {{y, m, d}, _} = :wxCalendarCtrl.getDate(calendar)
+
+        chosen =
+          case spins do
+            {hour, minute} -> {:wxSpinCtrl.getValue(hour), :wxSpinCtrl.getValue(minute)}
+            nil -> nil
+          end
+
+        {:ok, Date.new!(y, m, d), chosen}
+      else
+        :cancel
+      end
+
+    :wxDialog.destroy(dialog)
+    result
+  end
+
+  # hour and minute fields under the calendar
+  defp time_row(dialog, sizer, {hour, minute}) do
+    row = :wxBoxSizer.new(@wx_horizontal)
+    label = :wxStaticText.new(dialog, -1, ~c"Time")
+
+    spin = fn max, value ->
+      :wxSpinCtrl.new(dialog, [{:min, 0}, {:max, max}, {:initial, value}])
+    end
+
+    {h, m} = {spin.(23, hour), spin.(59, minute)}
+    colon = :wxStaticText.new(dialog, -1, ~c":")
+    :wxSizer.add(row, label, [{:flag, @wx_all}, {:border, 4}])
+    :wxSizer.add(row, h, [{:flag, @wx_all}, {:border, 4}])
+    :wxSizer.add(row, colon, [{:flag, @wx_all}, {:border, 4}])
+    :wxSizer.add(row, m, [{:flag, @wx_all}, {:border, 4}])
+    :wxSizer.add(sizer, row, [{:flag, @wx_all}, {:border, 4}])
+    {h, m}
+  end
+
   # -- context menu -------------------------------------------------------------------
 
   @context_base 2000
