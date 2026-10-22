@@ -33,6 +33,8 @@ h1 { margin: 6px 0 10px }
 .q .name { font-weight: bold }
 .q .more { display: none; color: #555 }
 @container (min-width: 260px) { .q .more { display: block } }
+.q .size { font-size: 6cqw; line-height: 1.4; margin: 4px 0 10px }
+.q .bar { height: 6cqw; background: linear-gradient(90deg, #36c 50%, #cdd 50%); border-radius: 3cqw }
 @container (min-width: 420px) { .q .name { font-size: 22px; color: #036 } .q { background: #eef6ff } }
 </style></head>
 <body><div class="page">
@@ -69,6 +71,13 @@ h1 { margin: 6px 0 10px }
     <li>One<ol><li>One one</li><li>One two<ol><li>One two one</li></ol></li></ol></li>
     <li>Two<ol><li>Two one</li></ol></li>
   </ol>
+</div>
+
+<div class="card">
+  <p>Container units: the text and the bar are as big as a share of the width of their container (<code>6cqw</code>).</p>
+  <div style="width: 200px"><div class="q"><div class="size">Sized by the box</div><div class="bar"></div></div></div>
+  <div style="width: 330px"><div class="q"><div class="size">Sized by the box</div><div class="bar"></div></div></div>
+  <div style="width: 560px"><div class="q"><div class="size">Sized by the box</div><div class="bar"></div></div></div>
 </div>
 
 <div class="card">
