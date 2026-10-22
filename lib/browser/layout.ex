@@ -1890,9 +1890,12 @@ defmodule Browser.Layout do
     range = with {_, r} <- List.keyfind(attrs, "@range", 0), do: r
     icon = with {_, kind} <- List.keyfind(attrs, "@icon", 0), do: kind
 
+    bar = with {_, b} <- List.keyfind(attrs, "@bar", 0), do: b
+
     extra = %{
       range: range,
       icon: icon,
+      bar: bar,
       canvas: {max(bw, 1), max(bh, 1), ops},
       intrinsic: {max(bw, 1), max(bh, 1)},
       paint?: true,
@@ -2604,6 +2607,7 @@ defmodule Browser.Layout do
         c["text-overflow"] == "ellipsis" and clips?(c) and
           c["display"] in [nil, "block", "list-item", "inline-block", "flow-root", "table-cell"],
       clamp: line_clamp(c),
+      first_line: c["first-line"],
       cpath: plain_inset?(c["clip-path"]),
       scroll: scroll_axes(c),
       # (`contain: size`: asked how wide it wants to be, it says its `contain-intrinsic-size`)
@@ -2625,7 +2629,8 @@ defmodule Browser.Layout do
       spec.xform || spec.bg || spec.bgimg || spec.shadows != [] || bt + br + bb + bl > 0 || spec.h ||
         spec.min || spec.ratio || spec.maxpct ||
         spec.max || spec.pos || spec.cisw ||
-        spec.clip || spec.clamp || spec.bfc || spec.width || spec.minw || spec.maxw ||
+        spec.clip || spec.clamp || spec.first_line || spec.bfc || spec.width || spec.minw ||
+        spec.maxw ||
         spec.ml == :auto ||
         spec.mr == :auto || spec.cid != nil || (spec.hpct && percent_definite?(tag)) ||
         spec.hstretch || (spec.nid != nil and Process.get(:layout_boxes, false))
@@ -5189,6 +5194,9 @@ defmodule Browser.Layout do
           %{range: {_, _} = range} ->
             [Map.merge(item, %{type: :svg, ops: Browser.RangeControl.ops(cw, ch, range)})]
 
+          %{bar: bar} when bar != nil ->
+            [Map.merge(item, %{type: :svg, ops: Browser.RangeControl.bar_ops(bar, cw, ch)})]
+
           %{icon: kind} when kind != nil ->
             [Map.merge(item, %{type: :svg, ops: Browser.RangeControl.icon_ops(kind, cw, ch)})]
 
@@ -6127,6 +6135,7 @@ defmodule Browser.Layout do
     {bt, br, bb, bl} = o.bw
     {st, o} = clamp_lines(st, box, o)
     st = if o.ellipsis, do: ellipsize_lines(st, box, o), else: st
+    st = if o.first_line, do: style_first_line(st, box, o.first_line), else: st
     natural = st.y - box.top
     extra = bt + o.pt + o.pb + bb
     content = natural - extra
@@ -6543,6 +6552,65 @@ defmodule Browser.Layout do
   end
 
   defp clamp_lines(st, _box, o), do: {st, o}
+
+  # `::first-line`: the text on the first line of the box takes the colour, weight, slant and
+  # decoration of the rule; the items after a changed one move by the change of its width
+  defp style_first_line(st, box, props) do
+    {new, old} = split_entries(st.items, st.n - box.n0, [])
+    items = flat_items(new)
+
+    case for(%{type: :text, hidden: false, y: y} <- items, do: y) do
+      [] ->
+        st
+
+      ys ->
+        y = Enum.min(ys)
+        measure = Process.get(:layout_measure)
+        line = for %{type: :text, hidden: false, y: ^y} = it <- items, do: it
+        order = line |> Enum.sort_by(& &1.x) |> Enum.map(&{&1, restyle_first_line(&1, props)})
+
+        {moved, _} =
+          Enum.map_reduce(order, 0, fn {it, styled}, shift ->
+            w = measure.(styled.text, styled)
+            {{it, %{styled | x: it.x + shift, w: w}}, shift + w - it.w}
+          end)
+
+        lookup = Map.new(moved)
+        items = Enum.map(items, &Map.get(lookup, &1, &1))
+        %{st | items: items ++ old, n: box.n0 + length(items)}
+    end
+  end
+
+  # (an item that differs from the block in a property has a rule of its own for it: it keeps it)
+  defp restyle_first_line(it, {props, base}) do
+    {color, weight, slant, deco} =
+      {props["color"], props["font-weight"], props["font-style"], props["text-decoration-line"]}
+
+    it
+    |> put_if(
+      match?({_, _, _}, color) and it.color == (base["color"] || {0, 0, 0}) and color,
+      &%{&1 | color: &2}
+    )
+    |> put_if(it.bold == (base["font-weight"] == "bold") and weight, &%{&1 | bold: &2 == "bold"})
+    |> put_if(
+      slant && it.italic == (base["font-style"] == "italic"),
+      &%{&1 | italic: &2 == "italic"}
+    )
+    |> put_if(plain_deco?(it, base["text-decoration-line"]) and deco, fn it, line ->
+      %{
+        it
+        | underline: String.contains?(line, "underline"),
+          strike: String.contains?(line, "line-through")
+      }
+    end)
+  end
+
+  defp plain_deco?(it, base) do
+    base = to_string(base)
+
+    it.underline == String.contains?(base, "underline") and
+      it.strike == String.contains?(base, "line-through")
+  end
 
   # `text-overflow: ellipsis` on a box that clips: a line of text that is wider than the box ends
   # in an ellipsis

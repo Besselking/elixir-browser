@@ -37,6 +37,13 @@ small { display: block; color: #555 }
   <div class="g" style="background: repeating-radial-gradient(#f60, #fff 15px)"></div>
 </div>
 <div class="card">
+  <p>Conic gradients: a colour wheel, a pie with hard stops, a start angle and centre, and a repeating one.</p>
+  <div class="g" style="background: conic-gradient(red, yellow, lime, aqua, blue, magenta, red); border-radius: 50%; width: 70px"></div>
+  <div class="g" style="background: conic-gradient(#36c 0 25%, #fc0 0 60%, #c36 0); width: 70px; border-radius: 50%"></div>
+  <div class="g" style="background: conic-gradient(from 45deg at 30% 60%, #fff, #036)"></div>
+  <div class="g" style="background: repeating-conic-gradient(#333 0 15deg, #eee 15deg 30deg)"></div>
+</div>
+<div class="card">
   <p>Gradients as backgrounds of larger boxes, with a size and a repeat (<code>background-size</code>):</p>
   <div class="g big" style="width: 100%; background: linear-gradient(to right, #36c, #c36)"></div>
   <div class="g big" style="width: 100%; background: linear-gradient(90deg, #eee 50%, #ccc 50%) 0 0 / 40px 100%"></div>

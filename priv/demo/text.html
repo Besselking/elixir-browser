@@ -16,6 +16,9 @@ h1 { margin: 6px 0 10px }
 .drop::first-letter { float: left; font-size: 46px; line-height: 1; padding: 2px 6px 0 0; color: #b03 }
 .cap::first-letter { font-size: 150%; color: #036; font-weight: bold }
 
+.line1::first-line { color: #b03; font-weight: bold }
+.line2::first-line { color: #036; font-style: italic; text-decoration: underline }
+
 .outline { counter-reset: h1 }
 .outline h3 { counter-reset: h2; counter-increment: h1; margin: 8px 0 2px }
 .outline h3::before { content: counter(h1) ". " }
@@ -48,6 +51,12 @@ h1 { margin: 6px 0 10px }
   <p>The first letter of a paragraph in a style of its own: a drop cap, and a bigger letter.</p>
   <p class="drop">Once upon a time there was a small browser. It had a layout engine of its own, a style engine, and a JavaScript engine too. The first letter of this paragraph is a drop cap.</p>
   <p class="cap">"Quoted text" starts with a bigger letter, and the quote mark goes with it.</p>
+</div>
+
+<div class="card">
+  <p>The first line of a paragraph in a style of its own. It follows the width of the box.</p>
+  <p class="line1" style="width: 300px">The first line of this paragraph is red and bold. The lines after it keep the normal style of the paragraph, however wide the box is.</p>
+  <p class="line2" style="width: 420px">The first line of this paragraph is blue, slanted and underlined. The rest of the paragraph is plain text in the normal style.</p>
 </div>
 
 <div class="card">

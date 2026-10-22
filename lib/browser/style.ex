@@ -150,6 +150,7 @@ defmodule Browser.Style do
   input[type=checkbox], input[type=radio] { width: 13px; height: 13px; margin: 3px 3px 3px 4px; padding: 0; text-align: center; line-height: 13px; font-size: 10px }
   input[type=range], input[type=range]:disabled { width: 129px; height: 16px; margin: 2px; padding: 0; border: none; border-radius: 0; background-color: transparent; vertical-align: middle }
   input[type=color] { width: 50px; height: 27px; padding: 3px; background-color: #efefef; border-radius: 3px; vertical-align: middle }
+  progress, meter { display: inline-block; width: 160px; height: 16px; vertical-align: -3px }
   input[type=checkbox] { border-radius: 2px }
   input[type=radio] { border-radius: 50% }
   input[type=checkbox][checked] { background-color: #0075ff; border-color: #0075ff; color: #ffffff }
@@ -423,6 +424,10 @@ defmodule Browser.Style do
   # a `::first-letter` rule styles part of the text of its element: it needs no `content`
   defp note_pseudo(idx, %{pseudo: :first_letter}),
     do: %{idx | pseudo: MapSet.put(idx.pseudo, :first_letter)}
+
+  # so does a `::first-line` rule, which the layout applies to the first line it makes
+  defp note_pseudo(idx, %{pseudo: :first_line}),
+    do: %{idx | pseudo: MapSet.put(idx.pseudo, :first_line)}
 
   defp note_pseudo(idx, %{pseudo: which, decls: decls}) when which != nil do
     if Enum.any?(decls, fn {p, v, _} -> p == "content" and v not in ["none", "normal"] end),
@@ -1853,6 +1858,7 @@ defmodule Browser.Style do
           {acc, :hidden}
         else
           {computed, attrs} = marker(idx, ctx, computed, attrs)
+          computed = first_line(idx, ctx, computed)
           attrs = if computed == %{}, do: attrs, else: [{"@computed", computed} | attrs]
           kids = prune_children(kids, ctx, idx)
           kids = generated(idx, ctx, :before) ++ kids ++ generated(idx, ctx, :after)
@@ -1868,9 +1874,30 @@ defmodule Browser.Style do
 
   defp kids_of(_tag, _attrs, kids), do: kids
 
+  # `::first-line`: the properties the rule sets that the layout can apply to the text of the
+  # first line (as "first-line" in the computed style of a block)
+  @first_letter_displays [nil, "block", "list-item", "inline-block", "table-cell", "flow-root"]
+  @first_line_props ~w(color font-weight font-style text-decoration-line)
+
+  defp first_line(idx, ctx, computed) do
+    with true <- MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), :first_line),
+         true <- computed["display"] in @first_letter_displays,
+         decl when decl != [] and decl != %{} <- declared(idx, ctx, :first_line) do
+      {c, _custom, _own} = compute(idx, ctx, ctx, :first_line)
+      own = for {k, _} <- decl, k in @first_line_props, do: k
+      props = c |> Map.take(own) |> Map.reject(fn {_, v} -> is_nil(v) end)
+      # (`base` is what the block itself has: text that has something else, from a rule of its
+      # own, keeps it)
+      if props == %{},
+        do: computed,
+        else: Map.put(computed, "first-line", {props, Map.take(computed, @first_line_props)})
+    else
+      _ -> computed
+    end
+  end
+
   # `::first-letter`: the first letter of the first line of a block (with the punctuation before
   # it) is in a span of its own that has the style of the rule
-  @first_letter_displays [nil, "block", "list-item", "inline-block", "table-cell", "flow-root"]
 
   defp first_letter(idx, ctx, computed, kids) do
     with true <- MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), :first_letter),

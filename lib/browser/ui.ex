@@ -1272,6 +1272,25 @@ defmodule Browser.UI do
         for {x, y} <- tiles do
           radial_tile(gc, stops, {x + ox, y + oy - scroll}, {rx, ry}, {x, y - scroll, tw, th})
         end
+
+      :conic ->
+        {ox, oy} = layer.center
+        wedges = Browser.Backgrounds.conic_wedges(layer.stops, 720)
+        {lx, ly, _, _} = layer.tile
+
+        # One tile that covers (but for a pixel) the area it paints into is drawn once, in the
+        # area's shape: the corners of the box are rounded.
+        covers? =
+          lx <= cx + 2 and ly <= cy + 2 and lx + tw >= cx + cw - 2 and ly + th >= cy + ch - 2
+
+        for {x, y} <- if(covers?, do: [{lx, ly}], else: tiles) do
+          {box, round} =
+            if covers?,
+              do: {{cx, cy - scroll, cw, ch}, radii},
+              else: {{x, y - scroll, tw, th}, nil}
+
+          conic_tile(gc, wedges, layer.from, {x + ox, y + oy - scroll}, box, round)
+        end
     end
   end
 
@@ -1433,6 +1452,99 @@ defmodule Browser.UI do
       else: :wxGraphicsPath.addRectangle(path, x, y, w, h)
 
     :wxGraphicsContext.fillPath(gc, path)
+  end
+
+  # A conic gradient is drawn as thin wedges from its centre to the edge of the tile (rounded
+  # corners included); when the centre is outside the tile the wedges are triangles that reach
+  # past it and the clip cuts them.
+  defp conic_tile(gc, wedges, from, {cx, cy}, {x, y, w, h}, radii) do
+    poly = rounded_polygon({x, y, w, h}, radii)
+    start = from / 360
+    turn = 2 * :math.pi()
+    edges = Enum.zip(poly, tl(poly) ++ [hd(poly)])
+
+    # a vertex of the shape as a position on the turn, from the start angle
+    at = fn {vx, vy} ->
+      t = :math.atan2(vx - cx, -(vy - cy)) / turn - start
+      t - Float.floor(t)
+    end
+
+    verts = poly |> Enum.map(&{at.(&1), &1}) |> Enum.sort()
+
+    ray = fn f ->
+      angle = (start + f) * turn
+      {dx, dy} = {:math.sin(angle), -:math.cos(angle)}
+      ray_hit(edges, cx, cy, dx, dy)
+    end
+
+    inside? = cx >= x and cx <= x + w and cy >= y and cy <= y + h
+
+    for {a, b, color} <- wedges do
+      # (each wedge runs a little into the next, which is painted over it: no seams)
+      b = min(b + 0.002, 1.0)
+
+      points =
+        with true <- inside?, pa when pa != nil <- ray.(a), pb when pb != nil <- ray.(b) do
+          between = for {t, v} <- verts, t > a and t < b, do: v
+          # (a wedge that spans the end of the sorted turn takes no vertex twice)
+          [pa | between] ++ [pb]
+        else
+          _ -> far_points(cx, cy, w, h, start, a, b, turn)
+        end
+
+      :wxGraphicsContext.setBrush(gc, :wxBrush.new(color))
+      path = :wxGraphicsContext.createPath(gc)
+      :wxGraphicsPath.moveToPoint(path, cx, cy)
+      Enum.each(points, fn {px, py} -> :wxGraphicsPath.addLineToPoint(path, px, py) end)
+      :wxGraphicsPath.closeSubpath(path)
+      :wxGraphicsContext.fillPath(gc, path)
+    end
+  end
+
+  defp far_points(cx, cy, w, h, start, a, b, turn) do
+    r = :math.sqrt(w * w + h * h) * 2 + abs(cx) + abs(cy)
+
+    for f <- [a, b] do
+      angle = (start + f) * turn
+      {cx + r * :math.sin(angle), cy - r * :math.cos(angle)}
+    end
+  end
+
+  # where the ray from (cx, cy) in direction (dx, dy) first meets the edges, or nil
+  defp ray_hit(edges, cx, cy, dx, dy) do
+    edges
+    |> Enum.reduce(nil, fn {{px, py}, {qx, qy}}, best ->
+      {ex, ey} = {qx - px, qy - py}
+      denom = dx * ey - dy * ex
+
+      if abs(denom) < 1.0e-9 do
+        best
+      else
+        s = ((px - cx) * ey - (py - cy) * ex) / denom
+        u = ((px - cx) * dy - (py - cy) * dx) / denom
+
+        if s > 1.0e-9 and u >= -1.0e-9 and u <= 1 + 1.0e-9 and (best == nil or s < elem(best, 0)),
+          do: {s, {cx + s * dx, cy + s * dy}},
+          else: best
+      end
+    end)
+    |> case do
+      nil -> nil
+      {_, point} -> point
+    end
+  end
+
+  # the outline of a box with rounded corners as points, clockwise from the top left
+  defp rounded_polygon({x, y, w, h}, radii) do
+    {{tlx, tly}, {trx, try_}, {brx, bry}, {blx, bly}} = radii || @no_radii
+    steps = 12
+    us = for i <- 0..steps, do: i / steps * :math.pi() / 2
+
+    tl = for u <- us, do: {x + tlx - tlx * :math.cos(u), y + tly - tly * :math.sin(u)}
+    tr = for u <- us, do: {x + w - trx + trx * :math.sin(u), y + try_ - try_ * :math.cos(u)}
+    br = for u <- us, do: {x + w - brx + brx * :math.cos(u), y + h - bry + bry * :math.sin(u)}
+    bl = for u <- us, do: {x + blx - blx * :math.sin(u), y + h - bly + bly * :math.cos(u)}
+    tl ++ tr ++ br ++ bl
   end
 
   # a radial gradient is circular; an ellipse is drawn as a circle in a stretched space
@@ -2062,6 +2174,29 @@ defmodule Browser.UI do
       else
         :cancel
       end
+
+    :wxDialog.destroy(dialog)
+    result
+  end
+
+  @doc "A dialog with hour and minute fields, starting at `{hour, minute}`: `{:ok, {h, m}}` or `:cancel`."
+  def pick_time(%{panel: p}, time) do
+    dialog = :wxDialog.new(p, -1, ~c"Choose a time")
+    sizer = :wxBoxSizer.new(@wx_vertical)
+    {hour, minute} = time_row(dialog, sizer, time)
+
+    :wxSizer.add(sizer, :wxDialog.createStdDialogButtonSizer(dialog, @wx_ok_cancel), [
+      {:flag, @wx_all},
+      {:border, 8}
+    ])
+
+    :wxWindow.setSizer(dialog, sizer)
+    :wxSizer.fit(sizer, dialog)
+
+    result =
+      if :wxDialog.showModal(dialog) == @wx_ok,
+        do: {:ok, {:wxSpinCtrl.getValue(hour), :wxSpinCtrl.getValue(minute)}},
+        else: :cancel
 
     :wxDialog.destroy(dialog)
     result

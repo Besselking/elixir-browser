@@ -58,6 +58,19 @@ defmodule Browser.Pickers do
     end
   end
 
+  @doc "The `{hour, minute}` of the text of a `type=time` field (00:00 when it shows none)."
+  def clock_of(text) do
+    case Regex.run(~r/\A(\d{2}):(\d{2})/, to_string(text)) do
+      [_, h, m] -> {min(String.to_integer(h), 23), min(String.to_integer(m), 59)}
+      nil -> {0, 0}
+    end
+  end
+
+  @doc "The text of a `type=time` field after the user chose `{hour, minute}`."
+  def clock_text({h, m}), do: pad(h) <> ":" <> pad(m)
+
+  defp pad(n), do: n |> Integer.to_string() |> String.pad_leading(2, "0")
+
   @doc """
   The text of a field of `type` after the user chose `date` (`old` is what it held) and, for
   datetime-local, `time` (`nil` keeps the old time).
@@ -73,7 +86,6 @@ defmodule Browser.Pickers do
 
   def date_text("datetime-local", date, old, time) do
     {h, m} = time || time_of(old)
-    pad = &(&1 |> Integer.to_string() |> String.pad_leading(2, "0"))
-    Date.to_iso8601(date) <> "T" <> pad.(h) <> ":" <> pad.(m)
+    Date.to_iso8601(date) <> "T" <> clock_text({h, m})
   end
 end

@@ -40,7 +40,7 @@ defmodule Browser.RangeControl do
     |> Canvas.ops()
   end
 
-  @doc "The canvas ops of the small picture on a field that opens a picker: `:calendar`."
+  @doc "The canvas ops of the small picture on a field that opens a picker: `:calendar` and `:clock`."
   def icon_ops(:calendar, w, h) do
     k = min(w, h) / 16
     dark = {:color, {95, 99, 104, 255}}
@@ -56,6 +56,67 @@ defmodule Browser.RangeControl do
     for {x, y} <- [{4, 8}, {7, 8}, {10, 8}, {4, 11}, {7, 11}], reduce: surface do
       acc -> Canvas.fill_rect(acc, x * k, y * k, 2 * k, 2 * k, dark, 1.0)
     end
+    |> Canvas.ops()
+  end
+
+  def icon_ops(:clock, w, h) do
+    k = min(w, h) / 16
+    dark = {:color, {95, 99, 104, 255}}
+    white = {:color, {255, 255, 255, 255}}
+    tau = 2 * :math.pi()
+
+    Canvas.new(max(trunc(w), 1), max(trunc(h), 1))
+    |> Canvas.begin_path()
+    |> Canvas.arc(8 * k, 8 * k, 7 * k, 0.0, tau, false)
+    |> Canvas.fill(dark, :nonzero, 1.0)
+    |> Canvas.begin_path()
+    |> Canvas.arc(8 * k, 8 * k, 5.4 * k, 0.0, tau, false)
+    |> Canvas.fill(white, :nonzero, 1.0)
+    |> Canvas.fill_rect(7.4 * k, 4 * k, 1.2 * k, 4.6 * k, dark, 1.0)
+    |> Canvas.fill_rect(7.4 * k, 7.4 * k, 3.6 * k, 1.2 * k, dark, 1.0)
+    |> Canvas.ops()
+  end
+
+  @doc "The ops of a `<progress>` or `<meter>` bar (see `Browser.Forms.meter_bar/2`)."
+  def bar_ops(spec, w, h) do
+    track = {:color, {239, 239, 239, 255}}
+    edge = {:color, {118, 118, 118, 255}}
+    r = h / 2
+    radii = [r, r, r, r]
+
+    surface =
+      Canvas.new(max(trunc(w), 1), max(trunc(h), 1))
+      |> Canvas.begin_path()
+      |> Canvas.round_rect(0, 0, w, h, radii)
+      |> Canvas.fill(track, :nonzero, 1.0)
+
+    {frac, color} =
+      case spec do
+        {:progress, nil} -> {0.0, nil}
+        {:progress, f} -> {f, {0, 117, 255, 255}}
+        {:meter, f, :good} -> {f, {16, 166, 66, 255}}
+        {:meter, f, :warn} -> {f, {255, 194, 0, 255}}
+        {:meter, f, :bad} -> {f, {230, 57, 53, 255}}
+      end
+
+    surface =
+      if color && frac > 0 do
+        surface
+        |> Canvas.save()
+        |> Canvas.begin_path()
+        |> Canvas.round_rect(0, 0, w, h, radii)
+        |> Canvas.clip()
+        |> Canvas.fill_rect(0, 0, max(w * frac, 1.0), h, {:color, color}, 1.0)
+        |> Canvas.restore()
+        |> elem(0)
+      else
+        surface
+      end
+
+    surface
+    |> Canvas.begin_path()
+    |> Canvas.round_rect(0.5, 0.5, w - 1, h - 1, [r, r, r, r])
+    |> Canvas.stroke(edge, %{width: 1.0, cap: :butt, join: :miter, miter: 10.0}, 1.0)
     |> Canvas.ops()
   end
 
