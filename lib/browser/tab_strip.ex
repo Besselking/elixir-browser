@@ -29,7 +29,10 @@ defmodule Browser.TabStrip do
   def put(wid, titles, active), do: :ets.insert(@table, {wid, titles, active})
 
   @doc "Forgets what window `wid` drew."
-  def discard(wid), do: :ets.delete(@table, wid)
+  def discard(wid) do
+    :ets.delete(@table, wid)
+    :ets.match_delete(@table, {{:bitmap, wid, :_}, :_})
+  end
 
   @doc """
   Marks the icon at `url` as asked for: true the first time (the caller fetches it), false
@@ -37,13 +40,30 @@ defmodule Browser.TabStrip do
   """
   def want_icon(url), do: :ets.insert_new(@table, {{:icon, url}, :pending})
 
-  @doc "Keeps the bitmap for the icon at `url` (nil: the icon cannot be shown)."
-  def put_icon(url, bitmap), do: :ets.insert(@table, {{:icon, url}, bitmap || :failed})
+  @doc "Keeps the decoded icon at `url` (nil: the icon cannot be shown)."
+  def put_icon(url, icon), do: :ets.insert(@table, {{:icon, url}, icon || :failed})
 
-  defp icon(nil), do: nil
-
-  defp icon(url) do
+  @doc "The decoded icon at `url`, or nil while it is on its way or failed."
+  def icon_data(url) do
     case :ets.lookup(@table, {:icon, url}) do
+      [{_, data}] when data not in [:pending, :failed] -> data
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Keeps the bitmap that window `wid` draws for the icon at `url`. A wx object only works in the
+  process that made it, so each window makes its own bitmaps.
+  """
+  def put_bitmap(wid, url, bitmap), do: :ets.insert(@table, {{:bitmap, wid, url}, bitmap})
+
+  @doc "Whether window `wid` has a bitmap for the icon at `url`."
+  def bitmap?(wid, url), do: :ets.member(@table, {:bitmap, wid, url})
+
+  defp icon(_wid, nil), do: nil
+
+  defp icon(wid, url) do
+    case :ets.lookup(@table, {:bitmap, wid, url}) do
       [{_, {:wx_ref, _, _, _} = bitmap}] -> bitmap
       _ -> nil
     end
@@ -121,7 +141,7 @@ defmodule Browser.TabStrip do
     |> Enum.zip(layout(length(titles), width))
     |> Enum.with_index()
     |> Enum.each(fn {{{title, loading?, icon_url}, {x, w}}, i} ->
-      paint_tab(dc, title, loading?, icon(icon_url), x, w, i == active)
+      paint_tab(dc, title, loading?, icon(wid, icon_url), x, w, i == active)
     end)
 
     {px, pw} = plus(length(titles), width)

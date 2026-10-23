@@ -437,10 +437,12 @@ defmodule Browser.Session do
   # -- images arriving -------------------------------------------------------
 
   def handle_info({:favicon, url, result}, state) do
-    bitmap = with {:ok, icon} <- result, do: UI.icon_bitmap(icon), else: (_ -> nil)
-    TabStrip.put_icon(url, bitmap)
+    TabStrip.put_icon(url, with({:ok, icon} <- result, do: icon, else: (_ -> nil)))
+    Windows.broadcast(self(), :icons)
     {:noreply, publish_tabs(state)}
   end
+
+  def handle_info(:icons, state), do: {:noreply, publish_tabs(state)}
 
   def handle_info({:image, nonce, url, result}, %{nonce: nonce} = state) do
     info =
@@ -4525,8 +4527,19 @@ defmodule Browser.Session do
         url != nil and TabStrip.want_icon(url),
         do: fetch_icon(url, tab.page.url, tab.tid)
 
+    make_icon_bitmaps(state)
     UI.set_tabs(state.ui, titles, state.active)
     state
+  end
+
+  # this window draws its own bitmaps of the icons (see `TabStrip.put_bitmap/3`)
+  defp make_icon_bitmaps(state) do
+    for tab <- [state | state.tabs],
+        url = tab_icon(tab),
+        url != nil and not TabStrip.bitmap?(state.ui.wid, url),
+        icon = TabStrip.icon_data(url) do
+      TabStrip.put_bitmap(state.ui.wid, url, UI.icon_bitmap(icon))
+    end
   end
 
   defp tab_icon(%{page: %Page{favicon: url}}), do: url
