@@ -452,7 +452,7 @@ defmodule Browser.Session do
           {:svg, max(round(w), 1), max(round(h), 1), scene}
 
         {:ok, bytes, format} ->
-          case UI.load_image(url, bytes, format) do
+          case UI.load_image(state.ui, url, bytes, format) do
             {:ok, w, h} -> {:ok, w, h}
             _ -> :failed
           end
@@ -4612,6 +4612,8 @@ defmodule Browser.Session do
     laid_width = Map.get(tab, :laid_width)
     state = state |> Map.merge(Map.take(tab, @tab_keys)) |> Map.put(:active, i)
     state = %{state | nonce: state.nonce + 1}
+    # (a tab that came from another window: this window makes its own bitmaps of the pictures)
+    UI.adopt_images(state.ui, for({url, {:ok, _, _}} <- state.images, do: url))
     if state.js, do: Browser.JS.Runtime.visible(state.js, true)
 
     UI.set_scroll_x(state.ui, state.scroll_x)

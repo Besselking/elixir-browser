@@ -238,6 +238,7 @@ defmodule Browser.UI do
     :ets.match_delete(@view, {{wid, :_}, :_})
     :ets.match_delete(@view, {{wid, :_}, :_, :_, :_})
     Browser.TabStrip.discard(wid)
+    :ets.match_delete(@images, {{wid, :_}, :_})
 
     for {{__MODULE__, :band, ^wid, _} = key, _} <- :persistent_term.get(),
         do: :persistent_term.erase(key)
@@ -550,7 +551,7 @@ defmodule Browser.UI do
 
   defp font(%{size: size, bold: bold, italic: italic, mono: mono} = style) do
     family = Map.get(style, :family)
-    key = {:font, size, bold, italic, mono, family}
+    key = {:font, :wx.get_env(), size, bold, italic, mono, family}
 
     case Process.get(key) do
       nil ->
@@ -834,6 +835,7 @@ defmodule Browser.UI do
 
     Process.delete(:paint_font)
     Process.delete(:paint_color)
+    Process.put(:paint_wid, wid)
     # everything is drawn at page x: the origin moves with the horizontal scroll
     :wxDC.setDeviceOrigin(dc, -sx(wid), 0)
 
@@ -1089,8 +1091,8 @@ defmodule Browser.UI do
 
   # a decoded picture, scaled to its box
   defp draw(dc, %{type: :image} = item, y, scroll) do
-    case :ets.lookup(@images, item.url) do
-      [{_url, bitmap}] ->
+    case :ets.lookup(@images, {Process.get(:paint_wid), item.url}) do
+      [{_key, bitmap}] ->
         gc = new_gc(dc)
 
         if clip = Map.get(item, :clip),
@@ -1251,6 +1253,9 @@ defmodule Browser.UI do
   # wx objects are made once per kind and kept: making one is a round trip, and nothing frees
   # them when they are dropped
   defp cached(key, make) do
+    # (a wx object works only in the environment that made it)
+    key = {:wx.get_env(), key}
+
     case Process.get(key) do
       nil ->
         value = make.()
@@ -1289,8 +1294,8 @@ defmodule Browser.UI do
 
     case layer.kind do
       :image ->
-        case :ets.lookup(@images, layer.url) do
-          [{_url, bitmap}] ->
+        case :ets.lookup(@images, {Process.get(:paint_wid), layer.url}) do
+          [{_key, bitmap}] ->
             for {x, y} <- tiles,
                 do: :wxGraphicsContext.drawBitmap(gc, bitmap, x, y - scroll, tw, th)
 
@@ -1968,7 +1973,32 @@ defmodule Browser.UI do
   bitmap the painter can draw, kept under `url`. Returns `{:ok, width, height}` or `:error`. The toolkit reads from files,
   so the bytes pass through a temporary one.
   """
-  def load_image(url, bytes, format) do
+  def load_image(%{wid: wid}, url, bytes, format) do
+    case make_bitmap(wid, url, bytes, format) do
+      {:ok, w, h} ->
+        # the bytes stay, for a window that a tab moves to: its painter needs bitmaps made in
+        # its own process (a wx object works only in the environment that made it)
+        :ets.insert(@images, {{:bytes, url}, bytes, format})
+        if w > 0 and h > 0, do: {:ok, w, h}, else: :error
+
+      :error ->
+        :error
+    end
+  end
+
+  @doc "Makes this window's bitmaps for the pictures at `urls` that other windows loaded."
+  def adopt_images(%{wid: wid}, urls) do
+    for url <- urls, not :ets.member(@images, {wid, url}) do
+      case :ets.lookup(@images, {:bytes, url}) do
+        [{_, bytes, format}] -> make_bitmap(wid, url, bytes, format)
+        [] -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp make_bitmap(wid, url, bytes, format) do
     case read_image(bytes, format) do
       nil ->
         :error
@@ -1978,10 +2008,10 @@ defmodule Browser.UI do
         bitmap = :wxBitmap.new(image)
         :wxImage.destroy(image)
         # a picture that is replaced (the next frame of a video) is not kept
-        old = :ets.lookup(@images, url)
-        :ets.insert(@images, {url, bitmap})
+        old = :ets.lookup(@images, {wid, url})
+        :ets.insert(@images, {{wid, url}, bitmap})
         for {_, previous} <- old, do: :wxBitmap.destroy(previous)
-        if w > 0 and h > 0, do: {:ok, w, h}, else: :error
+        {:ok, w, h}
     end
   end
 

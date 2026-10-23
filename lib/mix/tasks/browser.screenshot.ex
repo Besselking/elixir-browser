@@ -167,7 +167,7 @@ defmodule Mix.Tasks.Browser.Screenshot do
         Map.put(acc, url, {:svg, max(round(w), 1), max(round(h), 1), scene})
 
       {:ok, {url, {:ok, bytes, format}}}, acc ->
-        case Browser.UI.load_image(url, bytes, format) do
+        case Browser.UI.load_image(%{wid: :snapshot}, url, bytes, format) do
           {:ok, w, h} -> Map.put(acc, url, {:ok, w, h})
           _ -> Map.put(acc, url, :failed)
         end

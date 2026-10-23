@@ -88,7 +88,7 @@ defmodule Browser.Media do
 
   @doc """
   The format of the frames: `:rgba` (the default) or `:bmp`, a whole 24 bit BMP file that
-  wxWidgets and `Browser.UI.load_image/3` read as they are.
+  wxWidgets and `Browser.UI.load_image/4` read as they are.
   """
   def set_format(%__MODULE__{port: port} = media, format) when format in [:rgba, :bmp] do
     Port.command(port, [<<?M, if(format == :bmp, do: 1, else: 0)>>])
