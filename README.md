@@ -40,10 +40,11 @@ shows the start page and has its own tabs, history and address bar. It opens a l
 to the right of the window that you used. All windows share the cookies, the caches, local
 storage and the visited pages that the address bar suggests.
 
-To move a tab to its own window, choose File > Move Tab to New Window. The new window loads the
-page again and keeps the history of the tab. It does not keep the scroll position, the text that
-you typed in forms, or the state of the scripts. This item does nothing when the window has only
-one tab.
+To move a tab to its own window, choose File > Move Tab to New Window, or drag the tab away
+from the tab strip (up or down) and let go. If you let go over the tab strip of another window,
+the tab joins that window. The page moves as it is: scripts keep running, and the scroll
+position, the text in forms and the history stay. A page that is still loading starts again in
+the new place. The item does nothing when the window has only one tab.
 
 A page can open a popup window with `window.open(url, name, features)`, for example
 `window.open("/login", "login", "width=480,height=640")`. A popup has no tab strip and no

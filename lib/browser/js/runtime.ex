@@ -66,6 +66,12 @@ defmodule Browser.JS.Runtime do
   @doc "The window got a new size: scripts see it (`innerWidth`, the boxes) and get a `resize` event."
   def resized(pid, w, h), do: send(pid, {:resized, w, h})
 
+  @doc """
+  The page moves to another window: what the runtime sends to its owner (`:js_async` replies,
+  layout requests) goes to `owner` from now on.
+  """
+  def set_owner(pid, owner), do: send(pid, {:set_owner, owner})
+
   def stop(pid) do
     Process.exit(pid, :kill)
     Browser.Console.drop(pid)
@@ -412,6 +418,10 @@ defmodule Browser.JS.Runtime do
         Process.put(:js_steps, @steps)
         reply = handle({:hover, old, new})
         if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
+      {:set_owner, owner} ->
+        Process.put(:rt_info, Map.put(Process.get(:rt_info), :owner, owner))
         loop(t0)
 
       {:window_event, type, init} ->

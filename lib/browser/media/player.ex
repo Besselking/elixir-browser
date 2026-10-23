@@ -29,6 +29,9 @@ defmodule Browser.Media.Player do
   @doc "Stops at the frame that is shown."
   def pause(pid), do: GenServer.cast(pid, :pause)
 
+  @doc "The video moves to another window: frames and state go to `owner` from now on."
+  def set_owner(pid, owner), do: GenServer.cast(pid, {:set_owner, owner})
+
   @doc "Plays when paused, pauses when playing."
   def toggle(pid), do: GenServer.cast(pid, :toggle)
 
@@ -93,6 +96,7 @@ defmodule Browser.Media.Player do
   def handle_call(:position, _from, state), do: {:reply, state.pos, state}
 
   @impl true
+  def handle_cast({:set_owner, owner}, state), do: {:noreply, %{state | owner: owner}}
   def handle_cast(:play, state), do: {:noreply, do_play(state)}
   def handle_cast(:pause, state), do: {:noreply, do_pause(state)}
   def handle_cast(:toggle, %{status: :playing} = state), do: {:noreply, do_pause(state)}
