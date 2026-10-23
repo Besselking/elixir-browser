@@ -633,9 +633,25 @@ defmodule Browser.UI do
   by one process at a time (its DC holds the current font); a second one on the same cache
   serves a background process.
   """
-  def measurer(%{panel: panel}, cache \\ nil), do: dc_measurer(:wxClientDC.new(panel), cache)
+  def measurer(%{panel: panel}, cache \\ nil) do
+    # (the DC is kept in a table: zen mode moves the panel to another window, which makes the
+    # DC of a measurer unusable on macOS, see `rebind_measurers/1`)
+    key = {:measure_dc, make_ref()}
+    :ets.insert(@view, {key, :wxClientDC.new(panel)})
+    dc_measurer(fn -> :ets.lookup_element(@view, key, 2) end, cache)
+  end
 
-  defp dc_measurer(dc, cache) do
+  # Makes every measurer use a new client DC of the panel.
+  defp rebind_measurers(%{panel: panel}) do
+    for {key, old} <- :ets.match_object(@view, {{:measure_dc, :_}, :_}) do
+      :ets.insert(@view, {key, :wxClientDC.new(panel)})
+      :wxClientDC.destroy(old)
+    end
+
+    :ok
+  end
+
+  defp dc_measurer(get_dc, cache) do
     cache = cache || new_measure_cache()
 
     fn
@@ -647,6 +663,7 @@ defmodule Browser.UI do
             h
 
           [] ->
+            dc = get_dc.()
             :wxDC.setFont(dc, font(style))
             {_w, h} = :wxDC.getTextExtent(dc, ~c"Hg")
             :ets.insert(cache, {key, h})
@@ -661,6 +678,7 @@ defmodule Browser.UI do
             w
 
           [] ->
+            dc = get_dc.()
             :wxDC.setFont(dc, font(style))
             {w, _h} = :wxDC.getTextExtent(dc, String.to_charlist(text))
             if :ets.info(cache, :size) >= @measure_cache_limit, do: :ets.delete_all_objects(cache)
@@ -740,7 +758,8 @@ defmodule Browser.UI do
     probe_webp()
     :ets.insert(@view, {:view, [], 0, true})
     :ets.insert(@view, {:sx, 0})
-    dc_measurer(:wxMemoryDC.new(:wxBitmap.new(16, 16)), nil)
+    dc = :wxMemoryDC.new(:wxBitmap.new(16, 16))
+    dc_measurer(fn -> dc end, nil)
   end
 
   @doc """
@@ -1928,6 +1947,7 @@ defmodule Browser.UI do
     :wxFrame.hide(home)
     place.()
     :wxWindow.setFocus(panel)
+    rebind_measurers(ui)
     :wxWindow.refresh(panel)
     %{ui | zen: zen}
   end
@@ -1945,6 +1965,7 @@ defmodule Browser.UI do
     :wxWindow.layout(home)
     :wxWindow.setCursor(panel, :wxCursor.new(1))
     :wxWindow.setFocus(panel)
+    rebind_measurers(ui)
     :wxWindow.refresh(panel)
     :wxFrame.destroy(zen)
     %{ui | zen: nil}
