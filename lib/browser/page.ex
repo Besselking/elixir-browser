@@ -16,6 +16,8 @@ defmodule Browser.Page do
     # what relative addresses resolve against: the url, or the page's `<base href>`
     :base,
     :title,
+    # the address of the icon the tab shows (`Browser.Favicon.url/3`), or nil
+    :favicon,
     :raw,
     :rules,
     :queries,
@@ -136,6 +138,7 @@ defmodule Browser.Page do
         url: url,
         base: base,
         title: Layout.title(raw),
+        favicon: Browser.Favicon.url(raw, url, base),
         raw: raw,
         rules: rules,
         queries: queries,
@@ -683,6 +686,7 @@ defmodule Browser.Page do
           | raw: raw,
             base: base,
             title: Layout.title(raw),
+            favicon: Browser.Favicon.url(raw, page.url, base),
             forms: forms,
             image_urls: image_urls,
             form_state: %{},
