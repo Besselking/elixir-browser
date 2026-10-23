@@ -260,6 +260,10 @@ defmodule Browser.Session do
   end
 
   @impl true
+  # (a window that is closed waits for the toolkit to free its frame; see `close_window/1`)
+  def handle_info(:finish_close, state), do: {:stop, :normal, state}
+  def handle_info(_msg, %{closed: true} = state), do: {:noreply, state}
+
   # a page that was loading for a tab that is not shown arrives: it waits in the tab until it is
   def handle_info({:loaded, nonce, url, mode, result}, %{jobs: jobs} = state)
       when is_map_key(jobs, nonce) and nonce != state.nonce do
@@ -4361,7 +4365,12 @@ defmodule Browser.Session do
 
         LayoutWorker.stop(state.layout_worker)
         UI.close(state.ui)
-        {:stop, :normal, state}
+        # The toolkit frees the frame later, on its own thread. When this process ends, wx
+        # disconnects its event handlers from the objects it made; doing that while the frame
+        # is being freed corrupts memory (SIGBUS on macOS). So the process waits a moment.
+        crumb(state, :window_closed)
+        Process.send_after(self(), :finish_close, 1000)
+        {:noreply, Map.put(state, :closed, true)}
     end
   end
 
