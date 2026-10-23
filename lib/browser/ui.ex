@@ -792,9 +792,23 @@ defmodule Browser.UI do
   # `font-size: 0` is real (icon fonts, hidden text); measure it as 1px so the ratios stay finite
   defp measure_units(%{size: size} = style) when size < 1, do: measure_units(%{style | size: 1})
 
+  # the units are ratios of the font size, so a big font is measured at a size that fits on a
+  # bitmap (a bitmap that cannot be made leaves its DC without a font)
+  @max_measure_size 200
+  defp measure_units(%{size: size} = style) when size > @max_measure_size,
+    do: measure_units(%{style | size: @max_measure_size})
+
   defp measure_units(%{size: size} = style) do
     side = max(ceil(size * 3), 8)
+    Browser.CrashReporter.breadcrumb({:measure_units, size, Map.get(style, :family)})
     bitmap = :wxBitmap.new(side, side)
+
+    if :wxBitmap.isOk(bitmap),
+      do: measure_units_on(bitmap, style, size, side),
+      else: {0.5, 0.5}
+  end
+
+  defp measure_units_on(bitmap, style, size, side) do
     dc = :wxMemoryDC.new(bitmap)
     :wxDC.setBackground(dc, :wxBrush.new({255, 255, 255}))
     :wxDC.clear(dc)
