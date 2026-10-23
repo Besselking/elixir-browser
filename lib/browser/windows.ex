@@ -42,6 +42,17 @@ defmodule Browser.Windows do
   """
   def closing(pid), do: GenServer.call(__MODULE__, {:closing, pid})
 
+  @doc """
+  Quits the app. The VM stops the way it is meant to (applications stop, wx shuts down); a
+  hard halt while wx is running ended in a SIGBUS on macOS. If the stop is held up, the halt
+  follows after a few seconds.
+  """
+  def quit do
+    Browser.LocalStorage.flush()
+    spawn(fn -> Process.sleep(5000) && System.halt(0) end)
+    System.stop(0)
+  end
+
   @doc "Sends `msg` to every window except `pid`."
   def broadcast(pid, msg) do
     for other <- list(), other != pid, do: send(other, msg)

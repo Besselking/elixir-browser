@@ -286,6 +286,7 @@ defmodule Browser.Session do
     do: {:noreply, state}
 
   def handle_info({:loaded, _, url, mode, result}, state) do
+    crumb(state, {:loaded, mode})
     state = stop_media(state)
 
     state =
@@ -721,9 +722,8 @@ defmodule Browser.Session do
   end
 
   # Quit (Cmd+Q and the application menu's item)
-  def handle_info(wx(id: 5006, event: wxCommand(type: :command_menu_selected)), _state) do
-    Browser.LocalStorage.flush()
-    System.halt(0)
+  def handle_info(wx(id: 5006, event: wxCommand(type: :command_menu_selected)), state) do
+    {:noreply, state |> tap(fn _ -> Windows.quit() end)}
   end
 
   # File > New Tab and Close Tab
@@ -1032,6 +1032,7 @@ defmodule Browser.Session do
         {:layout_done, ref, base, page, items, height, width, used},
         %{layout_job: {ref, _}} = state
       ) do
+    crumb(state, :layout_done)
     state = %{state | layout_job: nil}
 
     state =
@@ -4344,8 +4345,8 @@ defmodule Browser.Session do
 
     case Windows.closing(self()) do
       :last ->
-        Browser.LocalStorage.flush()
-        System.halt(0)
+        Windows.quit()
+        {:noreply, state}
 
       :more ->
         state.tabs

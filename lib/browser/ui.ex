@@ -423,7 +423,8 @@ defmodule Browser.UI do
   area covered by items that differ from the previous view, or by the caret when it
   blinks, is invalidated; anything else repaints the whole panel.
   """
-  def update(%{panel: panel, wid: wid}, items, overlay, scroll, caret_on, mode \\ :full) do
+  def update(%{panel: panel, wid: wid} = ui, items, overlay, scroll, caret_on, mode \\ :full) do
+    note(ui, {:update, mode})
     [{_, old_overlay, old_scroll, old_caret}] = :ets.lookup(@view, {wid, :view})
     old_items = Process.get(:published_items, [])
     diff? = mode == :diff and old_scroll == scroll and old_overlay == overlay
@@ -1890,19 +1891,24 @@ defmodule Browser.UI do
   defp clipped_in?(_, _, _), do: true
 
   def set_url_text(%{url: url} = ui, text) do
+    note(ui, :set_url_text)
     hide_suggestions(ui)
     :wxTextCtrl.setValue(url, String.to_charlist(text))
   end
 
   @doc "Puts text in the address bar and leaves the suggestions as they are."
-  def put_url_text(%{url: url}, text), do: :wxTextCtrl.setValue(url, String.to_charlist(text))
+  def put_url_text(%{url: url} = ui, text) do
+    note(ui, :put_url_text)
+    :wxTextCtrl.setValue(url, String.to_charlist(text))
+  end
 
   @row_h 22
 
   @doc "Shows the address suggestions (`[{url, title}]`) under the address bar; none hides them."
   def show_suggestions(ui, []), do: hide_suggestions(ui)
 
-  def show_suggestions(%{suggest: list, toolbar: toolbar, url: url}, items) do
+  def show_suggestions(%{suggest: list, toolbar: toolbar, url: url} = ui, items) do
+    note(ui, :show_suggestions)
     {x, _} = :wxWindow.getPosition(url)
     {w, _} = :wxWindow.getSize(url)
     # the toolbar sits below the tab strip: the list opens at its bottom edge
@@ -1921,7 +1927,10 @@ defmodule Browser.UI do
     :wxWindow.show(list)
   end
 
-  def hide_suggestions(%{suggest: list}), do: :wxWindow.hide(list)
+  def hide_suggestions(%{suggest: list} = ui) do
+    note(ui, :hide_suggestions)
+    :wxWindow.hide(list)
+  end
 
   @doc "Highlights suggestion `i` (-1: none)."
   def select_suggestion(%{suggest: list}, -1) do
@@ -1947,13 +1956,25 @@ defmodule Browser.UI do
 
   def tabs_width(%{tabs: tabs}), do: tabs |> :wxWindow.getClientSize() |> elem(0)
 
-  def set_title(%{frame: f}, title), do: :wxFrame.setTitle(f, String.to_charlist(title))
+  def set_title(%{frame: f} = ui, title) do
+    note(ui, :set_title)
+    :wxFrame.setTitle(f, String.to_charlist(title))
+  end
+
   @doc "Enables Develop > Stop Replaying Archive only while an archive is replayed."
   def sync_archive_menu(%{frame: f}) do
     :wxMenuBar.enable(:wxFrame.getMenuBar(f), 5203, Browser.Archive.mode() == :replay)
   end
 
-  def set_status(%{frame: f}, text), do: :wxFrame.setStatusText(f, String.to_charlist(text))
+  def set_status(%{frame: f} = ui, text) do
+    note(ui, {:set_status, String.slice(text, 0, 20)})
+    :wxFrame.setStatusText(f, String.to_charlist(text))
+  end
+
+  # a note for the crash report (see `Browser.CrashReporter.breadcrumb/1`)
+  defp note(%{wid: wid}, what),
+    do: Browser.CrashReporter.breadcrumb({:erlang.phash2(wid, 1000), what})
+
   def enable(widget, bool), do: :wxWindow.enable(widget, enable: bool)
   def refresh(%{panel: p}), do: :wxWindow.refresh(p)
 
