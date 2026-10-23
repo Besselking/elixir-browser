@@ -52,6 +52,18 @@ defmodule Browser.CrashReporterTest do
     assert File.read!(Path.join(dir, file)) =~ "plain logged failure"
   end
 
+  def waiting_in_a_call, do: receive(do: (:go -> :ok))
+
+  test "stacks lists the processes that are inside a call of the given modules" do
+    pid = spawn(fn -> waiting_in_a_call() end)
+    Process.sleep(50)
+    assert [found] = CrashReporter.stacks([__MODULE__])
+    assert found =~ inspect(pid)
+    assert found =~ "waiting_in_a_call"
+    assert CrashReporter.stacks([:no_such_module]) == []
+    send(pid, :go)
+  end
+
   test "an empty BROWSER_CRASH_DIR falls back to the config (off in tests)", %{dir: _} do
     System.put_env("BROWSER_CRASH_DIR", "")
     assert CrashReporter.dir() == nil

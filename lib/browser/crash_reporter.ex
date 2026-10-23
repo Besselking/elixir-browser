@@ -136,12 +136,43 @@ defmodule Browser.CrashReporter do
       level: #{event.level}
       process: #{inspect(Map.get(event.meta, :pid))}
 
-      #{format(event)}
+      #{format(event)}#{wx_section()}
       """
 
     File.write!(path <> ".tmp", body)
     File.rename!(path <> ".tmp", path)
     prune(dir)
+  end
+
+  # A wx assert comes from the toolkit's thread and carries no Elixir stack. The processes that
+  # are inside a wx call (or a wx callback) just now are the ones that can have caused it.
+  defp wx_section do
+    case stacks([:wxe_util, :wxe_server]) do
+      [] -> ""
+      found -> "\n\nprocesses in wx calls:\n\n" <> Enum.join(found, "\n\n")
+    end
+  end
+
+  @doc false
+  # The stacks of the processes that have a frame in one of `modules`.
+  def stacks(modules) do
+    for pid <- Process.list(),
+        pid != self(),
+        {:current_stacktrace, stack} <- [Process.info(pid, :current_stacktrace)],
+        Enum.any?(stack, fn {mod, _, _, _} -> mod in modules end) do
+      name =
+        case Process.info(pid, :registered_name) do
+          {:registered_name, name} when is_atom(name) -> " (#{name})"
+          _ -> ""
+        end
+
+      frames =
+        stack
+        |> Enum.take(30)
+        |> Enum.map_join("\n", &("  " <> Exception.format_stacktrace_entry(&1)))
+
+      "#{inspect(pid)}#{name}\n#{frames}"
+    end
   end
 
   defp format(event) do
