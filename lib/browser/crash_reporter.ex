@@ -68,6 +68,8 @@ defmodule Browser.CrashReporter do
     if :ets.whereis(@trail) == :undefined,
       do: :ets.new(@trail, [:named_table, :public, :ordered_set])
 
+    adopt_native_crash()
+
     case :logger.add_handler(@handler_id, __MODULE__, %{level: :error}) do
       :ok -> :ok
       {:error, {:already_exist, _}} -> :ok
@@ -107,8 +109,64 @@ defmodule Browser.CrashReporter do
           )
 
           if :ets.info(@trail, :size) > @trail_keep, do: :ets.delete(@trail, :ets.first(@trail))
+          append_trail(what)
           :ok
       end
+    end
+
+    :ok
+  end
+
+  # The ETS trail dies with the VM. A native crash (SIGBUS) gives no chance to write a report,
+  # so every breadcrumb is also appended to a file. A clean quit deletes the file; the next
+  # start turns a file that is still there into a crash report.
+  defp trail_file do
+    case dir() do
+      nil -> nil
+      dir -> Path.join(dir, "running-trail.log")
+    end
+  end
+
+  defp append_trail(what) do
+    if file = trail_file() do
+      File.mkdir_p(Path.dirname(file))
+
+      case File.stat(file) do
+        {:ok, %{size: size}} when size > 200_000 -> File.rm(file)
+        _ -> :ok
+      end
+
+      line = "#{System.os_time(:millisecond)} #{inspect(self())} #{inspect(what, limit: 20)}\n"
+      File.write(file, line, [:append])
+    end
+
+    :ok
+  end
+
+  @doc "Deletes the running trail: the program is ending in order."
+  def clean_exit do
+    if file = trail_file(), do: File.rm(file)
+    :ok
+  end
+
+  defp adopt_native_crash do
+    with file when is_binary(file) <- trail_file(),
+         {:ok, text} <- File.read(file) do
+      lines = text |> String.split("\n", trim: true) |> Enum.take(-80)
+
+      out =
+        Path.join(
+          Path.dirname(file),
+          "crash-#{System.os_time(:second)}-native.txt"
+        )
+
+      File.write(
+        out,
+        "The last run ended without a clean quit (a native crash such as SIGBUS).\n" <>
+          "Last events before it ended:\n" <> Enum.join(lines, "\n") <> "\n"
+      )
+
+      File.rm(file)
     end
 
     :ok

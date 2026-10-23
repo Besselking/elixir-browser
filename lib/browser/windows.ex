@@ -50,9 +50,11 @@ defmodule Browser.Windows do
   def quit do
     # background jobs (styling, layout) measure text through wx: they stop doing that first, and
     # a call that is under way gets a moment to end
+    Browser.CrashReporter.breadcrumb(:quit_begin)
     Browser.UI.quitting()
     Process.sleep(300)
     Browser.LocalStorage.flush()
+    Browser.CrashReporter.breadcrumb(:quit_stopping)
     spawn(fn -> Process.sleep(5000) && System.halt(0) end)
     System.stop(0)
   end

@@ -111,6 +111,8 @@ button empties the list. The list keeps the last 2000 requests. It shows the req
 
 Every crash (a process dying, a failing wx callback, `Logger.error`) is saved as a text file with the time, the page that was open, the version and commit, and the stacktrace. A wx assert has no Elixir stacktrace, and the toolkit reports it after the call that caused it has ended. So the file also lists the processes that are inside a wx call at that time, with their stacktraces, and the last events of the windows (paints, tab changes, page loads) with the time before the report. They go to `$BROWSER_CRASH_DIR`, else `crashes/` under the user data dir (on macOS `~/Library/Application Support/elixir_browser/crashes`), and the newest 100 are kept. `mix browser.crashes [--show|--clear]` lists, prints or deletes them.
 
+A native crash (for example SIGBUS) stops the program at once, so it cannot write a report. The browser also writes each event to `running-trail.log` in the same folder, and deletes the file when the program ends in order. If the file is still there at the next start, the browser saves it as a `crash-...-native.txt` report with the last events.
+
 ## Page archives
 
 A page archive is one file with the network responses of a page: the HTML, the style sheets, the scripts, the images and the redirects, with their headers, as the server sent them. A page can load from the file with no network. Use it to look at a site that a machine cannot reach, for example a cloud session. Scripts run on the original HTML, not on a copy that a browser saved after the scripts had changed it.
