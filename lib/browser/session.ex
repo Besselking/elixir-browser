@@ -221,6 +221,8 @@ defmodule Browser.Session do
   def handle_call({:drop_tab, _, _}, _from, state), do: {:reply, false, state}
 
   @impl true
+  def handle_cast(_msg, %{closed: true} = state), do: {:noreply, state}
+
   def handle_cast({:navigate, url}, state),
     do: {:noreply, load(state, Fetch.normalize(url), :push)}
 
@@ -260,8 +262,7 @@ defmodule Browser.Session do
   end
 
   @impl true
-  # (a window that is closed waits for the toolkit to free its frame; see `close_window/1`)
-  def handle_info(:finish_close, state), do: {:stop, :normal, state}
+  # (a window that is closed stays as an empty process; see `close_window/1`)
   def handle_info(_msg, %{closed: true} = state), do: {:noreply, state}
 
   # a page that was loading for a tab that is not shown arrives: it waits in the tab until it is
@@ -4365,12 +4366,12 @@ defmodule Browser.Session do
 
         LayoutWorker.stop(state.layout_worker)
         UI.close(state.ui)
-        # The toolkit frees the frame later, on its own thread. When this process ends, wx
-        # disconnects its event handlers from the objects it made; doing that while the frame
-        # is being freed corrupts memory (SIGBUS on macOS). So the process waits a moment.
+        # This process must not end: when a process that made wx objects ends, wx disconnects
+        # their event handlers, and that crashes the toolkit (SIGBUS on macOS) when the object
+        # is a frame that was destroyed. So it stays, with nothing in its state, and ignores
+        # every message.
         crumb(state, :window_closed)
-        Process.send_after(self(), :finish_close, 1000)
-        {:noreply, Map.put(state, :closed, true)}
+        {:noreply, %{closed: true}, :hibernate}
     end
   end
 
