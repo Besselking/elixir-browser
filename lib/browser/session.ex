@@ -77,7 +77,7 @@ defmodule Browser.Session do
       page_edits: %{},
       # the page's JavaScript runtime, when it has scripts
       js: nil,
-      history: opts[:history] || History.new(),
+      history: History.new(),
       # pages visited, kept between runs, and what the address bar is suggesting from them:
       # `%{items: [{url, title}], idx: highlighted or -1, typed: what the user typed}`
       visits: Visits.load(),
@@ -169,6 +169,8 @@ defmodule Browser.Session do
       fresh_tab: false,
       # the index of the tab being dragged along the strip
       tab_drag: nil,
+      # the dragged tab is outside the strip: letting go moves it to a window
+      tab_out: false,
       # tabs closed, newest first: `{index, history, loading}` (see `reopen_tab/1`)
       closed: [],
       # the developer console: `%{win, pid, seq, hist, hpos}` once opened (see `open_console/1`)
@@ -186,16 +188,36 @@ defmodule Browser.Session do
     }
 
     publish_tabs(state)
-    # a tab moved here from another window brings its history and shows its current page
-    case opts[:history] do
-      %{current: url} when url != nil -> {:ok, state, {:continue, {:restore, url}}}
-      _ -> {:ok, state, {:continue, {:go, opts[:url] || Browser.home()}}}
+    # a tab moved here from another window brings its page (or what loads it again)
+    case opts[:tab] do
+      nil -> {:ok, state, {:continue, {:go, opts[:url] || Browser.home()}}}
+      tab -> {:ok, state, {:continue, {:adopt, tab}}}
     end
   end
 
   @impl true
   def handle_continue({:go, url}, state), do: {:noreply, load(state, Fetch.normalize(url), :push)}
-  def handle_continue({:restore, url}, state), do: {:noreply, load(state, url, :history)}
+  # a tab that was moved here with its page (see `send_tab_away/3`)
+  def handle_continue({:adopt, tab}, state),
+    do: {:noreply, resume(%{state | tabs: [tab], tid: tab.tid}, 0)}
+
+  # a tab is dropped on the strip of this window: it is added there and shown
+  @impl true
+  def handle_call({:drop_tab, {sx, sy}, tab}, _from, %{popup: nil} = state) do
+    {x, y} = :wxWindow.screenToClient(state.ui.tabs, {sx, sy})
+    {w, _} = :wxWindow.getClientSize(state.ui.tabs)
+
+    if x >= 0 and x < w and y >= 0 and y < Browser.TabStrip.height() do
+      state = park(state)
+      state = %{state | tabs: state.tabs ++ [tab]}
+      :wxTopLevelWindow.raise(state.ui.frame)
+      {:reply, true, resume(state, length(state.tabs) - 1)}
+    else
+      {:reply, false, state}
+    end
+  end
+
+  def handle_call({:drop_tab, _, _}, _from, state), do: {:reply, false, state}
 
   @impl true
   def handle_cast({:navigate, url}, state),
@@ -739,12 +761,12 @@ defmodule Browser.Session do
 
   def handle_info(wx(obj: obj, event: wxMouse(type: :left_up)), state)
       when obj == state.ui.tabs,
-      do: {:noreply, %{state | tab_drag: nil}}
+      do: {:noreply, finish_tab_drag(state)}
 
   # dragging a tab along the strip puts it in the place it is over
-  def handle_info(wx(obj: obj, event: wxMouse(type: :motion, x: x, leftDown: true)), state)
+  def handle_info(wx(obj: obj, event: wxMouse(type: :motion, x: x, y: y, leftDown: true)), state)
       when obj == state.ui.tabs and state.tab_drag != nil,
-      do: {:noreply, drag_tab(state, x)}
+      do: {:noreply, drag_tab(state, x, y)}
 
   def handle_info(wx(obj: obj, event: wxMouse(type: :motion)), state)
       when obj == state.ui.tabs,
@@ -4316,12 +4338,69 @@ defmodule Browser.Session do
 
   defp move_tab_to_window(%{history: %{current: nil}} = state), do: state
 
-  defp move_tab_to_window(state) do
-    Windows.open(at: UI.next_window_position(state.ui), history: state.history)
-    closed = state.closed
-    # (the tab is not closed, it moved: Ctrl+Shift+T does not bring it back here)
-    %{close_tab(state, state.active) | closed: closed}
+  defp move_tab_to_window(state),
+    do: send_tab_away(state, UI.next_window_position(state.ui), false)
+
+  # the mouse button is let go: a tab dragged out of the strip goes to the window under the
+  # pointer, or to a window of its own there
+  defp finish_tab_drag(%{tab_out: true, tabs: [_, _ | _], popup: nil} = state) do
+    {sx, sy} = :wx_misc.getMousePosition()
+    send_tab_away(%{state | tab_drag: nil, tab_out: false}, {sx - 60, sy - 12}, {sx, sy})
   end
+
+  defp finish_tab_drag(state), do: %{state | tab_drag: nil, tab_out: false}
+
+  # The active tab leaves this window, for the window whose strip is at `drop` (a screen
+  # position) or else for a new window at `at`. A page that has loaded goes as it is: its
+  # script runtime and videos are handed to the other window (`Runtime.set_owner/2`), which
+  # shows it as a tab that was in the background. A page that is still loading comes back
+  # from the network there, with its history.
+  defp send_tab_away(%{tabs: [_]} = state, _at, _drop), do: state
+  defp send_tab_away(%{history: %{current: nil}, page: nil} = state, _at, _drop), do: state
+
+  defp send_tab_away(state, at, drop) do
+    closed = state.closed
+    live? = state.loading == nil and state.page != nil
+    reload = state.loading || {state.history.current, :history, []}
+    state = park(state)
+    tab = state.tabs |> Enum.at(state.active) |> Map.put(:stale, true)
+    moved = if live?, do: tab, else: reloading(tab.history, reload)
+
+    target =
+      with {sx, sy} <- drop,
+           pid when is_pid(pid) <-
+             Enum.find(other_windows(), &accepts_tab?(&1, {sx, sy}, moved)) do
+        pid
+      else
+        _ ->
+          {:ok, pid} = Windows.open(at: at, tab: moved)
+          pid
+      end
+
+    if live? do
+      if is_pid(tab.js), do: Browser.JS.Runtime.set_owner(tab.js, target)
+      Enum.each(tab.media, fn {_nid, pid} -> Browser.Media.Player.set_owner(pid, target) end)
+    end
+
+    LayoutWorker.drop(state.layout_worker, tab.tid)
+    tabs = List.delete_at(state.tabs, state.active)
+    next = min(state.active, length(tabs) - 1)
+    # (the tab is not closed, it moved: Ctrl+Shift+T does not bring it back here)
+    %{resume(%{state | tabs: tabs, suggest: nil}, next) | closed: closed}
+  end
+
+  defp other_windows, do: Windows.list() -- [self()]
+
+  # (a window that does not answer is not a target)
+  defp accepts_tab?(pid, pos, moved) do
+    GenServer.call(pid, {:drop_tab, pos, moved}, 3000)
+  catch
+    :exit, _ -> false
+  end
+
+  # what a window adopts when the page was still loading: a blank tab with the history, which
+  # loads its current page again
+  defp reloading(history, loading), do: %{blank_tab() | history: history, loading: loading}
 
   # What belongs to one tab. Everything else (the window, the jobs and timers, the address
   # bar's suggestions, the visited pages) is shared; a tab that is not shown has none of
@@ -4703,7 +4782,14 @@ defmodule Browser.Session do
     load(state, url, mode, opts)
   end
 
-  defp drag_tab(state, x) do
+  # far from the strip (up or down): letting go moves the tab out of this window
+  @pull_out 40
+
+  defp drag_tab(state, _x, y) when y < -@pull_out or y > 30 + @pull_out,
+    do: %{state | tab_out: true}
+
+  defp drag_tab(state, x, _y) do
+    state = %{state | tab_out: false}
     to = Browser.TabStrip.index_at(length(state.tabs), UI.tabs_width(state.ui), x)
     from = state.tab_drag
 
