@@ -31,4 +31,7 @@ defmodule Browser.Application do
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Browser.Supervisor)
   end
+
+  @impl true
+  def stop(_state), do: Browser.CrashReporter.clean_exit()
 end

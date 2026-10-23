@@ -238,6 +238,7 @@ defmodule Browser.UI do
     :ets.match_delete(@view, {{wid, :_}, :_})
     :ets.match_delete(@view, {{wid, :_}, :_, :_, :_})
     Browser.TabStrip.discard(wid)
+    :ets.match_delete(@images, {{wid, :_}, :_})
 
     for {{__MODULE__, :band, ^wid, _} = key, _} <- :persistent_term.get(),
         do: :persistent_term.erase(key)
@@ -422,7 +423,8 @@ defmodule Browser.UI do
   area covered by items that differ from the previous view, or by the caret when it
   blinks, is invalidated; anything else repaints the whole panel.
   """
-  def update(%{panel: panel, wid: wid}, items, overlay, scroll, caret_on, mode \\ :full) do
+  def update(%{panel: panel, wid: wid} = ui, items, overlay, scroll, caret_on, mode \\ :full) do
+    note(ui, {:update, mode})
     [{_, old_overlay, old_scroll, old_caret}] = :ets.lookup(@view, {wid, :view})
     old_items = Process.get(:published_items, [])
     diff? = mode == :diff and old_scroll == scroll and old_overlay == overlay
@@ -550,7 +552,7 @@ defmodule Browser.UI do
 
   defp font(%{size: size, bold: bold, italic: italic, mono: mono} = style) do
     family = Map.get(style, :family)
-    key = {:font, size, bold, italic, mono, family}
+    key = {:font, :wx.get_env(), size, bold, italic, mono, family}
 
     case Process.get(key) do
       nil ->
@@ -567,11 +569,29 @@ defmodule Browser.UI do
 
         # wxWidgets 3.3 invalidates the font when the face is unknown; keep the family's font then
         if face && not :wxFont.setFaceName(f, face), do: :wxFont.setFamily(f, wx_family)
+        f = valid_font(f, style)
         Process.put(key, f)
         f
 
       f ->
         f
+    end
+  end
+
+  # wxSYS_DEFAULT_GUI_FONT
+  @wx_sys_default_gui_font 17
+
+  # A font that wx cannot use (an odd size or face) makes the next text measure or draw fail
+  # with an assert, so such a font is noted for the crash report and replaced.
+  defp valid_font(f, style) do
+    if :wxFont.isOk(f) do
+      f
+    else
+      Browser.CrashReporter.breadcrumb(
+        {:invalid_font, Map.take(style, [:size, :bold, :italic, :mono, :family])}
+      )
+
+      :wxSystemSettings.getFont(@wx_sys_default_gui_font)
     end
   end
 
@@ -626,32 +646,22 @@ defmodule Browser.UI do
     end
   end
 
-  # wx accepts any face name and quietly shows its default font for one that is not installed,
-  # so a font exists when text in it is not as wide as in a face that cannot exist
-  @probe "The quick brown fox jumps over the lazy dog 0123456789 WMiIl"
-
+  # wx 3.3 makes a font with an unknown face name invalid, and measuring text with an invalid
+  # font asserts (and later corrupts memory on macOS), so ask the font only, never measure
   defp installed?(name) do
     key = {__MODULE__, :installed, String.downcase(name)}
 
     case :persistent_term.get(key, nil) do
       nil ->
-        result = probe_width(name) != probe_width("no such font \u2603")
+        f = :wxFont.new(40, @wx_default, @wx_normal, :wxe_util.get_const(:wxFONTWEIGHT_NORMAL))
+        result = :wxFont.setFaceName(f, String.to_charlist(name)) and :wxFont.isOk(f)
+        :wxFont.destroy(f)
         :persistent_term.put(key, result)
         result
 
       result ->
         result
     end
-  end
-
-  defp probe_width(face) do
-    dc = :wxScreenDC.new()
-    f = :wxFont.new(40, @wx_default, @wx_normal, :wxe_util.get_const(:wxFONTWEIGHT_NORMAL))
-    :wxFont.setFaceName(f, String.to_charlist(face))
-    :wxDC.setFont(dc, f)
-    {w, _} = :wxDC.getTextExtent(dc, String.to_charlist(@probe))
-    :wxScreenDC.destroy(dc)
-    w
   end
 
   # wx's "teletype" family alone can mean Courier; the system's own fixed-width font is what
@@ -697,10 +707,14 @@ defmodule Browser.UI do
     fn
       :content_height, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
         key = {:content_height, size, bold, italic, mono, Map.get(style, :family)}
+        quit? = quitting?()
 
         case :ets.lookup(cache, key) do
           [{_, h}] ->
             h
+
+          [] when quit? ->
+            size * 1.2
 
           [] ->
             :wxDC.setFont(dc, font(style))
@@ -711,10 +725,14 @@ defmodule Browser.UI do
 
       text, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
         key = {text, size, bold, italic, mono, Map.get(style, :family)}
+        quit? = quitting?()
 
         case :ets.lookup(cache, key) do
           [{_, w}] ->
             w
+
+          [] when quit? ->
+            size * 0.5 * String.length(text)
 
           [] ->
             :wxDC.setFont(dc, font(style))
@@ -743,20 +761,44 @@ defmodule Browser.UI do
           units
 
         [] ->
-          :wx.set_env(wx_env)
-          units = measure_units(Map.put(style, :mono, Browser.Layout.mono_family?(family)))
-          :ets.insert(cache, {key, units})
-          units
+          if quitting?() do
+            {0.5, 0.5}
+          else
+            :wx.set_env(wx_env)
+            units = measure_units(Map.put(style, :mono, Browser.Layout.mono_family?(family)))
+            :ets.insert(cache, {key, units})
+            units
+          end
       end
     end
   end
 
+  @doc "True once the app is quitting: measuring stops, so no wx call is under way as wx ends."
+  def quitting?, do: :persistent_term.get({__MODULE__, :quitting}, false)
+
+  @doc "Marks the app as quitting (see `quitting?/0`)."
+  def quitting, do: :persistent_term.put({__MODULE__, :quitting}, true)
+
   # `font-size: 0` is real (icon fonts, hidden text); measure it as 1px so the ratios stay finite
   defp measure_units(%{size: size} = style) when size < 1, do: measure_units(%{style | size: 1})
 
+  # the units are ratios of the font size, so a big font is measured at a size that fits on a
+  # bitmap (a bitmap that cannot be made leaves its DC without a font)
+  @max_measure_size 200
+  defp measure_units(%{size: size} = style) when size > @max_measure_size,
+    do: measure_units(%{style | size: @max_measure_size})
+
   defp measure_units(%{size: size} = style) do
     side = max(ceil(size * 3), 8)
+    Browser.CrashReporter.breadcrumb({:measure_units, size, Map.get(style, :family)})
     bitmap = :wxBitmap.new(side, side)
+
+    if :wxBitmap.isOk(bitmap),
+      do: measure_units_on(bitmap, style, size, side),
+      else: {0.5, 0.5}
+  end
+
+  defp measure_units_on(bitmap, style, size, side) do
     dc = :wxMemoryDC.new(bitmap)
     :wxDC.setBackground(dc, :wxBrush.new({255, 255, 255}))
     :wxDC.clear(dc)
@@ -820,6 +862,7 @@ defmodule Browser.UI do
   end
 
   defp paint(panel, wid) do
+    Browser.CrashReporter.breadcrumb({:paint_page, :erlang.phash2(wid, 1000)})
     dc = :wxPaintDC.new(panel)
     paint_dc(dc, wid)
     :wxPaintDC.destroy(dc)
@@ -834,6 +877,7 @@ defmodule Browser.UI do
 
     Process.delete(:paint_font)
     Process.delete(:paint_color)
+    Process.put(:paint_wid, wid)
     # everything is drawn at page x: the origin moves with the horizontal scroll
     :wxDC.setDeviceOrigin(dc, -sx(wid), 0)
 
@@ -1089,8 +1133,8 @@ defmodule Browser.UI do
 
   # a decoded picture, scaled to its box
   defp draw(dc, %{type: :image} = item, y, scroll) do
-    case :ets.lookup(@images, item.url) do
-      [{_url, bitmap}] ->
+    case :ets.lookup(@images, {Process.get(:paint_wid), item.url}) do
+      [{_key, bitmap}] ->
         gc = new_gc(dc)
 
         if clip = Map.get(item, :clip),
@@ -1251,6 +1295,9 @@ defmodule Browser.UI do
   # wx objects are made once per kind and kept: making one is a round trip, and nothing frees
   # them when they are dropped
   defp cached(key, make) do
+    # (a wx object works only in the environment that made it)
+    key = {:wx.get_env(), key}
+
     case Process.get(key) do
       nil ->
         value = make.()
@@ -1289,8 +1336,8 @@ defmodule Browser.UI do
 
     case layer.kind do
       :image ->
-        case :ets.lookup(@images, layer.url) do
-          [{_url, bitmap}] ->
+        case :ets.lookup(@images, {Process.get(:paint_wid), layer.url}) do
+          [{_key, bitmap}] ->
             for {x, y} <- tiles,
                 do: :wxGraphicsContext.drawBitmap(gc, bitmap, x, y - scroll, tw, th)
 
@@ -1866,19 +1913,24 @@ defmodule Browser.UI do
   defp clipped_in?(_, _, _), do: true
 
   def set_url_text(%{url: url} = ui, text) do
+    note(ui, :set_url_text)
     hide_suggestions(ui)
     :wxTextCtrl.setValue(url, String.to_charlist(text))
   end
 
   @doc "Puts text in the address bar and leaves the suggestions as they are."
-  def put_url_text(%{url: url}, text), do: :wxTextCtrl.setValue(url, String.to_charlist(text))
+  def put_url_text(%{url: url} = ui, text) do
+    note(ui, :put_url_text)
+    :wxTextCtrl.setValue(url, String.to_charlist(text))
+  end
 
   @row_h 22
 
   @doc "Shows the address suggestions (`[{url, title}]`) under the address bar; none hides them."
   def show_suggestions(ui, []), do: hide_suggestions(ui)
 
-  def show_suggestions(%{suggest: list, toolbar: toolbar, url: url}, items) do
+  def show_suggestions(%{suggest: list, toolbar: toolbar, url: url} = ui, items) do
+    note(ui, :show_suggestions)
     {x, _} = :wxWindow.getPosition(url)
     {w, _} = :wxWindow.getSize(url)
     # the toolbar sits below the tab strip: the list opens at its bottom edge
@@ -1897,7 +1949,10 @@ defmodule Browser.UI do
     :wxWindow.show(list)
   end
 
-  def hide_suggestions(%{suggest: list}), do: :wxWindow.hide(list)
+  def hide_suggestions(%{suggest: list} = ui) do
+    note(ui, :hide_suggestions)
+    :wxWindow.hide(list)
+  end
 
   @doc "Highlights suggestion `i` (-1: none)."
   def select_suggestion(%{suggest: list}, -1) do
@@ -1915,15 +1970,33 @@ defmodule Browser.UI do
     :wxWindow.refresh(tabs)
   end
 
+  @doc "Draws tab `index` as dragged out of the strip (nil: draws no tab so)."
+  def set_tab_drag_out(%{tabs: tabs, wid: wid}, index) do
+    Browser.TabStrip.put_drag(wid, index)
+    :wxWindow.refresh(tabs)
+  end
+
   def tabs_width(%{tabs: tabs}), do: tabs |> :wxWindow.getClientSize() |> elem(0)
 
-  def set_title(%{frame: f}, title), do: :wxFrame.setTitle(f, String.to_charlist(title))
+  def set_title(%{frame: f} = ui, title) do
+    note(ui, :set_title)
+    :wxFrame.setTitle(f, String.to_charlist(title))
+  end
+
   @doc "Enables Develop > Stop Replaying Archive only while an archive is replayed."
   def sync_archive_menu(%{frame: f}) do
     :wxMenuBar.enable(:wxFrame.getMenuBar(f), 5203, Browser.Archive.mode() == :replay)
   end
 
-  def set_status(%{frame: f}, text), do: :wxFrame.setStatusText(f, String.to_charlist(text))
+  def set_status(%{frame: f} = ui, text) do
+    note(ui, {:set_status, String.slice(text, 0, 20)})
+    :wxFrame.setStatusText(f, String.to_charlist(text))
+  end
+
+  # a note for the crash report (see `Browser.CrashReporter.breadcrumb/1`)
+  defp note(%{wid: wid}, what),
+    do: Browser.CrashReporter.breadcrumb({:erlang.phash2(wid, 1000), what})
+
   def enable(widget, bool), do: :wxWindow.enable(widget, enable: bool)
   def refresh(%{panel: p}), do: :wxWindow.refresh(p)
 
@@ -1932,10 +2005,6 @@ defmodule Browser.UI do
     kind = if kind in [true, :hand], do: :hand, else: if(kind == :text, do: :text, else: :arrow)
     :wxWindow.setCursor(p, Map.fetch!(cursors, kind))
   end
-
-  @doc "Sets the mouse cursor over the tab strip: `:arrow`, or `:hand` while a tab is dragged out."
-  def set_tabs_cursor(%{tabs: tabs, cursors: cursors}, kind),
-    do: :wxWindow.setCursor(tabs, Map.fetch!(cursors, kind))
 
   @doc "Focuses the address bar with its text selected, so typing replaces it."
   def focus_url(%{url: url}) do
@@ -1966,7 +2035,32 @@ defmodule Browser.UI do
   bitmap the painter can draw, kept under `url`. Returns `{:ok, width, height}` or `:error`. The toolkit reads from files,
   so the bytes pass through a temporary one.
   """
-  def load_image(url, bytes, format) do
+  def load_image(%{wid: wid}, url, bytes, format) do
+    case make_bitmap(wid, url, bytes, format) do
+      {:ok, w, h} ->
+        # the bytes stay, for a window that a tab moves to: its painter needs bitmaps made in
+        # its own process (a wx object works only in the environment that made it)
+        :ets.insert(@images, {{:bytes, url}, bytes, format})
+        if w > 0 and h > 0, do: {:ok, w, h}, else: :error
+
+      :error ->
+        :error
+    end
+  end
+
+  @doc "Makes this window's bitmaps for the pictures at `urls` that other windows loaded."
+  def adopt_images(%{wid: wid}, urls) do
+    for url <- urls, not :ets.member(@images, {wid, url}) do
+      case :ets.lookup(@images, {:bytes, url}) do
+        [{_, bytes, format}] -> make_bitmap(wid, url, bytes, format)
+        [] -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp make_bitmap(wid, url, bytes, format) do
     case read_image(bytes, format) do
       nil ->
         :error
@@ -1976,10 +2070,10 @@ defmodule Browser.UI do
         bitmap = :wxBitmap.new(image)
         :wxImage.destroy(image)
         # a picture that is replaced (the next frame of a video) is not kept
-        old = :ets.lookup(@images, url)
-        :ets.insert(@images, {url, bitmap})
+        old = :ets.lookup(@images, {wid, url})
+        :ets.insert(@images, {{wid, url}, bitmap})
         for {_, previous} <- old, do: :wxBitmap.destroy(previous)
-        if w > 0 and h > 0, do: {:ok, w, h}, else: :error
+        {:ok, w, h}
     end
   end
 

@@ -221,6 +221,8 @@ defmodule Browser.Session do
   def handle_call({:drop_tab, _, _}, _from, state), do: {:reply, false, state}
 
   @impl true
+  def handle_cast(_msg, %{closed: true} = state), do: {:noreply, state}
+
   def handle_cast({:navigate, url}, state),
     do: {:noreply, load(state, Fetch.normalize(url), :push)}
 
@@ -243,6 +245,7 @@ defmodule Browser.Session do
   end
 
   defp load_url(state, url, mode, fetch_opts) do
+    crumb(state, {:load, url})
     me = self()
     nonce = state.nonce + 1
     UI.set_status(state.ui, "Loading #{url}…")
@@ -259,6 +262,9 @@ defmodule Browser.Session do
   end
 
   @impl true
+  # (a window that is closed stays as an empty process; see `close_window/1`)
+  def handle_info(_msg, %{closed: true} = state), do: {:noreply, state}
+
   # a page that was loading for a tab that is not shown arrives: it waits in the tab until it is
   def handle_info({:loaded, nonce, url, mode, result}, %{jobs: jobs} = state)
       when is_map_key(jobs, nonce) and nonce != state.nonce do
@@ -285,6 +291,7 @@ defmodule Browser.Session do
     do: {:noreply, state}
 
   def handle_info({:loaded, _, url, mode, result}, state) do
+    crumb(state, {:loaded, mode})
     state = stop_media(state)
 
     state =
@@ -437,10 +444,12 @@ defmodule Browser.Session do
   # -- images arriving -------------------------------------------------------
 
   def handle_info({:favicon, url, result}, state) do
-    bitmap = with {:ok, icon} <- result, do: UI.icon_bitmap(icon), else: (_ -> nil)
-    TabStrip.put_icon(url, bitmap)
+    TabStrip.put_icon(url, with({:ok, icon} <- result, do: icon, else: (_ -> nil)))
+    Windows.broadcast(self(), :icons)
     {:noreply, publish_tabs(state)}
   end
+
+  def handle_info(:icons, state), do: {:noreply, publish_tabs(state)}
 
   def handle_info({:image, nonce, url, result}, %{nonce: nonce} = state) do
     info =
@@ -450,7 +459,7 @@ defmodule Browser.Session do
           {:svg, max(round(w), 1), max(round(h), 1), scene}
 
         {:ok, bytes, format} ->
-          case UI.load_image(url, bytes, format) do
+          case UI.load_image(state.ui, url, bytes, format) do
             {:ok, w, h} -> {:ok, w, h}
             _ -> :failed
           end
@@ -718,9 +727,8 @@ defmodule Browser.Session do
   end
 
   # Quit (Cmd+Q and the application menu's item)
-  def handle_info(wx(id: 5006, event: wxCommand(type: :command_menu_selected)), _state) do
-    Browser.LocalStorage.flush()
-    System.halt(0)
+  def handle_info(wx(id: 5006, event: wxCommand(type: :command_menu_selected)), state) do
+    {:noreply, state |> tap(fn _ -> Windows.quit() end)}
   end
 
   # File > New Tab and Close Tab
@@ -1029,6 +1037,7 @@ defmodule Browser.Session do
         {:layout_done, ref, base, page, items, height, width, used},
         %{layout_job: {ref, _}} = state
       ) do
+    crumb(state, :layout_done)
     state = %{state | layout_job: nil}
 
     state =
@@ -4341,8 +4350,8 @@ defmodule Browser.Session do
 
     case Windows.closing(self()) do
       :last ->
-        Browser.LocalStorage.flush()
-        System.halt(0)
+        Windows.quit()
+        {:noreply, state}
 
       :more ->
         state.tabs
@@ -4357,7 +4366,12 @@ defmodule Browser.Session do
 
         LayoutWorker.stop(state.layout_worker)
         UI.close(state.ui)
-        {:stop, :normal, state}
+        # This process must not end: when a process that made wx objects ends, wx disconnects
+        # their event handlers, and that crashes the toolkit (SIGBUS on macOS) when the object
+        # is a frame that was destroyed. So it stays, with nothing in its state, and ignores
+        # every message.
+        crumb(state, :window_closed)
+        {:noreply, %{closed: true}, :hibernate}
     end
   end
 
@@ -4381,10 +4395,10 @@ defmodule Browser.Session do
 
   defp finish_tab_drag(state), do: %{back_in_strip(state) | tab_drag: nil}
 
-  # (the cursor and the status text of a drag that left the strip are put back)
+  # (the outline and the status text of a drag that left the strip are taken away)
   defp back_in_strip(%{tab_out: true} = state) do
-    UI.set_tabs_cursor(state.ui, :arrow)
     UI.set_status(state.ui, "")
+    UI.set_tab_drag_out(state.ui, nil)
     %{state | tab_out: false}
   end
 
@@ -4512,6 +4526,8 @@ defmodule Browser.Session do
   defp tab_title(_), do: "New Tab"
 
   defp publish_tabs(state) do
+    crumb(state, {:publish_tabs, length(state.tabs)})
+
     titles =
       state.tabs
       |> Enum.with_index()
@@ -4525,8 +4541,19 @@ defmodule Browser.Session do
         url != nil and TabStrip.want_icon(url),
         do: fetch_icon(url, tab.page.url, tab.tid)
 
+    make_icon_bitmaps(state)
     UI.set_tabs(state.ui, titles, state.active)
     state
+  end
+
+  # this window draws its own bitmaps of the icons (see `TabStrip.put_bitmap/3`)
+  defp make_icon_bitmaps(state) do
+    for tab <- [state | state.tabs],
+        url = tab_icon(tab),
+        url != nil and not TabStrip.bitmap?(state.ui.wid, url),
+        icon = TabStrip.icon_data(url) do
+      TabStrip.put_bitmap(state.ui.wid, url, UI.icon_bitmap(icon))
+    end
   end
 
   defp tab_icon(%{page: %Page{favicon: url}}), do: url
@@ -4594,11 +4621,14 @@ defmodule Browser.Session do
 
   # a parked tab is shown again
   defp resume(state, i) do
+    crumb(state, {:resume, i})
     tab = Enum.at(state.tabs, i)
     stale? = Map.get(tab, :stale, false)
     laid_width = Map.get(tab, :laid_width)
     state = state |> Map.merge(Map.take(tab, @tab_keys)) |> Map.put(:active, i)
     state = %{state | nonce: state.nonce + 1}
+    # (a tab that came from another window: this window makes its own bitmaps of the pictures)
+    UI.adopt_images(state.ui, for({url, {:ok, _, _}} <- state.images, do: url))
     if state.js, do: Browser.JS.Runtime.visible(state.js, true)
 
     UI.set_scroll_x(state.ui, state.scroll_x)
@@ -4781,7 +4811,15 @@ defmodule Browser.Session do
   end
 
   defp switch_tab(state, i) when i == state.active, do: state
-  defp switch_tab(state, i), do: state |> park() |> resume(i)
+
+  defp switch_tab(state, i) do
+    crumb(state, {:switch_tab, i})
+    state |> park() |> resume(i)
+  end
+
+  # a note for the crash report (see `CrashReporter.breadcrumb/1`): the window, then the event
+  defp crumb(state, what),
+    do: Browser.CrashReporter.breadcrumb({:erlang.phash2(state.ui.wid, 1000), what})
 
   defp step_tab(state, step) do
     n = length(state.tabs)
@@ -4794,11 +4832,13 @@ defmodule Browser.Session do
 
   # the last tab closes its window (and the app, with the last window)
   defp close_tab(%{tabs: [_]} = state, _i) do
+    crumb(state, {:close_tab, nil})
     send(self(), :close_window)
     state
   end
 
   defp close_tab(state, i) when i == state.active do
+    crumb(state, {:close_tab, i})
     LayoutWorker.drop(state.layout_worker, state.tid)
     state = remember_closed(state, i, state)
     state = state |> stop_js() |> cancel_layout_job() |> stop_blink()
@@ -4809,6 +4849,7 @@ defmodule Browser.Session do
   end
 
   defp close_tab(state, i) do
+    crumb(state, {:close_tab, i})
     tab = Enum.at(state.tabs, i)
     LayoutWorker.drop(state.layout_worker, tab[:tid])
     state = remember_closed(state, i, tab)
@@ -4852,8 +4893,8 @@ defmodule Browser.Session do
   @pull_out 40
 
   defp drag_tab(state, _x, y) when y < -@pull_out or y > 30 + @pull_out do
-    unless state.tab_out do
-      UI.set_tabs_cursor(state.ui, :hand)
+    if not state.tab_out and match?(%{tabs: [_, _ | _], popup: nil}, state) do
+      UI.set_tab_drag_out(state.ui, state.tab_drag)
 
       UI.set_status(
         state.ui,

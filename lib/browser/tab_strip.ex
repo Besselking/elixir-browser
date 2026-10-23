@@ -14,6 +14,9 @@ defmodule Browser.TabStrip do
   @close 16
   @max_chars 80
 
+  # wxSYS_DEFAULT_GUI_FONT
+  @default_gui_font 17
+
   def height, do: @height
 
   @doc "Creates the table the painter reads."
@@ -28,8 +31,19 @@ defmodule Browser.TabStrip do
   """
   def put(wid, titles, active), do: :ets.insert(@table, {wid, titles, active})
 
+  @doc """
+  Marks tab `index` of window `wid` as dragged out of the strip (nil: it is not). The strip
+  draws that tab with an outline and says what letting go does.
+  """
+  def put_drag(wid, nil), do: :ets.delete(@table, {:drag, wid})
+  def put_drag(wid, index), do: :ets.insert(@table, {{:drag, wid}, index})
+
   @doc "Forgets what window `wid` drew."
-  def discard(wid), do: :ets.delete(@table, wid)
+  def discard(wid) do
+    :ets.delete(@table, wid)
+    :ets.delete(@table, {:drag, wid})
+    :ets.match_delete(@table, {{:bitmap, wid, :_}, :_})
+  end
 
   @doc """
   Marks the icon at `url` as asked for: true the first time (the caller fetches it), false
@@ -37,13 +51,30 @@ defmodule Browser.TabStrip do
   """
   def want_icon(url), do: :ets.insert_new(@table, {{:icon, url}, :pending})
 
-  @doc "Keeps the bitmap for the icon at `url` (nil: the icon cannot be shown)."
-  def put_icon(url, bitmap), do: :ets.insert(@table, {{:icon, url}, bitmap || :failed})
+  @doc "Keeps the decoded icon at `url` (nil: the icon cannot be shown)."
+  def put_icon(url, icon), do: :ets.insert(@table, {{:icon, url}, icon || :failed})
 
-  defp icon(nil), do: nil
-
-  defp icon(url) do
+  @doc "The decoded icon at `url`, or nil while it is on its way or failed."
+  def icon_data(url) do
     case :ets.lookup(@table, {:icon, url}) do
+      [{_, data}] when data not in [:pending, :failed] -> data
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Keeps the bitmap that window `wid` draws for the icon at `url`. A wx object only works in the
+  process that made it, so each window makes its own bitmaps.
+  """
+  def put_bitmap(wid, url, bitmap), do: :ets.insert(@table, {{:bitmap, wid, url}, bitmap})
+
+  @doc "Whether window `wid` has a bitmap for the icon at `url`."
+  def bitmap?(wid, url), do: :ets.member(@table, {:bitmap, wid, url})
+
+  defp icon(_wid, nil), do: nil
+
+  defp icon(wid, url) do
+    case :ets.lookup(@table, {:bitmap, wid, url}) do
       [{_, {:wx_ref, _, _, _} = bitmap}] -> bitmap
       _ -> nil
     end
@@ -100,6 +131,7 @@ defmodule Browser.TabStrip do
 
   @doc false
   def paint(panel, wid) do
+    Browser.CrashReporter.breadcrumb({:paint_strip, :erlang.phash2(wid, 1000)})
     dc = :wxPaintDC.new(panel)
     {width, _} = :wxWindow.getClientSize(panel)
     draw(dc, width, wid)
@@ -113,6 +145,9 @@ defmodule Browser.TabStrip do
 
     colors = colors()
     Process.put(:tab_colors, colors)
+    # the text measures below need a font on the dc: the system's own, set here (a dc is made
+    # for each paint)
+    :wxDC.setFont(dc, :wxSystemSettings.getFont(@default_gui_font))
     :wxDC.setBackground(dc, :wxBrush.new(colors.strip))
     :wxDC.clear(dc)
     :wxDC.setPen(dc, :wxPen.new(colors.line))
@@ -121,8 +156,11 @@ defmodule Browser.TabStrip do
     |> Enum.zip(layout(length(titles), width))
     |> Enum.with_index()
     |> Enum.each(fn {{{title, loading?, icon_url}, {x, w}}, i} ->
-      paint_tab(dc, title, loading?, icon(icon_url), x, w, i == active)
+      paint_tab(dc, title, loading?, icon(wid, icon_url), x, w, i == active)
     end)
+
+    drag = with [{_, i}] <- :ets.lookup(@table, {:drag, wid}), do: i, else: (_ -> nil)
+    if drag, do: paint_drag(dc, titles, width, drag, colors)
 
     {px, pw} = plus(length(titles), width)
     :wxDC.setTextForeground(dc, colors.text)
@@ -132,6 +170,30 @@ defmodule Browser.TabStrip do
     :wxDC.setPen(dc, :wxPen.new(colors.line))
     :wxDC.drawLine(dc, {0, @height - 1}, {width, @height - 1})
     :ok
+  end
+
+  # a tab that is dragged out of the strip: an outline round it, and a hint after the last tab
+  defp paint_drag(dc, titles, width, drag, colors) do
+    accent = {70, 130, 230}
+    layout = layout(length(titles), width)
+
+    with {x, w} <- Enum.at(layout, drag) do
+      :wxDC.setPen(dc, :wxPen.new(accent, width: 2))
+      :wxDC.setBrush(dc, :wxBrush.new({0, 0, 0}, style: 106))
+      :wxDC.drawRoundedRectangle(dc, {x, 4, w - 2, @height}, 6.0)
+    end
+
+    {px, pw} = plus(length(titles), width)
+    hint = ~c"Let go for a new window"
+    {tw, th} = :wxDC.getTextExtent(dc, hint)
+    left = px + pw + 8
+
+    if left + tw < width do
+      :wxDC.setTextForeground(dc, accent)
+      :wxDC.drawText(dc, hint, {left, div(@height - th, 2)})
+    end
+
+    :wxDC.setTextForeground(dc, colors.text)
   end
 
   defp paint_tab(dc, title, loading?, icon, x, w, active?) do

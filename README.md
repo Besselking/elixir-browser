@@ -41,8 +41,8 @@ to the right of the window that you used. All windows share the cookies, the cac
 storage and the visited pages that the address bar suggests.
 
 To move a tab to its own window, choose File > Move Tab to New Window, or drag the tab away
-from the tab strip (up or down) and let go. The cursor changes and the status line tells you
-when the tab will move. If you let go over the tab strip of another window,
+from the tab strip (up or down) and let go. The tab gets a blue outline and the strip says "Let go for a new window"
+when the tab will move. The status line also tells you. If you let go over the tab strip of another window,
 the tab joins that window. The page moves as it is: scripts keep running, and the scroll
 position, the text in forms and the history stay. A page that is still loading starts again in
 the new place. The item does nothing when the window has only one tab.
@@ -109,7 +109,9 @@ button empties the list. The list keeps the last 2000 requests. It shows the req
 
 ## Crash reports
 
-Every crash (a process dying, a failing wx callback, `Logger.error`) is saved as a text file with the time, the page that was open, the version and commit, and the stacktrace. They go to `$BROWSER_CRASH_DIR`, else `crashes/` under the user data dir (on macOS `~/Library/Application Support/elixir_browser/crashes`), and the newest 100 are kept. `mix browser.crashes [--show|--clear]` lists, prints or deletes them.
+Every crash (a process dying, a failing wx callback, `Logger.error`) is saved as a text file with the time, the page that was open, the version and commit, and the stacktrace. A wx assert has no Elixir stacktrace, and the toolkit reports it after the call that caused it has ended. So the file also lists the processes that are inside a wx call at that time, with their stacktraces, and the last events of the windows (paints, tab changes, page loads) with the time before the report. They go to `$BROWSER_CRASH_DIR`, else `crashes/` under the user data dir (on macOS `~/Library/Application Support/elixir_browser/crashes`), and the newest 100 are kept. `mix browser.crashes [--show|--clear]` lists, prints or deletes them.
+
+A native crash (for example SIGBUS) stops the program at once, so it cannot write a report. The browser also writes each event to `running-trail.log` in the same folder, and deletes the file when the program ends in order. If the file is still there at the next start, the browser saves it as a `crash-...-native.txt` report with the last events.
 
 ## Page archives
 

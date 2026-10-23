@@ -17,6 +17,19 @@ defmodule Browser.CrashReporter do
   # a process that crashes is reported twice (by its behaviour and by proc_lib); one file is enough
   @dedupe_ms 2_000
   @seen :browser_crash_seen
+  @trail :browser_crash_trail
+  @trail_keep 80
+
+  # the commit is read when this file is compiled, so the build must see a new commit:
+  # `.git/HEAD` changes on checkout, the branch file on commit, `packed-refs` after `git gc`
+  @git_files (case File.read(".git/HEAD") do
+                {:ok, "ref: " <> ref} ->
+                  [".git/HEAD", Path.join(".git", String.trim(ref)), ".git/packed-refs"]
+
+                _ ->
+                  [".git/HEAD"]
+              end)
+  for file <- @git_files, do: @external_resource(file)
 
   @commit (try do
              case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
@@ -52,10 +65,111 @@ defmodule Browser.CrashReporter do
     if :ets.whereis(@seen) == :undefined,
       do: :ets.new(@seen, [:named_table, :public, :set])
 
+    if :ets.whereis(@trail) == :undefined,
+      do: :ets.new(@trail, [:named_table, :public, :ordered_set])
+
+    adopt_native_crash()
+
     case :logger.add_handler(@handler_id, __MODULE__, %{level: :error}) do
       :ok -> :ok
       {:error, {:already_exist, _}} -> :ok
     end
+  end
+
+  @doc """
+  Notes `what` happened (in the calling process) for the next crash report. A wx assert is
+  logged after the call that caused it is over, so the report lists the last events instead.
+  The same event twice in a row from one process is kept once.
+  """
+  def breadcrumb(what) do
+    if :ets.whereis(@trail) != :undefined do
+      case :ets.last(@trail) do
+        :"$end_of_table" -> :ok
+        key -> key
+      end
+      |> case do
+        key when is_integer(key) ->
+          case :ets.lookup(@trail, key) do
+            [{_, _, pid, ^what}] when pid == self() -> :same
+            _ -> :new
+          end
+
+        _ ->
+          :new
+      end
+      |> case do
+        :same ->
+          :ok
+
+        :new ->
+          :ets.insert(
+            @trail,
+            {System.unique_integer([:monotonic]), System.monotonic_time(:millisecond), self(),
+             what}
+          )
+
+          if :ets.info(@trail, :size) > @trail_keep, do: :ets.delete(@trail, :ets.first(@trail))
+          append_trail(what)
+          :ok
+      end
+    end
+
+    :ok
+  end
+
+  # The ETS trail dies with the VM. A native crash (SIGBUS) gives no chance to write a report,
+  # so every breadcrumb is also appended to a file. A clean quit deletes the file; the next
+  # start turns a file that is still there into a crash report.
+  defp trail_file do
+    case dir() do
+      nil -> nil
+      dir -> Path.join(dir, "running-trail.log")
+    end
+  end
+
+  defp append_trail(what) do
+    if file = trail_file() do
+      File.mkdir_p(Path.dirname(file))
+
+      case File.stat(file) do
+        {:ok, %{size: size}} when size > 200_000 -> File.rm(file)
+        _ -> :ok
+      end
+
+      line = "#{System.os_time(:millisecond)} #{inspect(self())} #{inspect(what, limit: 20)}\n"
+      File.write(file, line, [:append])
+    end
+
+    :ok
+  end
+
+  @doc "Deletes the running trail: the program is ending in order."
+  def clean_exit do
+    if file = trail_file(), do: File.rm(file)
+    :ok
+  end
+
+  defp adopt_native_crash do
+    with file when is_binary(file) <- trail_file(),
+         {:ok, text} <- File.read(file) do
+      lines = text |> String.split("\n", trim: true) |> Enum.take(-80)
+
+      out =
+        Path.join(
+          Path.dirname(file),
+          "crash-#{System.os_time(:second)}-native.txt"
+        )
+
+      File.write(
+        out,
+        "The last run ended without a clean quit (a native crash such as SIGBUS).\n" <>
+          "Last events before it ended:\n" <> Enum.join(lines, "\n") <> "\n"
+      )
+
+      File.rm(file)
+    end
+
+    :ok
   end
 
   @doc "Remembers the page that is open, to name in the next crash report."
@@ -125,12 +239,59 @@ defmodule Browser.CrashReporter do
       level: #{event.level}
       process: #{inspect(Map.get(event.meta, :pid))}
 
-      #{format(event)}
+      #{format(event)}#{wx_section()}#{trail_section()}
       """
 
     File.write!(path <> ".tmp", body)
     File.rename!(path <> ".tmp", path)
     prune(dir)
+  end
+
+  # A wx assert comes from the toolkit's thread and carries no Elixir stack. The processes that
+  # are inside a wx call (or a wx callback) just now are the ones that can have caused it.
+  defp wx_section do
+    case stacks([:wxe_util, :wxe_server]) do
+      [] -> ""
+      found -> "\n\nprocesses in wx calls:\n\n" <> Enum.join(found, "\n\n")
+    end
+  end
+
+  defp trail_section do
+    now = System.monotonic_time(:millisecond)
+
+    case if(:ets.whereis(@trail) == :undefined, do: [], else: :ets.tab2list(@trail)) do
+      [] ->
+        ""
+
+      rows ->
+        lines =
+          for {_, at, pid, what} <- rows,
+              do: "  -#{now - at} ms  #{inspect(pid)}  #{inspect(what, limit: 8)}"
+
+        "\n\nrecent events (oldest first, ms before this report):\n\n" <> Enum.join(lines, "\n")
+    end
+  end
+
+  @doc false
+  # The stacks of the processes that have a frame in one of `modules`.
+  def stacks(modules) do
+    for pid <- Process.list(),
+        pid != self(),
+        {:current_stacktrace, stack} <- [Process.info(pid, :current_stacktrace)],
+        Enum.any?(stack, fn {mod, _, _, _} -> mod in modules end) do
+      name =
+        case Process.info(pid, :registered_name) do
+          {:registered_name, name} when is_atom(name) -> " (#{name})"
+          _ -> ""
+        end
+
+      frames =
+        stack
+        |> Enum.take(30)
+        |> Enum.map_join("\n", &("  " <> Exception.format_stacktrace_entry(&1)))
+
+      "#{inspect(pid)}#{name}\n#{frames}"
+    end
   end
 
   defp format(event) do
