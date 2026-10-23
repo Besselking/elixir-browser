@@ -41,8 +41,8 @@ to the right of the window that you used. All windows share the cookies, the cac
 storage and the visited pages that the address bar suggests.
 
 To move a tab to its own window, choose File > Move Tab to New Window, or drag the tab away
-from the tab strip (up or down) and let go. The cursor changes and the status line tells you
-when the tab will move. If you let go over the tab strip of another window,
+from the tab strip (up or down) and let go. The tab gets a blue outline and the strip says "Let go for a new window"
+when the tab will move. The cursor changes and the status line also tell you. If you let go over the tab strip of another window,
 the tab joins that window. The page moves as it is: scripts keep running, and the scroll
 position, the text in forms and the history stay. A page that is still loading starts again in
 the new place. The item does nothing when the window has only one tab.

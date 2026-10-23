@@ -1915,6 +1915,12 @@ defmodule Browser.UI do
     :wxWindow.refresh(tabs)
   end
 
+  @doc "Draws tab `index` as dragged out of the strip (nil: draws no tab so)."
+  def set_tab_drag_out(%{tabs: tabs, wid: wid}, index) do
+    Browser.TabStrip.put_drag(wid, index)
+    :wxWindow.refresh(tabs)
+  end
+
   def tabs_width(%{tabs: tabs}), do: tabs |> :wxWindow.getClientSize() |> elem(0)
 
   def set_title(%{frame: f}, title), do: :wxFrame.setTitle(f, String.to_charlist(title))

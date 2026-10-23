@@ -28,9 +28,17 @@ defmodule Browser.TabStrip do
   """
   def put(wid, titles, active), do: :ets.insert(@table, {wid, titles, active})
 
+  @doc """
+  Marks tab `index` of window `wid` as dragged out of the strip (nil: it is not). The strip
+  draws that tab with an outline and says what letting go does.
+  """
+  def put_drag(wid, nil), do: :ets.delete(@table, {:drag, wid})
+  def put_drag(wid, index), do: :ets.insert(@table, {{:drag, wid}, index})
+
   @doc "Forgets what window `wid` drew."
   def discard(wid) do
     :ets.delete(@table, wid)
+    :ets.delete(@table, {:drag, wid})
     :ets.match_delete(@table, {{:bitmap, wid, :_}, :_})
   end
 
@@ -144,6 +152,9 @@ defmodule Browser.TabStrip do
       paint_tab(dc, title, loading?, icon(wid, icon_url), x, w, i == active)
     end)
 
+    drag = with [{_, i}] <- :ets.lookup(@table, {:drag, wid}), do: i, else: (_ -> nil)
+    if drag, do: paint_drag(dc, titles, width, drag, colors)
+
     {px, pw} = plus(length(titles), width)
     :wxDC.setTextForeground(dc, colors.text)
     {tw, th} = :wxDC.getTextExtent(dc, ~c"+")
@@ -152,6 +163,30 @@ defmodule Browser.TabStrip do
     :wxDC.setPen(dc, :wxPen.new(colors.line))
     :wxDC.drawLine(dc, {0, @height - 1}, {width, @height - 1})
     :ok
+  end
+
+  # a tab that is dragged out of the strip: an outline round it, and a hint after the last tab
+  defp paint_drag(dc, titles, width, drag, colors) do
+    accent = {70, 130, 230}
+    layout = layout(length(titles), width)
+
+    with {x, w} <- Enum.at(layout, drag) do
+      :wxDC.setPen(dc, :wxPen.new(accent, width: 2))
+      :wxDC.setBrush(dc, :wxBrush.new({0, 0, 0}, style: 106))
+      :wxDC.drawRoundedRectangle(dc, {x, 4, w - 2, @height}, 6.0)
+    end
+
+    {px, pw} = plus(length(titles), width)
+    hint = ~c"Let go for a new window"
+    {tw, th} = :wxDC.getTextExtent(dc, hint)
+    left = px + pw + 8
+
+    if left + tw < width do
+      :wxDC.setTextForeground(dc, accent)
+      :wxDC.drawText(dc, hint, {left, div(@height - th, 2)})
+    end
+
+    :wxDC.setTextForeground(dc, colors.text)
   end
 
   defp paint_tab(dc, title, loading?, icon, x, w, active?) do

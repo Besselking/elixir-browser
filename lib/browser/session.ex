@@ -4387,6 +4387,7 @@ defmodule Browser.Session do
   defp back_in_strip(%{tab_out: true} = state) do
     UI.set_tabs_cursor(state.ui, :arrow)
     UI.set_status(state.ui, "")
+    UI.set_tab_drag_out(state.ui, nil)
     %{state | tab_out: false}
   end
 
@@ -4865,8 +4866,9 @@ defmodule Browser.Session do
   @pull_out 40
 
   defp drag_tab(state, _x, y) when y < -@pull_out or y > 30 + @pull_out do
-    unless state.tab_out do
+    if not state.tab_out and match?(%{tabs: [_, _ | _], popup: nil}, state) do
       UI.set_tabs_cursor(state.ui, :hand)
+      UI.set_tab_drag_out(state.ui, state.tab_drag)
 
       UI.set_status(
         state.ui,
