@@ -11,7 +11,8 @@ defmodule Browser.JS.DOM do
 
   Things the script did that reach beyond the tree are queued in the outbox for the session:
   `{:history, :push | :replace, url}`, `{:navigate, url}`, `{:open_tab, url}`, `{:reload}`, `{:submit, form}`,
-  `{:clipboard, text}`, `{:download, url, name, data}`.
+  `{:clipboard, text}`, `{:download, url, name, data}`, `{:popup, op, a, b, c, d}` (a popup window
+  or a message between a popup and its opener: see `__popup` in the window prelude).
   """
 
   import Kernel, except: [node: 1]
@@ -6304,6 +6305,27 @@ defmodule Browser.JS.DOM do
         end)
 
         :undefined
+      end)
+    )
+
+    # the popup prelude (`Browser.JS.WebAPI`) asks for the window's popup id (`"info"`; null in a
+    # window that is not a popup) and queues everything else for the session
+    Interp.declare(
+      scope,
+      "__popup",
+      native("__popup", fn _, args ->
+        case to_str(arg(args, 0)) do
+          "info" ->
+            Process.get(:rt_info)[:popup] || :null
+
+          op ->
+            out(
+              {:popup, op, to_str(arg(args, 1)), to_str(arg(args, 2)), to_str(arg(args, 3)),
+               to_str(arg(args, 4))}
+            )
+
+            :undefined
+        end
       end)
     )
 

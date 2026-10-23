@@ -51,7 +51,8 @@ defmodule Browser.UI do
 
     wx = :wx.new()
     probe_webp()
-    pos = Keyword.get(opts, :at, {-1, -1})
+    geometry = opts[:geometry]
+    pos = if(geometry, do: geometry.at, else: Keyword.get(opts, :at, {-1, -1}))
     frame = :wxFrame.new(wx, -1, ~c"Elixir Browser", pos: pos, size: {960, 720})
 
     tabs = :wxPanel.new(frame, size: {-1, Browser.TabStrip.height()}, style: 65536)
@@ -177,6 +178,16 @@ defmodule Browser.UI do
     :wxPanel.connect(panel, :char)
 
     :wxPanel.connect(panel, :paint, callback: fn _ev, _obj -> paint(panel, wid) end)
+
+    # a popup has no tab strip or address bar, and its page has the size the script asked for
+    if geometry do
+      :wxSizer.hide(col, tabs)
+      :wxSizer.hide(col, toolbar)
+      {w, h} = geometry.size
+      {_, status_h} = :wxWindow.getSize(status)
+      :wxWindow.setClientSize(frame, w, h + status_h)
+      :wxWindow.layout(frame)
+    end
 
     :wxFrame.show(frame)
     :wxWindow.setFocus(panel)
