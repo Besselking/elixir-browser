@@ -54,9 +54,15 @@ defmodule Browser.Windows do
     Browser.UI.quitting()
     Process.sleep(300)
     Browser.LocalStorage.flush()
-    Browser.CrashReporter.breadcrumb(:quit_stopping)
+    Browser.IndexedDB.flush()
+    Browser.CrashReporter.clean_exit()
+    # Ending the VM, by `System.stop/1` or `System.halt/1`, runs the wx driver's shutdown, and
+    # that crashes (SIGBUS on macOS, so the system shows a "quit unexpectedly" report). The
+    # state is saved by now, so the program ends the process itself.
     spawn(fn -> Process.sleep(5000) && System.halt(0) end)
-    System.stop(0)
+
+    System.cmd("kill", ["-9", System.pid()], stderr_to_stdout: true)
+    System.halt(0)
   end
 
   @doc "Sends `msg` to every window except `pid`."
