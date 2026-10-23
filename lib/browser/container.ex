@@ -69,6 +69,20 @@ defmodule Browser.Container do
   end
 
   @doc """
+  The content size of the container that an element whose parent is `parent` is in, as
+  `{width, height, container_type}`, or nil when there is none or its size is not known yet.
+  """
+  def box(parent) do
+    with %{} = container <- find(parent, nil),
+         {_, nid} when is_integer(nid) <- List.keyfind(container.attrs, "@nid", 0),
+         %{^nid => {w, h}} <- Process.get(:style_container_sizes, %{}) do
+      {w, h, container.computed["container-type"]}
+    else
+      _ -> nil
+    end
+  end
+
+  @doc """
   The sizes of the containers in a styled tree from its laid out `items` (which have `:bounds`
   items when laid out with `boxes: true`): `%{nid => {width, height}}` of the content boxes.
   """

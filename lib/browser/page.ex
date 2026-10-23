@@ -29,6 +29,8 @@ defmodule Browser.Page do
     image_urls: [],
     # whether styles use vw/vh units: then the window size is part of the cascade
     viewport_units: false,
+    # a `style` attribute has a length in container units (the rules say it themselves)
+    cq_inline: false,
     svg_defs: %{},
     fixed_width: MapSet.new(),
     # the stylesheets the rules came from (`Browser.Style.scoped_refs/1`) and what each one
@@ -141,7 +143,8 @@ defmodule Browser.Page do
         sheet_cache: sheet_cache,
         forms: forms,
         image_urls: image_urls,
-        viewport_units: viewport_units?(rules, raw)
+        viewport_units: viewport_units?(rules, raw),
+        cq_inline: inline_cq_units?(raw)
       },
       env
     )
@@ -187,6 +190,16 @@ defmodule Browser.Page do
     end or inline_viewport_units?(kids)
   end
 
+  defp inline_cq_units?(nodes) when is_list(nodes), do: Enum.any?(nodes, &inline_cq_units?/1)
+  defp inline_cq_units?({:text, _}), do: false
+
+  defp inline_cq_units?({:element, _tag, attrs, kids}) do
+    case List.keyfind(attrs, "style", 0) do
+      {_, css} when is_binary(css) -> Style.cq_unit?(css)
+      _ -> false
+    end or inline_cq_units?(kids)
+  end
+
   @doc """
   Re-runs the cascade for a new viewport. Returns the page unchanged when no
   media query result differs from the last run.
@@ -206,6 +219,7 @@ defmodule Browser.Page do
 
           cache ->
             index = Style.index_rules(page.rules, env)
+            index = if page.cq_inline, do: Style.with_cq_units(index), else: index
 
             old =
               case page.memo do
@@ -250,8 +264,9 @@ defmodule Browser.Page do
     end
   end
 
-  @doc "Does a rule of the page depend on the size of a container (`@container`)?"
-  def cq?(%__MODULE__{rules: rules}), do: Enum.any?(rules, &Map.has_key?(&1, :cq))
+  @doc "Does a rule of the page depend on the size of a container (`@container`, or lengths in `cqw`...)?"
+  def cq?(%__MODULE__{rules: rules, cq_inline: inline?}),
+    do: inline? or Enum.any?(rules, &(Map.has_key?(&1, :cq) or Map.has_key?(&1, :cqu)))
 
   @doc """
   Lays `page` out with `layout` (a function from a page to `{items, height}`, run with the

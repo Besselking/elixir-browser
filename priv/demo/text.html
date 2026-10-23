@@ -18,6 +18,7 @@ h1 { margin: 6px 0 10px }
 
 .line1::first-line { color: #b03; font-weight: bold }
 .line2::first-line { color: #036; font-style: italic; text-decoration: underline }
+.line3::first-line { text-transform: uppercase; letter-spacing: 1px; color: #555 }
 
 .outline { counter-reset: h1 }
 .outline h3 { counter-reset: h2; counter-increment: h1; margin: 8px 0 2px }
@@ -33,6 +34,14 @@ h1 { margin: 6px 0 10px }
 .q .name { font-weight: bold }
 .q .more { display: none; color: #555 }
 @container (min-width: 260px) { .q .more { display: block } }
+.q .size { font-size: 6cqw; line-height: 1.4; margin: 4px 0 10px }
+.q .bar { height: 6cqw; background: linear-gradient(90deg, #36c 50%, #cdd 50%); border-radius: 3cqw }
+.split { display: flex; border: 1px solid #99a; border-radius: 6px; background: #fafbff }
+.panel { flex: none; padding: 6px }
+.panel-body { width: 240px }
+.q2 { flex: 1; container-type: inline-size; padding: 6px }
+.q2t { color: #b03 }
+@container (max-width: 260px) { .q2t { color: #070; font-weight: bold } }
 @container (min-width: 420px) { .q .name { font-size: 22px; color: #036 } .q { background: #eef6ff } }
 </style></head>
 <body><div class="page">
@@ -57,6 +66,7 @@ h1 { margin: 6px 0 10px }
   <p>The first line of a paragraph in a style of its own. It follows the width of the box.</p>
   <p class="line1" style="width: 300px">The first line of this paragraph is red and bold. The lines after it keep the normal style of the paragraph, however wide the box is.</p>
   <p class="line2" style="width: 420px">The first line of this paragraph is blue, slanted and underlined. The rest of the paragraph is plain text in the normal style.</p>
+  <p class="line3" style="width: 360px">The first line of this paragraph is in capitals with wide spacing. The lines below it are in the normal style of the paragraph.</p>
 </div>
 
 <div class="card">
@@ -69,6 +79,18 @@ h1 { margin: 6px 0 10px }
     <li>One<ol><li>One one</li><li>One two<ol><li>One two one</li></ol></li></ol></li>
     <li>Two<ol><li>Two one</li></ol></li>
   </ol>
+</div>
+
+<div class="card">
+  <p>Container units: the text and the bar are as big as a share of the width of their container (<code>6cqw</code>).</p>
+  <div style="width: 200px"><div class="q"><div class="size">Sized by the box</div><div class="bar"></div></div></div>
+  <div style="width: 330px"><div class="q"><div class="size">Sized by the box</div><div class="bar"></div></div></div>
+  <div style="width: 560px"><div class="q"><div class="size">Sized by the box</div><div class="bar"></div></div></div>
+</div>
+
+<div class="card">
+  <p>A container that is next to a panel: open the panel, and the container gets narrower, so its text changes.</p>
+  <div class="split"><details class="panel"><summary>Panel</summary><div class="panel-body">Some content in a wide panel.</div></details><div class="q2"><div class="q2t">Container text</div></div></div>
 </div>
 
 <div class="card">

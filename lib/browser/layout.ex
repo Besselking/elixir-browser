@@ -6596,6 +6596,15 @@ defmodule Browser.Layout do
       slant && it.italic == (base["font-style"] == "italic"),
       &%{&1 | italic: &2 == "italic"}
     )
+    |> put_if(
+      base["text-transform"] in [nil, "none"] and props["text-transform"],
+      &first_line_case/2
+    )
+    |> put_if(
+      is_number(props["letter-spacing"]) and it.ls == (base["letter-spacing"] || 0.0) and
+        props["letter-spacing"],
+      &%{&1 | ls: &2 / 1}
+    )
     |> put_if(plain_deco?(it, base["text-decoration-line"]) and deco, fn it, line ->
       %{
         it
@@ -6604,6 +6613,11 @@ defmodule Browser.Layout do
       }
     end)
   end
+
+  defp first_line_case(it, "uppercase"), do: %{it | text: String.upcase(it.text)}
+  defp first_line_case(it, "lowercase"), do: %{it | text: String.downcase(it.text)}
+  defp first_line_case(it, "capitalize"), do: %{it | text: String.capitalize(it.text)}
+  defp first_line_case(it, _), do: it
 
   defp plain_deco?(it, base) do
     base = to_string(base)
