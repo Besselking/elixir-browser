@@ -20,6 +20,8 @@ defmodule Browser.UI do
   @te_process_enter 1024
   @horizontal 4
   @vertical 8
+  @zen_id 5300
+  @zen_drag :browser_zen_drag
 
   defstruct [
     :frame,
@@ -32,7 +34,8 @@ defmodule Browser.UI do
     :cursors,
     :toolbar,
     :suggest,
-    :tabs
+    :tabs,
+    :zen
   ]
 
   def build do
@@ -98,6 +101,10 @@ defmodule Browser.UI do
     :wxMenu.append(edit, 5032, ~c"Copy\tCtrl+C")
     :wxMenu.append(edit, 5035, ~c"Select All\tCtrl+A")
     :wxMenuBar.append(menubar, edit, ~c"Edit")
+
+    view = :wxMenu.new()
+    :wxMenu.append(view, @zen_id, ~c"Zen Mode\tCtrl+Shift+Z")
+    :wxMenuBar.append(menubar, view, ~c"View")
 
     develop = :wxMenu.new()
     :wxMenu.append(develop, 5200, Browser.ConsoleWindow.menu_label())
@@ -626,9 +633,25 @@ defmodule Browser.UI do
   by one process at a time (its DC holds the current font); a second one on the same cache
   serves a background process.
   """
-  def measurer(%{panel: panel}, cache \\ nil), do: dc_measurer(:wxClientDC.new(panel), cache)
+  def measurer(%{panel: panel}, cache \\ nil) do
+    # (the DC is kept in a table: zen mode moves the panel to another window, which makes the
+    # DC of a measurer unusable on macOS, see `rebind_measurers/1`)
+    key = {:measure_dc, make_ref()}
+    :ets.insert(@view, {key, :wxClientDC.new(panel)})
+    dc_measurer(fn -> :ets.lookup_element(@view, key, 2) end, cache)
+  end
 
-  defp dc_measurer(dc, cache) do
+  # Makes every measurer use a new client DC of the panel.
+  defp rebind_measurers(%{panel: panel}) do
+    for {key, old} <- :ets.match_object(@view, {{:measure_dc, :_}, :_}) do
+      :ets.insert(@view, {key, :wxClientDC.new(panel)})
+      :wxClientDC.destroy(old)
+    end
+
+    :ok
+  end
+
+  defp dc_measurer(get_dc, cache) do
     cache = cache || new_measure_cache()
 
     fn
@@ -640,6 +663,7 @@ defmodule Browser.UI do
             h
 
           [] ->
+            dc = get_dc.()
             :wxDC.setFont(dc, font(style))
             {_w, h} = :wxDC.getTextExtent(dc, ~c"Hg")
             :ets.insert(cache, {key, h})
@@ -654,6 +678,7 @@ defmodule Browser.UI do
             w
 
           [] ->
+            dc = get_dc.()
             :wxDC.setFont(dc, font(style))
             {w, _h} = :wxDC.getTextExtent(dc, String.to_charlist(text))
             if :ets.info(cache, :size) >= @measure_cache_limit, do: :ets.delete_all_objects(cache)
@@ -733,7 +758,8 @@ defmodule Browser.UI do
     probe_webp()
     :ets.insert(@view, {:view, [], 0, true})
     :ets.insert(@view, {:sx, 0})
-    dc_measurer(:wxMemoryDC.new(:wxBitmap.new(16, 16)), nil)
+    dc = :wxMemoryDC.new(:wxBitmap.new(16, 16))
+    dc_measurer(fn -> dc end, nil)
   end
 
   @doc """
@@ -762,6 +788,7 @@ defmodule Browser.UI do
   defp paint(panel) do
     dc = :wxPaintDC.new(panel)
     paint_dc(dc)
+    zen_paint(dc, panel)
     :wxPaintDC.destroy(dc)
     :ok
   end
@@ -1857,7 +1884,299 @@ defmodule Browser.UI do
 
   def tabs_width(%{tabs: tabs}), do: tabs |> :wxWindow.getClientSize() |> elem(0)
 
-  def set_title(%{frame: f}, title), do: :wxFrame.setTitle(f, String.to_charlist(title))
+  def set_title(%{frame: f, zen: z}, title) do
+    :wxFrame.setTitle(f, String.to_charlist(title))
+    if z, do: :wxFrame.setTitle(z, String.to_charlist(title))
+  end
+
+  # -- zen mode ------------------------------------------------------------------------
+
+  # a border around the page, in this colour, and how far from the window edge a drag resizes
+  @zen_border 2
+  @zen_edge_color {140, 140, 140}
+  @zen_grab 5
+  @zen_min {240, 160}
+  @zen_handle {64, 14}
+
+  @doc """
+  Zen mode: the page moves into a second window with no title bar, tab strip, address bar or
+  status bar. A thin border surrounds the page. Three things remain, all drawn over the page
+  (see `zen_paint/2`): a red close button (top left on macOS, top right elsewhere), a handle at
+  the top middle to move the window, and the edges of the window, which resize it. The same
+  shortcut (and View > Exit Zen Mode) brings the normal window back. Returns the new UI.
+  """
+  def toggle_zen(%{zen: nil} = ui), do: enter_zen(ui)
+  def toggle_zen(ui), do: exit_zen(ui)
+
+  def zen?(%{zen: zen}), do: zen != nil
+
+  defp enter_zen(%{frame: home, panel: panel} = ui) do
+    {x, y} = :wxWindow.getPosition(home)
+    {w, h} = :wxWindow.getSize(home)
+    # no caption, no border: wxBORDER_NONE
+    zen =
+      :wxFrame.new(:wx.null(), -1, ~c"Elixir Browser",
+        pos: {x, y},
+        size: {w, h},
+        style: 0x00200000
+      )
+
+    :wxWindow.setBackgroundColour(zen, @zen_edge_color)
+
+    # the panel leaves the normal window's sizer; the zen window places it itself
+    :wxSizer.detach(:wxWindow.getSizer(home), panel)
+    true = :wxWindow.reparent(panel, zen)
+
+    :wxFrame.setMenuBar(zen, zen_menubar())
+    :wxFrame.connect(zen, :close_window)
+    :wxFrame.connect(zen, :command_menu_selected)
+
+    if :ets.whereis(@zen_drag) == :undefined, do: :ets.new(@zen_drag, [:named_table, :public])
+    :ets.delete_all_objects(@zen_drag)
+    :ets.insert(@zen_drag, {:active})
+    zen_edges(zen, panel, self())
+
+    place = fn ->
+      {cw, ch} = :wxWindow.getClientSize(zen)
+      :wxWindow.move(panel, {@zen_border, @zen_border})
+      :wxWindow.setSize(panel, {max(cw - 2 * @zen_border, 1), max(ch - 2 * @zen_border, 1)})
+    end
+
+    :wxFrame.connect(zen, :size, callback: fn _ev, _obj -> place.() end)
+    :wxFrame.show(zen)
+    :wxFrame.hide(home)
+    place.()
+    :wxWindow.setFocus(panel)
+    rebind_measurers(ui)
+    :wxWindow.refresh(panel)
+    %{ui | zen: zen}
+  end
+
+  defp exit_zen(%{frame: home, panel: panel, zen: zen} = ui) do
+    :ets.delete_all_objects(@zen_drag)
+    {x, y} = :wxWindow.getPosition(zen)
+    {w, h} = :wxWindow.getSize(zen)
+    true = :wxWindow.reparent(panel, home)
+    # the panel was the third item of the normal window's column (tab strip, address bar, page)
+    :wxSizer.insert(:wxWindow.getSizer(home), 2, panel, proportion: 1, flag: @expand)
+    :wxWindow.move(home, {x, y})
+    :wxWindow.setSize(home, {w, h})
+    :wxFrame.show(home)
+    :wxWindow.layout(home)
+    :wxWindow.setCursor(panel, :wxCursor.new(1))
+    :wxWindow.setFocus(panel)
+    rebind_measurers(ui)
+    :wxWindow.refresh(panel)
+    :wxFrame.destroy(zen)
+    %{ui | zen: nil}
+  end
+
+  defp zen_menubar do
+    file = :wxMenu.new()
+    :wxMenu.append(file, @zen_id, ~c"Exit Zen Mode\tCtrl+Shift+Z")
+    :wxMenu.appendSeparator(file)
+    :wxMenu.append(file, 5006, ~c"Quit\tCtrl+Q")
+    edit = :wxMenu.new()
+    :wxMenu.append(edit, 5031, ~c"Cut\tCtrl+X")
+    :wxMenu.append(edit, 5032, ~c"Copy\tCtrl+C")
+    :wxMenu.append(edit, 5035, ~c"Select All\tCtrl+A")
+    bar = :wxMenuBar.new()
+    :wxMenuBar.append(bar, file, ~c"File")
+    :wxMenuBar.append(bar, edit, ~c"Edit")
+    bar
+  end
+
+  defp mac?, do: match?({:unix, :darwin}, :os.type())
+
+  # the middle of the close button, in panel coordinates
+  defp zen_close_at(pw), do: {if(mac?(), do: 14, else: pw - 14), 14}
+
+  # The close button (the red circle of macOS; a cross shows while the pointer is over it) and
+  # the handle (a bar hanging from the top edge, rounded at the bottom) are drawn over the
+  # page, so their corners show the page.
+  defp zen_paint(dc, panel) do
+    if :ets.whereis(@zen_drag) != :undefined and :ets.lookup(@zen_drag, :active) != [] do
+      :wxDC.setDeviceOrigin(dc, 0, 0)
+      {pw, _} = :wxWindow.getClientSize(panel)
+      {hw, hh} = @zen_handle
+      hx = div(pw - hw, 2)
+
+      :wxDC.setBrush(dc, :wxBrush.new({232, 232, 232}))
+      :wxDC.setPen(dc, :wxPen.new({200, 200, 200}, width: 1))
+      :wxDC.drawRoundedRectangle(dc, {hx, -10}, {hw, hh + 10}, 8.0)
+      :wxDC.setBrush(dc, :wxBrush.new({150, 150, 150}))
+      :wxDC.setPen(dc, :wxPen.new({150, 150, 150}, width: 1))
+      :wxDC.drawRoundedRectangle(dc, {hx + 16, 5}, {32, 4}, 2.0)
+
+      {cx, cy} = zen_close_at(pw)
+      :wxDC.setBrush(dc, :wxBrush.new({255, 95, 87}))
+      :wxDC.setPen(dc, :wxPen.new({224, 68, 62}, width: 1))
+      :wxDC.drawCircle(dc, {cx, cy}, 6)
+
+      if :ets.lookup(@zen_drag, :over_close) != [] do
+        :wxDC.setPen(dc, :wxPen.new({100, 10, 6}, width: 1))
+        :wxDC.drawLine(dc, {cx - 3, cy - 3}, {cx + 3, cy + 3})
+        :wxDC.drawLine(dc, {cx + 3, cy - 3}, {cx - 3, cy + 3})
+      end
+    end
+  end
+
+  # What the pointer is over: :close, :handle, `{:edge, edges}` (a border of the zen window, or
+  # a few pixels of the page next to it, resize it) or nil. `{px, py}` is in panel coordinates,
+  # `{fx, fy}` in zen window coordinates.
+  defp zen_zone({px, py}, pw, {fx, fy}, {w, h}) do
+    {cx, cy} = zen_close_at(pw)
+    {hw, hh} = @zen_handle
+    hx = div(pw - hw, 2)
+
+    cond do
+      (px - cx) * (px - cx) + (py - cy) * (py - cy) <= 64 -> :close
+      px >= hx and px < hx + hw and py >= 0 and py < hh -> :handle
+      true -> if (e = zen_edge_at({fx, fy}, w, h)) != [], do: {:edge, e}
+    end
+  end
+
+  # The mouse events of the zen window and its page. Events on the close button, the handle
+  # and the edges are handled here and go no further; anything else goes on to the page.
+  # (The callbacks run in the wx thread, so what a drag needs is kept in an ETS table.)
+  defp zen_edges(zen, panel, me) do
+    for win <- [zen, panel],
+        {kind, event} <- [down: :left_down, up: :left_up, motion: :motion, leave: :leave_window] do
+      :wxEvtHandler.connect(win, event,
+        callback: fn _ev, obj -> zen_event(kind, zen, panel, win, me, obj) end
+      )
+    end
+
+    :ok
+  end
+
+  defp zen_event(:leave, zen, panel, _win, _me, obj) do
+    # (while a drag holds the mouse, the pointer is outside by design)
+    if :ets.lookup(@zen_drag, :move) == [] and :ets.lookup(@zen_drag, :edge) == [],
+      do: zen_hover(zen, panel, nil)
+
+    :wxEvent.skip(obj)
+  end
+
+  defp zen_event(kind, zen, panel, win, me, obj) do
+    {mx, my} = :wx_misc.getMousePosition()
+    {fx, fy} = :wxWindow.getPosition(zen)
+    {w, h} = :wxWindow.getSize(zen)
+    {pw, _} = :wxWindow.getClientSize(panel)
+    zone = zen_zone(:wxWindow.screenToClient(panel, {mx, my}), pw, {mx - fx, my - fy}, {w, h})
+    move = :ets.lookup(@zen_drag, :move)
+    edge = :ets.lookup(@zen_drag, :edge)
+
+    case {kind, move, edge, zone} do
+      {:down, _, _, :handle} ->
+        :ets.insert(@zen_drag, {:move, {mx, my}, {fx, fy}})
+        :wxWindow.captureMouse(win)
+
+      {:down, _, _, {:edge, edges}} ->
+        :ets.insert(@zen_drag, {:edge, edges, {mx, my}, {fx, fy}, {w, h}})
+        :wxWindow.captureMouse(win)
+
+      {:down, _, _, :close} ->
+        :ok
+
+      {:up, [_], _, _} ->
+        if :wxWindow.hasCapture(win), do: :wxWindow.releaseMouse(win)
+        :ets.delete(@zen_drag, :move)
+
+      {:up, _, [_], _} ->
+        if :wxWindow.hasCapture(win), do: :wxWindow.releaseMouse(win)
+        :ets.delete(@zen_drag, :edge)
+
+      {:up, _, _, :close} ->
+        send(me, :zen_close)
+
+      {:motion, [{_, {mx0, my0}, {x0, y0}}], _, _} ->
+        :wxWindow.move(zen, {x0 + mx - mx0, y0 + my - my0})
+
+      {:motion, _, [{_, edges, {mx0, my0}, {x0, y0}, {w0, h0}}], _} ->
+        {min_w, min_h} = @zen_min
+        {x, w} = zen_axis(:l in edges, :r in edges, x0, w0, mx - mx0, min_w)
+        {y, h} = zen_axis(:t in edges, :b in edges, y0, h0, my - my0, min_h)
+        :wxWindow.setSize(zen, x, y, w, h)
+
+      {:motion, [], [], zone} ->
+        zen_hover(zen, panel, zone)
+        if zone == nil, do: :wxEvent.skip(obj)
+
+      _ ->
+        :wxEvent.skip(obj)
+    end
+  end
+
+  # the cursor and the close button's cross for what the pointer is over; nil puts both back
+  defp zen_hover(zen, panel, zone) do
+    over_close? = :ets.lookup(@zen_drag, :over_close) != []
+
+    cond do
+      zone == :close and not over_close? ->
+        :ets.insert(@zen_drag, {:over_close})
+        :wxWindow.refresh(panel)
+
+      zone != :close and over_close? ->
+        :ets.delete(@zen_drag, :over_close)
+        :wxWindow.refresh(panel)
+
+      true ->
+        :ok
+    end
+
+    case zone do
+      nil ->
+        # (the page sets its own cursor again when the pointer moves over a link or text)
+        if :ets.take(@zen_drag, :cursor_on) != [] do
+          :wxWindow.setCursor(zen, :wxCursor.new(1))
+          :wxWindow.setCursor(panel, :wxCursor.new(1))
+        end
+
+      zone ->
+        :ets.insert(@zen_drag, {:cursor_on})
+        cursor = zen_cursor(zone)
+        :wxWindow.setCursor(zen, cursor)
+        :wxWindow.setCursor(panel, cursor)
+    end
+  end
+
+  defp zen_axis(true, _, start, len, d, min) do
+    len2 = max(len - d, min)
+    {start + len - len2, len2}
+  end
+
+  defp zen_axis(_, true, start, len, d, min), do: {start, max(len + d, min)}
+  defp zen_axis(_, _, start, len, _, _), do: {start, len}
+
+  defp zen_edge_at({x, y}, w, h) do
+    [
+      if(x < @zen_grab, do: :l),
+      if(x >= w - @zen_grab, do: :r),
+      if(y < @zen_grab, do: :t),
+      if(y >= h - @zen_grab, do: :b)
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  # The stock cursors of the system: the hand for the handle (wx has no open or closed hand),
+  # arrow for the close button, sizing arrows west-east 21, north-south 19,
+  # northwest-southeast 20, northeast-southwest 18.
+  defp zen_cursor(:handle), do: :wxCursor.new(6)
+  defp zen_cursor(:close), do: :wxCursor.new(1)
+
+  defp zen_cursor({:edge, edges}) do
+    id =
+      case Enum.sort(edges) do
+        e when e in [[:l], [:r]] -> 21
+        e when e in [[:b], [:t]] -> 19
+        e when e in [[:l, :t], [:b, :r]] -> 20
+        _ -> 18
+      end
+
+    :wxCursor.new(id)
+  end
+
   @doc "Enables Develop > Stop Replaying Archive only while an archive is replayed."
   def sync_archive_menu(%{frame: f}) do
     :wxMenuBar.enable(:wxFrame.getMenuBar(f), 5203, Browser.Archive.mode() == :replay)
