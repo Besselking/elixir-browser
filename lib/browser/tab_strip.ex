@@ -22,11 +22,32 @@ defmodule Browser.TabStrip do
     :ok
   end
 
-  @doc "Sets what window `wid` draws: each tab's `{title, loading?}` and the index of the active tab."
+  @doc """
+  Sets what window `wid` draws: each tab's `{title, loading?, icon}` (`icon` the address of its
+  icon, or nil) and the index of the active tab.
+  """
   def put(wid, titles, active), do: :ets.insert(@table, {wid, titles, active})
 
   @doc "Forgets what window `wid` drew."
   def discard(wid), do: :ets.delete(@table, wid)
+
+  @doc """
+  Marks the icon at `url` as asked for: true the first time (the caller fetches it), false
+  when it is already there, failed or on its way.
+  """
+  def want_icon(url), do: :ets.insert_new(@table, {{:icon, url}, :pending})
+
+  @doc "Keeps the bitmap for the icon at `url` (nil: the icon cannot be shown)."
+  def put_icon(url, bitmap), do: :ets.insert(@table, {{:icon, url}, bitmap || :failed})
+
+  defp icon(nil), do: nil
+
+  defp icon(url) do
+    case :ets.lookup(@table, {:icon, url}) do
+      [{_, {:wx_ref, _, _, _} = bitmap}] -> bitmap
+      _ -> nil
+    end
+  end
 
   @doc "The `{x, width}` of each of `count` tabs in a strip `width` px wide."
   def layout(count, width) do
@@ -80,8 +101,15 @@ defmodule Browser.TabStrip do
   @doc false
   def paint(panel, wid) do
     dc = :wxPaintDC.new(panel)
-    [{_, titles, active}] = :ets.lookup(@table, wid)
     {width, _} = :wxWindow.getClientSize(panel)
+    draw(dc, width, wid)
+    :wxPaintDC.destroy(dc)
+    :ok
+  end
+
+  @doc "Draws the strip of window `wid`, `width` px wide, on `dc`."
+  def draw(dc, width, wid) do
+    [{_, titles, active}] = :ets.lookup(@table, wid)
 
     colors = colors()
     Process.put(:tab_colors, colors)
@@ -92,8 +120,8 @@ defmodule Browser.TabStrip do
     titles
     |> Enum.zip(layout(length(titles), width))
     |> Enum.with_index()
-    |> Enum.each(fn {{{title, loading?}, {x, w}}, i} ->
-      paint_tab(dc, title, loading?, x, w, i == active)
+    |> Enum.each(fn {{{title, loading?, icon_url}, {x, w}}, i} ->
+      paint_tab(dc, title, loading?, icon(icon_url), x, w, i == active)
     end)
 
     {px, pw} = plus(length(titles), width)
@@ -103,11 +131,10 @@ defmodule Browser.TabStrip do
 
     :wxDC.setPen(dc, :wxPen.new(colors.line))
     :wxDC.drawLine(dc, {0, @height - 1}, {width, @height - 1})
-    :wxPaintDC.destroy(dc)
     :ok
   end
 
-  defp paint_tab(dc, title, loading?, x, w, active?) do
+  defp paint_tab(dc, title, loading?, icon, x, w, active?) do
     top = if active?, do: 3, else: 5
     c = Process.get(:tab_colors)
     bg = if active?, do: c.active, else: c.inactive
@@ -116,20 +143,28 @@ defmodule Browser.TabStrip do
     if active?, do: erase_bottom(dc, x, w)
 
     :wxDC.setTextForeground(dc, c.text)
-    # a dot before the title while the tab's page is loading
-    dot = if loading?, do: 14, else: 0
+    # before the title: a dot while the tab's page is loading, else the page's icon
+    lead = if loading? or icon != nil, do: 20, else: 0
 
-    if loading? do
-      :wxDC.setBrush(dc, :wxBrush.new({70, 130, 230}))
-      :wxDC.setPen(dc, :wxPen.new({70, 130, 230}))
-      :wxDC.drawCircle(dc, {x + 15, div(@height, 2) + 1}, 4)
+    cond do
+      loading? ->
+        :wxDC.setBrush(dc, :wxBrush.new({70, 130, 230}))
+        :wxDC.setPen(dc, :wxPen.new({70, 130, 230}))
+        :wxDC.drawCircle(dc, {x + 18, div(@height, 2) + 1}, 4)
+
+      icon != nil ->
+        {iw, ih} = {:wxBitmap.getWidth(icon), :wxBitmap.getHeight(icon)}
+        :wxDC.drawBitmap(dc, icon, {x + 10 + div(16 - iw, 2), div(@height - ih, 2) + 1})
+
+      true ->
+        :ok
     end
 
-    avail = w - @close - 22 - dot
-    :wxDC.setClippingRegion(dc, {x + 8 + dot, 0, max(avail, 1), @height})
+    avail = w - @close - 22 - lead
+    :wxDC.setClippingRegion(dc, {x + 8 + lead, 0, max(avail, 1), @height})
     {_, th} = :wxDC.getTextExtent(dc, ~c"Ag")
     text = fit(dc, clip(title), avail)
-    :wxDC.drawText(dc, String.to_charlist(text), {x + 10 + dot, div(@height - th, 2) + 1})
+    :wxDC.drawText(dc, String.to_charlist(text), {x + 10 + lead, div(@height - th, 2) + 1})
     :wxDC.destroyClippingRegion(dc)
 
     # the close box: a cross

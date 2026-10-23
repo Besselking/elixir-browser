@@ -58,6 +58,15 @@ Without a features string, `window.open` opens a new tab.
 Close a window with its close button. When you close the last tab of a window, the window
 closes. When you close the last window, the browser quits.
 
+## Tab icons
+
+Each tab shows the icon of its page at the left of the title. The browser uses the
+`<link rel="icon">` elements of the page. When there are many, it uses the icon with a size
+that is nearest to 32 px. If there is no size, it uses a scalable (SVG) icon, then the last
+icon. If the page has no icon link, the browser gets `/favicon.ico` from the site of the page.
+The browser reads ICO, PNG, GIF, JPEG, BMP, WebP and SVG icons. It gets each icon one time and
+keeps it in the HTTP cache. While a page loads, a blue dot shows in place of the icon.
+
 ## Developer console
 
 Press Cmd+Option+J on macOS, or Ctrl+Shift+J on other systems. You can also choose
