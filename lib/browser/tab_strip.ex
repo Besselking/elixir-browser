@@ -14,6 +14,9 @@ defmodule Browser.TabStrip do
   @close 16
   @max_chars 80
 
+  # wxSYS_DEFAULT_GUI_FONT
+  @default_gui_font 17
+
   def height, do: @height
 
   @doc "Creates the table the painter reads."
@@ -141,6 +144,9 @@ defmodule Browser.TabStrip do
 
     colors = colors()
     Process.put(:tab_colors, colors)
+    # the text measures below need a font on the dc: the system's own, set here (a dc is made
+    # for each paint)
+    :wxDC.setFont(dc, :wxSystemSettings.getFont(@default_gui_font))
     :wxDC.setBackground(dc, :wxBrush.new(colors.strip))
     :wxDC.clear(dc)
     :wxDC.setPen(dc, :wxPen.new(colors.line))
