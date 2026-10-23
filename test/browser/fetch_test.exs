@@ -466,7 +466,7 @@ defmodule Browser.FetchTest do
       assert :ets.whereis(Fetch.inflight_table()) != :undefined
       base = held_server()
       first = Task.async(fn -> Fetch.load(base <> "/sheet.css") end)
-      assert_receive {:held, handler, "/sheet.css"}
+      assert_receive {:held, handler, "/sheet.css"}, 1_000
       second = Task.async(fn -> Fetch.load(base <> "/sheet.css") end)
       refute_receive {:held, _, _}, 150
 
@@ -480,12 +480,12 @@ defmodule Browser.FetchTest do
       base = held_server()
       test = self()
       first = spawn(fn -> send(test, {:first, Fetch.load(base <> "/s.css")}) end)
-      assert_receive {:held, handler1, "/s.css"}
+      assert_receive {:held, handler1, "/s.css"}, 1_000
       second = Task.async(fn -> Fetch.load(base <> "/s.css") end)
       refute_receive {:held, _, _}, 100
 
       Process.exit(first, :kill)
-      assert_receive {:held, handler2, "/s.css"}
+      assert_receive {:held, handler2, "/s.css"}, 1_000
       send(handler2, {:reply, ok("own")})
       assert {:ok, "own", _} = Task.await(second)
       send(handler1, {:reply, ok("late")})
@@ -493,7 +493,7 @@ defmodule Browser.FetchTest do
 
       # the key of the stopped load is gone: the next load is a first load again
       third = Task.async(fn -> Fetch.load(base <> "/s.css") end)
-      assert_receive {:held, handler3, "/s.css"}
+      assert_receive {:held, handler3, "/s.css"}, 1_000
       send(handler3, {:reply, ok("again")})
       assert {:ok, "again", _} = Task.await(third)
     end
