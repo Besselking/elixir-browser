@@ -29,7 +29,8 @@ defmodule Browser.Session do
     StyleGate,
     TextEdit,
     UI,
-    Visits
+    Visits,
+    Windows
   }
 
   @recording_status "Recording a page archive… uncheck Develop > Record Page Archive to save"
@@ -41,13 +42,14 @@ defmodule Browser.Session do
   # pixels per line of a notch of the wheel
   @wheel_line 24
 
-  def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
-  def navigate(url), do: GenServer.cast(__MODULE__, {:navigate, url})
+  @doc "Starts a window. Options: `:url` (the home page by default) and `:at` (see `UI.build/1`)."
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @impl true
-  def init(_) do
+  def init(opts) do
     Process.put(:layout_serve, &__MODULE__.serve_layout/1)
-    ui = UI.build()
+    ui = UI.build(opts)
+    Windows.register(self())
     # a file that the system opens with this app (Finder) arrives as `{:open_file, path}`
     :wx.subscribe_events()
     cache = UI.new_measure_cache()
@@ -180,8 +182,7 @@ defmodule Browser.Session do
     }
 
     publish_tabs(state)
-    start = System.get_env("BROWSER_URL") || Browser.home()
-    {:ok, state, {:continue, {:go, start}}}
+    {:ok, state, {:continue, {:go, opts[:url] || Browser.home()}}}
   end
 
   @impl true
@@ -511,14 +512,11 @@ defmodule Browser.Session do
 
   # -- wx events -------------------------------------------------------------
 
-  def handle_info(wx(event: {:wxClose, :close_window}), state) do
-    # An orderly shutdown frees the toolkit's objects while its event loop is still
-    # running, which crashes the wx driver (a "quit unexpectedly" dialog on macOS).
-    # Only localStorage may still be waiting to be written; then leave straight away.
-    Browser.LocalStorage.flush()
-    System.halt(0)
-    {:noreply, state}
-  end
+  def handle_info(wx(event: {:wxClose, :close_window}), state), do: close_window(state)
+  def handle_info(:close_window, state), do: close_window(state)
+
+  # another window recorded a visit: the visited pages are shared
+  def handle_info({:visits, visits}, state), do: {:noreply, %{state | visits: visits}}
 
   # Develop > Developer Console
   def handle_info(wx(id: 5200, event: wxCommand(type: :command_menu_selected)), state),
@@ -542,7 +540,8 @@ defmodule Browser.Session do
   def handle_info({:open_file, file}, state) do
     path = to_string(file)
 
-    if Path.extname(path) == Archive.extension(),
+    # (every window hears it: the oldest one opens the file)
+    if Path.extname(path) == Archive.extension() and hd(Windows.list()) == self(),
       do: {:noreply, load(state, "file://" <> URI.encode(path), :push)},
       else: {:noreply, state}
   end
@@ -660,6 +659,12 @@ defmodule Browser.Session do
   # File > New Tab and Close Tab
   def handle_info(wx(id: 5100, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, new_tab(state)}
+
+  # File > New Window
+  def handle_info(wx(id: 5103, event: wxCommand(type: :command_menu_selected)), state) do
+    Windows.open(at: UI.next_window_position(state.ui))
+    {:noreply, state}
+  end
 
   def handle_info(wx(id: 5101, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, close_tab(state, state.active)}
@@ -3590,6 +3595,7 @@ defmodule Browser.Session do
   defp remember(state, {:ok, _}, :push, page) do
     visits = Visits.record(state.visits, page.url, page.title)
     Task.start(fn -> Visits.save(visits) end)
+    Windows.broadcast(self(), {:visits, visits})
     %{state | visits: visits}
   end
 
@@ -4174,6 +4180,36 @@ defmodule Browser.Session do
     state
   end
 
+  # -- windows -----------------------------------------------------------------------
+
+  # The last window quits the app. An orderly shutdown frees the toolkit's objects while its
+  # event loop is still running, which crashes the wx driver (a "quit unexpectedly" dialog on
+  # macOS); only localStorage may still be waiting to be written, so leave straight away.
+  # Another window closes alone: its scripts, players and layout process stop, then the frame
+  # (and the console and network windows that belong to it) is destroyed.
+  defp close_window(state) do
+    case Windows.closing(self()) do
+      :last ->
+        Browser.LocalStorage.flush()
+        System.halt(0)
+
+      :more ->
+        state.tabs
+        |> List.replace_at(state.active, state)
+        |> Enum.each(fn tab ->
+          if is_pid(tab[:js]), do: Browser.JS.Runtime.stop(tab.js)
+
+          for {_nid, pid} <- tab[:media] || %{},
+              Process.alive?(pid),
+              do: GenServer.stop(pid, :normal)
+        end)
+
+        LayoutWorker.stop(state.layout_worker)
+        UI.close(state.ui)
+        {:stop, :normal, state}
+    end
+  end
+
   # -- tabs ------------------------------------------------------------------------
 
   # What belongs to one tab. Everything else (the window, the jobs and timers, the address
@@ -4483,9 +4519,10 @@ defmodule Browser.Session do
   defp goto_tab(state, n) when n <= length(state.tabs), do: switch_tab(state, n - 1)
   defp goto_tab(state, _n), do: state
 
-  defp close_tab(%{tabs: [_]}, _i) do
-    Browser.LocalStorage.flush()
-    System.halt(0)
+  # the last tab closes its window (and the app, with the last window)
+  defp close_tab(%{tabs: [_]} = state, _i) do
+    send(self(), :close_window)
+    state
   end
 
   defp close_tab(state, i) when i == state.active do

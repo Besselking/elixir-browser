@@ -32,20 +32,27 @@ defmodule Browser.UI do
     :cursors,
     :toolbar,
     :suggest,
-    :tabs
+    :tabs,
+    # names this window's rows in the tables the painter reads
+    :wid
   ]
 
-  def build do
-    :ets.new(@view, [:named_table, :public])
-    :ets.new(@images, [:named_table, :public])
-    :ets.insert(@view, {:view, [], 0, true})
-    set_page([])
-    :ets.insert(@view, {:sx, 0})
+  @doc """
+  Makes a window: the frame, tabs strip, address bar and page panel, shown at once. Its events
+  go to the calling process. Option `:at` is the `{x, y}` of the frame.
+  """
+  def build(opts \\ []) do
+    init_tables()
+    wid = make_ref()
+    :ets.insert(@view, {{wid, :view}, [], 0, true})
+    set_page(wid, [])
+    :ets.insert(@view, {{wid, :sx}, 0})
+    Browser.TabStrip.put(wid, [], 0)
 
-    Browser.TabStrip.init()
     wx = :wx.new()
     probe_webp()
-    frame = :wxFrame.new(wx, -1, ~c"Elixir Browser", size: {960, 720})
+    pos = Keyword.get(opts, :at, {-1, -1})
+    frame = :wxFrame.new(wx, -1, ~c"Elixir Browser", pos: pos, size: {960, 720})
 
     tabs = :wxPanel.new(frame, size: {-1, Browser.TabStrip.height()}, style: 65536)
     toolbar = :wxPanel.new(frame)
@@ -85,6 +92,7 @@ defmodule Browser.UI do
 
     # wxID_EXIT is moved into the macOS application menu as "Quit", with Cmd+Q
     file = :wxMenu.new()
+    :wxMenu.append(file, 5103, ~c"New Window\tCtrl+N")
     :wxMenu.append(file, 5100, ~c"New Tab\tCtrl+T")
     :wxMenu.append(file, 5101, ~c"Close Tab\tCtrl+W")
     :wxMenu.append(file, 5102, ~c"Reopen Closed Tab\tCtrl+Shift+T")
@@ -131,7 +139,11 @@ defmodule Browser.UI do
     :wxPanel.connect(tabs, :middle_down)
     :wxPanel.connect(tabs, :left_up)
     :wxPanel.connect(tabs, :motion)
-    :wxPanel.connect(tabs, :paint, callback: fn _ev, _obj -> Browser.TabStrip.paint(tabs) end)
+
+    :wxPanel.connect(tabs, :paint,
+      callback: fn _ev, _obj -> Browser.TabStrip.paint(tabs, wid) end
+    )
+
     :wxPanel.connect(panel, :left_down)
     :wxPanel.connect(panel, :middle_down)
     :wxPanel.connect(panel, :right_down)
@@ -163,12 +175,13 @@ defmodule Browser.UI do
     :wxPanel.connect(panel, :size)
     :wxPanel.connect(panel, :char)
 
-    :wxPanel.connect(panel, :paint, callback: fn _ev, _obj -> paint(panel) end)
+    :wxPanel.connect(panel, :paint, callback: fn _ev, _obj -> paint(panel, wid) end)
 
     :wxFrame.show(frame)
     :wxWindow.setFocus(panel)
 
     %__MODULE__{
+      wid: wid,
       frame: frame,
       url: url,
       back: back,
@@ -183,9 +196,47 @@ defmodule Browser.UI do
     }
   end
 
+  @doc """
+  Creates the tables the painter reads, when they do not exist yet. They are named and public,
+  so the process that makes them (`Browser.Windows`) must outlive every window.
+  """
+  def init_tables do
+    for name <- [@view, @images], :ets.whereis(name) == :undefined do
+      :ets.new(name, [:named_table, :public])
+    end
+
+    Browser.TabStrip.init()
+  end
+
+  @doc "Where a window opened from this one goes: down and right of it, like the system's cascade."
+  def next_window_position(%{frame: frame}) do
+    {x, y} = :wxWindow.getPosition(frame)
+    {x + 30, y + 30}
+  end
+
+  @doc "Closes the window: the painter forgets it and the frame (with its children) is destroyed."
+  def close(%{frame: frame} = ui) do
+    discard(ui)
+    :wxWindow.destroy(frame)
+    :ok
+  end
+
+  @doc "Forgets what the painter keeps for a window that is closed."
+  def discard(%{wid: wid}) do
+    :ets.match_delete(@view, {{wid, :_}, :_})
+    :ets.match_delete(@view, {{wid, :_}, :_, :_, :_})
+    Browser.TabStrip.discard(wid)
+
+    for {{__MODULE__, :band, ^wid, _} = key, _} <- :persistent_term.get(),
+        do: :persistent_term.erase(key)
+
+    :persistent_term.erase({__MODULE__, :page, wid})
+    :ok
+  end
+
   @doc "Scrolls the page sideways to `sx` pixels."
-  def set_scroll_x(%{panel: panel}, sx) do
-    :ets.insert(@view, {:sx, sx})
+  def set_scroll_x(%{panel: panel, wid: wid}, sx) do
+    :ets.insert(@view, {{wid, :sx}, sx})
     :wxWindow.refresh(panel)
   end
 
@@ -196,31 +247,31 @@ defmodule Browser.UI do
   # indexed by horizontal bands of the page so a frame only looks at what is near the window.
   # A put copies the whole term, so a page that changed in a few bands (a keystroke) puts only
   # those bands, each under a key of its own that holds the page's `gen` (see `band/3`).
-  defp set_page(items) do
-    # (what `publish/4` put last is no longer what the painter has)
+  defp set_page(wid, items) do
+    # (what `publish/5` put last is no longer what the painter has)
     Process.delete(:published_items)
     Process.delete(:published_page)
-    put_page(index_page(items))
+    put_page(wid, index_page(items))
   end
 
-  defp put_page(page) do
+  defp put_page(wid, page) do
     page = Map.put(page, :gen, make_ref())
-    :persistent_term.put({__MODULE__, :page}, page)
+    :persistent_term.put({__MODULE__, :page, wid}, page)
     page
   end
 
   # the bands of `page` that are not those of `published` are put on their own
-  defp put_bands(page, published) do
+  defp put_bands(wid, page, published) do
     for b <- 0..(tuple_size(page.bands) - 1)//1,
         not (elem(page.bands, b) === elem(published.bands, b)),
-        do: :persistent_term.put({__MODULE__, :band, b}, {page.gen, elem(page.bands, b)})
+        do: :persistent_term.put({__MODULE__, :band, wid, b}, {page.gen, elem(page.bands, b)})
 
     page
   end
 
   # what the painter draws of band `b`: the band put on its own for this page, if any
-  defp band(bands, b, gen) do
-    case :persistent_term.get({__MODULE__, :band, b}, nil) do
+  defp band(bands, wid, b, gen) do
+    case :persistent_term.get({__MODULE__, :band, wid, b}, nil) do
       {^gen, band} -> band
       _ -> elem(bands, b)
     end
@@ -331,11 +382,11 @@ defmodule Browser.UI do
   selection), the scroll offset and the blink state of the text caret. The items are only
   indexed again when they are not the very list given last time.
   """
-  def publish(items, overlay, scroll, caret_on \\ true),
-    do: publish(items, overlay, scroll, caret_on, nil)
+  def publish(wid, items, overlay, scroll, caret_on \\ true),
+    do: publish(wid, items, overlay, scroll, caret_on, nil)
 
   # `changes`: the items that differ from those published last (`changed_items/4`), when known
-  defp publish(items, overlay, scroll, caret_on, changes) do
+  defp publish(wid, items, overlay, scroll, caret_on, changes) do
     old = Process.get(:published_items)
 
     unless old === items do
@@ -343,15 +394,15 @@ defmodule Browser.UI do
 
       page =
         case reindex_page(published, old, items, changes) do
-          nil -> items |> index_page() |> put_page()
-          page -> put_bands(page, published)
+          nil -> items |> index_page() |> then(&put_page(wid, &1))
+          page -> put_bands(wid, page, published)
         end
 
       Process.put(:published_items, items)
       Process.put(:published_page, page)
     end
 
-    :ets.insert(@view, {:view, overlay, scroll, caret_on})
+    :ets.insert(@view, {{wid, :view}, overlay, scroll, caret_on})
   end
 
   @doc """
@@ -359,8 +410,8 @@ defmodule Browser.UI do
   area covered by items that differ from the previous view, or by the caret when it
   blinks, is invalidated; anything else repaints the whole panel.
   """
-  def update(%{panel: panel}, items, overlay, scroll, caret_on, mode \\ :full) do
-    [{:view, old_overlay, old_scroll, old_caret}] = :ets.lookup(@view, :view)
+  def update(%{panel: panel, wid: wid}, items, overlay, scroll, caret_on, mode \\ :full) do
+    [{_, old_overlay, old_scroll, old_caret}] = :ets.lookup(@view, {wid, :view})
     old_items = Process.get(:published_items, [])
     diff? = mode == :diff and old_scroll == scroll and old_overlay == overlay
 
@@ -370,7 +421,7 @@ defmodule Browser.UI do
       if diff? and old_caret == caret_on and not (old_items === items),
         do: changed_items(old_items, items, 0, [])
 
-    publish(items, overlay, scroll, caret_on, if(is_list(changes), do: changes))
+    publish(wid, items, overlay, scroll, caret_on, if(is_list(changes), do: changes))
 
     dirty =
       cond do
@@ -399,7 +450,7 @@ defmodule Browser.UI do
 
         if w * h * 2 > cw * ch,
           do: :wxWindow.refresh(panel),
-          else: :wxWindow.refreshRect(panel, {x - sx(), y - scroll, w, h})
+          else: :wxWindow.refreshRect(panel, {x - sx(wid), y - scroll, w, h})
     end
   end
 
@@ -422,7 +473,7 @@ defmodule Browser.UI do
   the rest of the panel. `fixed?` items sit at screen positions, not page ones, so with
   any of those the whole panel is repainted.
   """
-  def refresh_images(%{panel: panel}, items, url, scroll, fixed?) do
+  def refresh_images(%{panel: panel, wid: wid}, items, url, scroll, fixed?) do
     pics = Enum.filter(items, &(&1.type == :image and &1.url == url))
 
     cond do
@@ -434,7 +485,7 @@ defmodule Browser.UI do
 
       true ->
         {x, y, w, h} = pics |> Enum.map(&bbox/1) |> Enum.reduce(&union/2)
-        :wxWindow.refreshRect(panel, {x - sx(), y - scroll, w, h})
+        :wxWindow.refreshRect(panel, {x - sx(wid), y - scroll, w, h})
     end
   end
 
@@ -726,13 +777,10 @@ defmodule Browser.UI do
   def snapshot_start do
     :wx.new()
 
-    for name <- [@view, @images], :ets.whereis(name) == :undefined do
-      :ets.new(name, [:named_table, :public])
-    end
-
+    init_tables()
     probe_webp()
-    :ets.insert(@view, {:view, [], 0, true})
-    :ets.insert(@view, {:sx, 0})
+    :ets.insert(@view, {{:snapshot, :view}, [], 0, true})
+    :ets.insert(@view, {{:snapshot, :sx}, 0})
     dc_measurer(:wxMemoryDC.new(:wxBitmap.new(16, 16)), nil)
   end
 
@@ -742,40 +790,40 @@ defmodule Browser.UI do
   Returns `true` when the file was written.
   """
   def snapshot(items, width, height, path, overlay \\ [], scroll \\ 0) do
-    publish(items, overlay, scroll, false)
+    publish(:snapshot, items, overlay, scroll, false)
     bitmap = :wxBitmap.new(width, height)
     dc = :wxMemoryDC.new(bitmap)
-    paint_dc(dc)
+    paint_dc(dc, :snapshot)
     :wxMemoryDC.destroy(dc)
     :wxBitmap.saveFile(bitmap, String.to_charlist(path), :wxe_util.get_const(:wxBITMAP_TYPE_PNG))
   end
 
   # -- painting (runs in wx callback process) --------------------------------
 
-  defp sx do
-    case :ets.lookup(@view, :sx) do
-      [{:sx, sx}] -> sx
+  defp sx(wid) do
+    case :ets.lookup(@view, {wid, :sx}) do
+      [{_, sx}] -> sx
       [] -> 0
     end
   end
 
-  defp paint(panel) do
+  defp paint(panel, wid) do
     dc = :wxPaintDC.new(panel)
-    paint_dc(dc)
+    paint_dc(dc, wid)
     :wxPaintDC.destroy(dc)
     :ok
   end
 
-  defp paint_dc(dc) do
-    [{:view, overlay, scroll, caret_on}] = :ets.lookup(@view, :view)
+  defp paint_dc(dc, wid) do
+    [{_, overlay, scroll, caret_on}] = :ets.lookup(@view, {wid, :view})
 
     %{canvas: canvas_item, sticky: sticky, bands: bands, gen: gen} =
-      :persistent_term.get({__MODULE__, :page})
+      :persistent_term.get({__MODULE__, :page, wid})
 
     Process.delete(:paint_font)
     Process.delete(:paint_color)
     # everything is drawn at page x: the origin moves with the horizontal scroll
-    :wxDC.setDeviceOrigin(dc, -sx(), 0)
+    :wxDC.setDeviceOrigin(dc, -sx(wid), 0)
 
     canvas =
       case canvas_item do
@@ -796,7 +844,7 @@ defmodule Browser.UI do
 
     near =
       first_band..last_band//1
-      |> Enum.flat_map(&band(bands, &1, gen))
+      |> Enum.flat_map(&band(bands, wid, &1, gen))
       |> Enum.sort_by(&elem(&1, 1))
       |> Enum.dedup_by(&elem(&1, 1))
       |> Enum.map(&elem(&1, 0))
@@ -1850,8 +1898,8 @@ defmodule Browser.UI do
   def select_suggestion(%{suggest: list}, i), do: :wxListBox.setSelection(list, i)
 
   @doc "Shows the tab strip: the tabs' titles and which one is active."
-  def set_tabs(%{tabs: tabs}, titles, active) do
-    Browser.TabStrip.put(titles, active)
+  def set_tabs(%{tabs: tabs, wid: wid}, titles, active) do
+    Browser.TabStrip.put(wid, titles, active)
     :wxWindow.refresh(tabs)
   end
 

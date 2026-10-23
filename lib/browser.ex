@@ -8,5 +8,5 @@ defmodule Browser do
   def home, do: @home
 
   @doc "Navigate the running browser to `url`."
-  def go(url), do: Browser.Session.navigate(url)
+  def go(url), do: Browser.Windows.navigate(url)
 end

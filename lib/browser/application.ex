@@ -21,7 +21,10 @@ defmodule Browser.Application do
         Browser.IndexedDB
       ] ++
         if Application.get_env(:browser, :gui, true) do
-          [{Browser.Session, []}]
+          [
+            {DynamicSupervisor, name: Browser.WindowSup, strategy: :one_for_one},
+            Browser.Windows
+          ]
         else
           []
         end

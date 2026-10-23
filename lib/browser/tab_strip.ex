@@ -18,12 +18,15 @@ defmodule Browser.TabStrip do
 
   @doc "Creates the table the painter reads."
   def init do
-    :ets.new(@table, [:named_table, :public])
-    put([], 0)
+    if :ets.whereis(@table) == :undefined, do: :ets.new(@table, [:named_table, :public])
+    :ok
   end
 
-  @doc "Sets what is drawn: each tab's `{title, loading?}` and the index of the active tab."
-  def put(titles, active), do: :ets.insert(@table, {:tabs, titles, active})
+  @doc "Sets what window `wid` draws: each tab's `{title, loading?}` and the index of the active tab."
+  def put(wid, titles, active), do: :ets.insert(@table, {wid, titles, active})
+
+  @doc "Forgets what window `wid` drew."
+  def discard(wid), do: :ets.delete(@table, wid)
 
   @doc "The `{x, width}` of each of `count` tabs in a strip `width` px wide."
   def layout(count, width) do
@@ -75,9 +78,9 @@ defmodule Browser.TabStrip do
   # -- painting (runs in the wx callback process) -------------------------------------------
 
   @doc false
-  def paint(panel) do
+  def paint(panel, wid) do
     dc = :wxPaintDC.new(panel)
-    [{:tabs, titles, active}] = :ets.lookup(@table, :tabs)
+    [{_, titles, active}] = :ets.lookup(@table, wid)
     {width, _} = :wxWindow.getClientSize(panel)
 
     colors = colors()

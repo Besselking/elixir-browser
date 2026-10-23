@@ -33,6 +33,16 @@ text, except on macOS, where it converts WebP with `sips`. Homebrew's `erlang` i
 wxWidgets 3.2. On macOS (into `~/.local`) and Debian/Ubuntu, `scripts/install-toolchain.sh` builds wxWidgets 3.3 and OTP's `wx` against it (OTP 29.1.1 needs a few
 patches for that, which the script applies).
 
+## Windows
+
+Press Ctrl+N (Cmd+N on macOS) or choose File > New Window to open a new window. The new window
+shows the start page and has its own tabs, history and address bar. It opens a little below and
+to the right of the window that you used. All windows share the cookies, the caches, local
+storage and the visited pages that the address bar suggests.
+
+Close a window with its close button. When you close the last tab of a window, the window
+closes. When you close the last window, the browser quits.
+
 ## Developer console
 
 Press Cmd+Option+J on macOS, or Ctrl+Shift+J on other systems. You can also choose
