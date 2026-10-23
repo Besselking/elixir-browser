@@ -821,6 +821,7 @@ defmodule Browser.UI do
   end
 
   defp paint(panel, wid) do
+    Browser.CrashReporter.breadcrumb({:paint_page, :erlang.phash2(wid, 1000)})
     dc = :wxPaintDC.new(panel)
     paint_dc(dc, wid)
     :wxPaintDC.destroy(dc)

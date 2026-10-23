@@ -131,6 +131,7 @@ defmodule Browser.TabStrip do
 
   @doc false
   def paint(panel, wid) do
+    Browser.CrashReporter.breadcrumb({:paint_strip, :erlang.phash2(wid, 1000)})
     dc = :wxPaintDC.new(panel)
     {width, _} = :wxWindow.getClientSize(panel)
     draw(dc, width, wid)

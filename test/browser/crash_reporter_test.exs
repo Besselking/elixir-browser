@@ -64,6 +64,19 @@ defmodule Browser.CrashReporterTest do
     send(pid, :go)
   end
 
+  test "a report lists the recent events, an event repeated by one process once", %{dir: dir} do
+    CrashReporter.breadcrumb({:paint, 1})
+    CrashReporter.breadcrumb({:paint, 1})
+    CrashReporter.breadcrumb({:close_tab, 2})
+    require Logger
+    Logger.error("wx: assert after the fact")
+    [file] = wait_for(dir)
+    body = File.read!(Path.join(dir, file))
+    assert body =~ "recent events"
+    assert [_] = Regex.scan(~r/\{:paint, 1\}/, body)
+    assert body =~ "{:close_tab, 2}"
+  end
+
   test "an empty BROWSER_CRASH_DIR falls back to the config (off in tests)", %{dir: _} do
     System.put_env("BROWSER_CRASH_DIR", "")
     assert CrashReporter.dir() == nil

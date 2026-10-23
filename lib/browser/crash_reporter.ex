@@ -17,6 +17,8 @@ defmodule Browser.CrashReporter do
   # a process that crashes is reported twice (by its behaviour and by proc_lib); one file is enough
   @dedupe_ms 2_000
   @seen :browser_crash_seen
+  @trail :browser_crash_trail
+  @trail_keep 80
 
   # the commit is read when this file is compiled, so the build must see a new commit:
   # `.git/HEAD` changes on checkout, the branch file on commit, `packed-refs` after `git gc`
@@ -63,10 +65,53 @@ defmodule Browser.CrashReporter do
     if :ets.whereis(@seen) == :undefined,
       do: :ets.new(@seen, [:named_table, :public, :set])
 
+    if :ets.whereis(@trail) == :undefined,
+      do: :ets.new(@trail, [:named_table, :public, :ordered_set])
+
     case :logger.add_handler(@handler_id, __MODULE__, %{level: :error}) do
       :ok -> :ok
       {:error, {:already_exist, _}} -> :ok
     end
+  end
+
+  @doc """
+  Notes `what` happened (in the calling process) for the next crash report. A wx assert is
+  logged after the call that caused it is over, so the report lists the last events instead.
+  The same event twice in a row from one process is kept once.
+  """
+  def breadcrumb(what) do
+    if :ets.whereis(@trail) != :undefined do
+      case :ets.last(@trail) do
+        :"$end_of_table" -> :ok
+        key -> key
+      end
+      |> case do
+        key when is_integer(key) ->
+          case :ets.lookup(@trail, key) do
+            [{_, _, pid, ^what}] when pid == self() -> :same
+            _ -> :new
+          end
+
+        _ ->
+          :new
+      end
+      |> case do
+        :same ->
+          :ok
+
+        :new ->
+          :ets.insert(
+            @trail,
+            {System.unique_integer([:monotonic]), System.monotonic_time(:millisecond), self(),
+             what}
+          )
+
+          if :ets.info(@trail, :size) > @trail_keep, do: :ets.delete(@trail, :ets.first(@trail))
+          :ok
+      end
+    end
+
+    :ok
   end
 
   @doc "Remembers the page that is open, to name in the next crash report."
@@ -136,7 +181,7 @@ defmodule Browser.CrashReporter do
       level: #{event.level}
       process: #{inspect(Map.get(event.meta, :pid))}
 
-      #{format(event)}#{wx_section()}
+      #{format(event)}#{wx_section()}#{trail_section()}
       """
 
     File.write!(path <> ".tmp", body)
@@ -150,6 +195,22 @@ defmodule Browser.CrashReporter do
     case stacks([:wxe_util, :wxe_server]) do
       [] -> ""
       found -> "\n\nprocesses in wx calls:\n\n" <> Enum.join(found, "\n\n")
+    end
+  end
+
+  defp trail_section do
+    now = System.monotonic_time(:millisecond)
+
+    case if(:ets.whereis(@trail) == :undefined, do: [], else: :ets.tab2list(@trail)) do
+      [] ->
+        ""
+
+      rows ->
+        lines =
+          for {_, at, pid, what} <- rows,
+              do: "  -#{now - at} ms  #{inspect(pid)}  #{inspect(what, limit: 8)}"
+
+        "\n\nrecent events (oldest first, ms before this report):\n\n" <> Enum.join(lines, "\n")
     end
   end
 

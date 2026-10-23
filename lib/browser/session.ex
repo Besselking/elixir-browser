@@ -243,6 +243,7 @@ defmodule Browser.Session do
   end
 
   defp load_url(state, url, mode, fetch_opts) do
+    crumb(state, {:load, url})
     me = self()
     nonce = state.nonce + 1
     UI.set_status(state.ui, "Loading #{url}…")
@@ -4514,6 +4515,8 @@ defmodule Browser.Session do
   defp tab_title(_), do: "New Tab"
 
   defp publish_tabs(state) do
+    crumb(state, {:publish_tabs, length(state.tabs)})
+
     titles =
       state.tabs
       |> Enum.with_index()
@@ -4607,6 +4610,7 @@ defmodule Browser.Session do
 
   # a parked tab is shown again
   defp resume(state, i) do
+    crumb(state, {:resume, i})
     tab = Enum.at(state.tabs, i)
     stale? = Map.get(tab, :stale, false)
     laid_width = Map.get(tab, :laid_width)
@@ -4796,7 +4800,15 @@ defmodule Browser.Session do
   end
 
   defp switch_tab(state, i) when i == state.active, do: state
-  defp switch_tab(state, i), do: state |> park() |> resume(i)
+
+  defp switch_tab(state, i) do
+    crumb(state, {:switch_tab, i})
+    state |> park() |> resume(i)
+  end
+
+  # a note for the crash report (see `CrashReporter.breadcrumb/1`): the window, then the event
+  defp crumb(state, what),
+    do: Browser.CrashReporter.breadcrumb({:erlang.phash2(state.ui.wid, 1000), what})
 
   defp step_tab(state, step) do
     n = length(state.tabs)
@@ -4809,11 +4821,13 @@ defmodule Browser.Session do
 
   # the last tab closes its window (and the app, with the last window)
   defp close_tab(%{tabs: [_]} = state, _i) do
+    crumb(state, {:close_tab, nil})
     send(self(), :close_window)
     state
   end
 
   defp close_tab(state, i) when i == state.active do
+    crumb(state, {:close_tab, i})
     LayoutWorker.drop(state.layout_worker, state.tid)
     state = remember_closed(state, i, state)
     state = state |> stop_js() |> cancel_layout_job() |> stop_blink()
@@ -4824,6 +4838,7 @@ defmodule Browser.Session do
   end
 
   defp close_tab(state, i) do
+    crumb(state, {:close_tab, i})
     tab = Enum.at(state.tabs, i)
     LayoutWorker.drop(state.layout_worker, tab[:tid])
     state = remember_closed(state, i, tab)
