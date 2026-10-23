@@ -62,6 +62,12 @@ defmodule Browser.LayoutWorker do
     end
   end
 
+  @doc "Stops the worker (its window was closed)."
+  def stop(%__MODULE__{pid: pid}) do
+    Process.unlink(pid)
+    Process.exit(pid, :kill)
+  end
+
   @doc "Forgets what was kept for `tab` (a tab that was closed)."
   def drop(%__MODULE__{pid: pid}, tab), do: send(pid, {:drop, tab})
 

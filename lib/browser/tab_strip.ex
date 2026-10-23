@@ -18,15 +18,18 @@ defmodule Browser.TabStrip do
 
   @doc "Creates the table the painter reads."
   def init do
-    :ets.new(@table, [:named_table, :public])
-    put([], 0)
+    if :ets.whereis(@table) == :undefined, do: :ets.new(@table, [:named_table, :public])
+    :ok
   end
 
   @doc """
-  Sets what is drawn: each tab's `{title, loading?, icon}` (`icon` the address of its icon, or
-  nil) and the index of the active tab.
+  Sets what window `wid` draws: each tab's `{title, loading?, icon}` (`icon` the address of its
+  icon, or nil) and the index of the active tab.
   """
-  def put(titles, active), do: :ets.insert(@table, {:tabs, titles, active})
+  def put(wid, titles, active), do: :ets.insert(@table, {wid, titles, active})
+
+  @doc "Forgets what window `wid` drew."
+  def discard(wid), do: :ets.delete(@table, wid)
 
   @doc """
   Marks the icon at `url` as asked for: true the first time (the caller fetches it), false
@@ -96,17 +99,17 @@ defmodule Browser.TabStrip do
   # -- painting (runs in the wx callback process) -------------------------------------------
 
   @doc false
-  def paint(panel) do
+  def paint(panel, wid) do
     dc = :wxPaintDC.new(panel)
     {width, _} = :wxWindow.getClientSize(panel)
-    draw(dc, width)
+    draw(dc, width, wid)
     :wxPaintDC.destroy(dc)
     :ok
   end
 
-  @doc "Draws the strip, `width` px wide, on `dc`."
-  def draw(dc, width) do
-    [{:tabs, titles, active}] = :ets.lookup(@table, :tabs)
+  @doc "Draws the strip of window `wid`, `width` px wide, on `dc`."
+  def draw(dc, width, wid) do
+    [{_, titles, active}] = :ets.lookup(@table, wid)
 
     colors = colors()
     Process.put(:tab_colors, colors)
