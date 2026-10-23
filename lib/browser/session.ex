@@ -4345,10 +4345,19 @@ defmodule Browser.Session do
   # pointer, or to a window of its own there
   defp finish_tab_drag(%{tab_out: true, tabs: [_, _ | _], popup: nil} = state) do
     {sx, sy} = :wx_misc.getMousePosition()
-    send_tab_away(%{state | tab_drag: nil, tab_out: false}, {sx - 60, sy - 12}, {sx, sy})
+    send_tab_away(%{back_in_strip(state) | tab_drag: nil}, {sx - 60, sy - 12}, {sx, sy})
   end
 
-  defp finish_tab_drag(state), do: %{state | tab_drag: nil, tab_out: false}
+  defp finish_tab_drag(state), do: %{back_in_strip(state) | tab_drag: nil}
+
+  # (the cursor and the status text of a drag that left the strip are put back)
+  defp back_in_strip(%{tab_out: true} = state) do
+    UI.set_tabs_cursor(state.ui, :arrow)
+    UI.set_status(state.ui, "")
+    %{state | tab_out: false}
+  end
+
+  defp back_in_strip(state), do: state
 
   # The active tab leaves this window, for the window whose strip is at `drop` (a screen
   # position) or else for a new window at `at`. A page that has loaded goes as it is: its
@@ -4785,11 +4794,21 @@ defmodule Browser.Session do
   # far from the strip (up or down): letting go moves the tab out of this window
   @pull_out 40
 
-  defp drag_tab(state, _x, y) when y < -@pull_out or y > 30 + @pull_out,
-    do: %{state | tab_out: true}
+  defp drag_tab(state, _x, y) when y < -@pull_out or y > 30 + @pull_out do
+    unless state.tab_out do
+      UI.set_tabs_cursor(state.ui, :hand)
+
+      UI.set_status(
+        state.ui,
+        "Let go to move this tab to a new window, or onto the tabs of another window"
+      )
+    end
+
+    %{state | tab_out: true}
+  end
 
   defp drag_tab(state, x, _y) do
-    state = %{state | tab_out: false}
+    state = back_in_strip(state)
     to = Browser.TabStrip.index_at(length(state.tabs), UI.tabs_width(state.ui), x)
     from = state.tab_drag
 
