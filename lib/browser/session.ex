@@ -520,6 +520,16 @@ defmodule Browser.Session do
     {:noreply, state}
   end
 
+  # View > Zen Mode (Ctrl+Shift+Z), View > Exit Zen Mode, and the close button of the zen window
+  def handle_info(wx(id: 5300, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, %{state | ui: UI.toggle_zen(state.ui)}}
+
+  def handle_info(wx(id: 5301, event: wxCommand(type: :command_button_clicked)), state) do
+    Browser.LocalStorage.flush()
+    System.halt(0)
+    {:noreply, state}
+  end
+
   # Develop > Developer Console
   def handle_info(wx(id: 5200, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, open_console(state)}

@@ -33,6 +33,19 @@ text, except on macOS, where it converts WebP with `sips`. Homebrew's `erlang` i
 wxWidgets 3.2. On macOS (into `~/.local`) and Debian/Ubuntu, `scripts/install-toolchain.sh` builds wxWidgets 3.3 and OTP's `wx` against it (OTP 29.1.1 needs a few
 patches for that, which the script applies).
 
+## Zen mode
+
+Zen mode hides all the browser controls: the title bar, the tab strip, the address bar and
+the status bar. Only the page stays on the screen. Three small controls remain:
+
+- A close button at the top right. It closes the browser.
+- A grey square left of the close button. Drag it to move the window.
+- A grey square at the bottom right. Drag it to change the size of the window.
+
+To start zen mode, choose View > Zen Mode, or press Cmd+Shift+Z on macOS (Ctrl+Shift+Z on
+other systems). To go back, choose File > Exit Zen Mode, or press the same keys again. The
+window keeps its position and size, and all the tabs stay open.
+
 ## Developer console
 
 Press Cmd+Option+J on macOS, or Ctrl+Shift+J on other systems. You can also choose

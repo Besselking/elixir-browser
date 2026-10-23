@@ -20,6 +20,9 @@ defmodule Browser.UI do
   @te_process_enter 1024
   @horizontal 4
   @vertical 8
+  @zen_id 5300
+  @zen_close_id 5301
+  @zen_drag :browser_zen_drag
 
   defstruct [
     :frame,
@@ -32,7 +35,8 @@ defmodule Browser.UI do
     :cursors,
     :toolbar,
     :suggest,
-    :tabs
+    :tabs,
+    :zen
   ]
 
   def build do
@@ -98,6 +102,10 @@ defmodule Browser.UI do
     :wxMenu.append(edit, 5032, ~c"Copy\tCtrl+C")
     :wxMenu.append(edit, 5035, ~c"Select All\tCtrl+A")
     :wxMenuBar.append(menubar, edit, ~c"Edit")
+
+    view = :wxMenu.new()
+    :wxMenu.append(view, @zen_id, ~c"Zen Mode\tCtrl+Shift+Z")
+    :wxMenuBar.append(menubar, view, ~c"View")
 
     develop = :wxMenu.new()
     :wxMenu.append(develop, 5200, Browser.ConsoleWindow.menu_label())
@@ -1857,7 +1865,157 @@ defmodule Browser.UI do
 
   def tabs_width(%{tabs: tabs}), do: tabs |> :wxWindow.getClientSize() |> elem(0)
 
-  def set_title(%{frame: f}, title), do: :wxFrame.setTitle(f, String.to_charlist(title))
+  def set_title(%{frame: f, zen: z}, title) do
+    :wxFrame.setTitle(f, String.to_charlist(title))
+    if z, do: :wxFrame.setTitle(z, String.to_charlist(title))
+  end
+
+  # -- zen mode ------------------------------------------------------------------------
+
+  @doc """
+  Zen mode: the page moves into a second window with no title bar, tab strip, address bar or
+  status bar. It shows only a close button, a grip to move the window (top right) and a grip to
+  resize it (bottom right). The same shortcut (and View > Exit Zen Mode) brings the normal
+  window back. Returns the new UI.
+  """
+  def toggle_zen(%{zen: nil} = ui), do: enter_zen(ui)
+  def toggle_zen(ui), do: exit_zen(ui)
+
+  def zen?(%{zen: zen}), do: zen != nil
+
+  defp enter_zen(%{frame: home, panel: panel} = ui) do
+    {x, y} = :wxWindow.getPosition(home)
+    {w, h} = :wxWindow.getSize(home)
+    # no caption, no border: wxBORDER_NONE
+    zen =
+      :wxFrame.new(:wx.null(), -1, ~c"Elixir Browser",
+        pos: {x, y},
+        size: {w, h},
+        style: 0x00200000
+      )
+
+    :wxWindow.setBackgroundColour(zen, {255, 255, 255})
+
+    # the panel leaves the normal window's sizer for the zen window's
+    :wxSizer.detach(:wxWindow.getSizer(home), panel)
+    true = :wxWindow.reparent(panel, zen)
+    col = :wxBoxSizer.new(@vertical)
+    :wxSizer.add(col, panel, proportion: 1, flag: @expand)
+    :wxWindow.setSizer(zen, col)
+
+    :wxFrame.setMenuBar(zen, zen_menubar())
+    :wxFrame.connect(zen, :close_window)
+    :wxFrame.connect(zen, :command_menu_selected)
+
+    close = :wxButton.new(zen, @zen_close_id, label: ~c"×", size: {30, 24})
+    :wxButton.connect(close, :command_button_clicked)
+    move = :wxPanel.new(zen, size: {26, 22})
+    :wxWindow.setBackgroundColour(move, {200, 200, 200})
+    :wxWindow.setToolTip(move, ~c"Drag to move the window")
+    grow = :wxPanel.new(zen, size: {16, 16})
+    :wxWindow.setBackgroundColour(grow, {200, 200, 200})
+    :wxWindow.setToolTip(grow, ~c"Drag to resize the window")
+    zen_drag(move, zen, :move)
+    zen_drag(grow, zen, :size)
+
+    place = fn -> zen_place(zen, close, move, grow) end
+    :wxFrame.connect(zen, :size, callback: fn _ev, _obj -> place.() end)
+
+    :wxFrame.show(zen)
+    :wxFrame.hide(home)
+    place.()
+    :wxWindow.layout(zen)
+    :wxWindow.setFocus(panel)
+    :wxWindow.refresh(panel)
+    %{ui | zen: zen}
+  end
+
+  defp exit_zen(%{frame: home, panel: panel, zen: zen} = ui) do
+    {x, y} = :wxWindow.getPosition(zen)
+    {w, h} = :wxWindow.getSize(zen)
+    :wxSizer.detach(:wxWindow.getSizer(zen), panel)
+    true = :wxWindow.reparent(panel, home)
+    # the panel was the third item of the normal window's column (tab strip, address bar, page)
+    :wxSizer.insert(:wxWindow.getSizer(home), 2, panel, proportion: 1, flag: @expand)
+    :wxWindow.move(home, {x, y})
+    :wxWindow.setSize(home, {w, h})
+    :wxFrame.show(home)
+    :wxWindow.layout(home)
+    :wxWindow.setFocus(panel)
+    :wxWindow.refresh(panel)
+    :wxFrame.destroy(zen)
+    %{ui | zen: nil}
+  end
+
+  defp zen_menubar do
+    file = :wxMenu.new()
+    :wxMenu.append(file, @zen_id, ~c"Exit Zen Mode\tCtrl+Shift+Z")
+    :wxMenu.appendSeparator(file)
+    :wxMenu.append(file, 5006, ~c"Quit\tCtrl+Q")
+    edit = :wxMenu.new()
+    :wxMenu.append(edit, 5031, ~c"Cut\tCtrl+X")
+    :wxMenu.append(edit, 5032, ~c"Copy\tCtrl+C")
+    :wxMenu.append(edit, 5035, ~c"Select All\tCtrl+A")
+    bar = :wxMenuBar.new()
+    :wxMenuBar.append(bar, file, ~c"File")
+    :wxMenuBar.append(bar, edit, ~c"Edit")
+    bar
+  end
+
+  # the controls float over the page: the close button and the move grip at the top right, the
+  # resize grip at the bottom right
+  defp zen_place(zen, close, move, grow) do
+    {w, h} = :wxWindow.getClientSize(zen)
+    :wxWindow.move(close, {w - 30, 0})
+    :wxWindow.move(move, {w - 56, 0})
+    :wxWindow.move(grow, {w - 16, h - 16})
+    for c <- [close, move, grow], do: :wxWindow.raise(c)
+    :ok
+  end
+
+  # A drag on `grip` moves the zen window or changes its size. The callbacks run in the wx
+  # thread; the position where the drag began is kept in an ETS table.
+  defp zen_drag(grip, zen, what) do
+    if :ets.whereis(@zen_drag) == :undefined,
+      do: :ets.new(@zen_drag, [:named_table, :public])
+
+    :wxPanel.connect(grip, :left_down,
+      callback: fn _ev, _obj ->
+        :ets.insert(
+          @zen_drag,
+          {what, :wx_misc.getMousePosition(), :wxWindow.getPosition(zen), :wxWindow.getSize(zen)}
+        )
+
+        :wxWindow.captureMouse(grip)
+      end
+    )
+
+    :wxPanel.connect(grip, :left_up,
+      callback: fn _ev, _obj ->
+        if :wxWindow.hasCapture(grip), do: :wxWindow.releaseMouse(grip)
+        :ets.delete(@zen_drag, what)
+      end
+    )
+
+    :wxPanel.connect(grip, :motion,
+      callback: fn _ev, _obj ->
+        case :ets.lookup(@zen_drag, what) do
+          [{_, {mx0, my0}, {x0, y0}, {w0, h0}}] ->
+            {mx, my} = :wx_misc.getMousePosition()
+            {dx, dy} = {mx - mx0, my - my0}
+
+            case what do
+              :move -> :wxWindow.move(zen, {x0 + dx, y0 + dy})
+              :size -> :wxWindow.setSize(zen, {max(w0 + dx, 200), max(h0 + dy, 120)})
+            end
+
+          [] ->
+            :ok
+        end
+      end
+    )
+  end
+
   @doc "Enables Develop > Stop Replaying Archive only while an archive is replayed."
   def sync_archive_menu(%{frame: f}) do
     :wxMenuBar.enable(:wxFrame.getMenuBar(f), 5203, Browser.Archive.mode() == :replay)
