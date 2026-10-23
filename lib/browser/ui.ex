@@ -21,7 +21,6 @@ defmodule Browser.UI do
   @horizontal 4
   @vertical 8
   @zen_id 5300
-  @zen_close_id 5301
   @zen_drag :browser_zen_drag
 
   defstruct [
@@ -1907,8 +1906,25 @@ defmodule Browser.UI do
     :wxFrame.connect(zen, :close_window)
     :wxFrame.connect(zen, :command_menu_selected)
 
-    close = :wxButton.new(zen, @zen_close_id, label: ~c"×", size: {30, 24})
-    :wxButton.connect(close, :command_button_clicked)
+    # a panel with a drawn cross: the glyph of a native button does not show on every toolkit
+    close = :wxPanel.new(zen, size: {30, 24})
+    :wxWindow.setBackgroundStyle(close, :wxe_util.get_const(:wxBG_STYLE_PAINT))
+    :wxWindow.setToolTip(close, ~c"Close")
+    me = self()
+
+    :wxPanel.connect(close, :paint,
+      callback: fn _ev, _obj ->
+        dc = :wxPaintDC.new(close)
+        :wxDC.setBackground(dc, :wxBrush.new({200, 60, 60}))
+        :wxDC.clear(dc)
+        :wxDC.setPen(dc, :wxPen.new({255, 255, 255}, width: 2))
+        :wxDC.drawLine(dc, {10, 6}, {20, 17})
+        :wxDC.drawLine(dc, {20, 6}, {10, 17})
+        :wxPaintDC.destroy(dc)
+      end
+    )
+
+    :wxPanel.connect(close, :left_up, callback: fn _ev, _obj -> send(me, :zen_close) end)
     move = :wxPanel.new(zen, size: {26, 22})
     :wxWindow.setBackgroundColour(move, {200, 200, 200})
     :wxWindow.setToolTip(move, ~c"Drag to move the window")

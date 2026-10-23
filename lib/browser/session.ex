@@ -531,7 +531,7 @@ defmodule Browser.Session do
   def handle_info(wx(id: 5300, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, %{state | ui: UI.toggle_zen(state.ui)}}
 
-  def handle_info(wx(id: 5301, event: wxCommand(type: :command_button_clicked)), state) do
+  def handle_info(:zen_close, state) do
     Browser.LocalStorage.flush()
     System.halt(0)
     {:noreply, state}
