@@ -717,10 +717,14 @@ defmodule Browser.UI do
     fn
       :content_height, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
         key = {:content_height, size, bold, italic, mono, Map.get(style, :family)}
+        quit? = quitting?()
 
         case :ets.lookup(cache, key) do
           [{_, h}] ->
             h
+
+          [] when quit? ->
+            size * 1.2
 
           [] ->
             :wxDC.setFont(dc, font(style))
@@ -731,10 +735,14 @@ defmodule Browser.UI do
 
       text, %{size: size, bold: bold, italic: italic, mono: mono} = style ->
         key = {text, size, bold, italic, mono, Map.get(style, :family)}
+        quit? = quitting?()
 
         case :ets.lookup(cache, key) do
           [{_, w}] ->
             w
+
+          [] when quit? ->
+            size * 0.5 * String.length(text)
 
           [] ->
             :wxDC.setFont(dc, font(style))
@@ -763,13 +771,23 @@ defmodule Browser.UI do
           units
 
         [] ->
-          :wx.set_env(wx_env)
-          units = measure_units(Map.put(style, :mono, Browser.Layout.mono_family?(family)))
-          :ets.insert(cache, {key, units})
-          units
+          if quitting?() do
+            {0.5, 0.5}
+          else
+            :wx.set_env(wx_env)
+            units = measure_units(Map.put(style, :mono, Browser.Layout.mono_family?(family)))
+            :ets.insert(cache, {key, units})
+            units
+          end
       end
     end
   end
+
+  @doc "True once the app is quitting: measuring stops, so no wx call is under way as wx ends."
+  def quitting?, do: :persistent_term.get({__MODULE__, :quitting}, false)
+
+  @doc "Marks the app as quitting (see `quitting?/0`)."
+  def quitting, do: :persistent_term.put({__MODULE__, :quitting}, true)
 
   # `font-size: 0` is real (icon fonts, hidden text); measure it as 1px so the ratios stay finite
   defp measure_units(%{size: size} = style) when size < 1, do: measure_units(%{style | size: 1})

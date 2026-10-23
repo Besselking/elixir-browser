@@ -48,6 +48,10 @@ defmodule Browser.Windows do
   follows after a few seconds.
   """
   def quit do
+    # background jobs (styling, layout) measure text through wx: they stop doing that first, and
+    # a call that is under way gets a moment to end
+    Browser.UI.quitting()
+    Process.sleep(300)
     Browser.LocalStorage.flush()
     spawn(fn -> Process.sleep(5000) && System.halt(0) end)
     System.stop(0)
