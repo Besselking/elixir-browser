@@ -20,7 +20,19 @@ defmodule Browser.JS.IframeTest do
     receive do
       {:js_async, ^pid, reply} -> for({:log, t} <- reply.console, do: t) ++ collect(pid)
     after
-      150 -> for {:log, t} <- Runtime.flush(pid).console, do: t
+      150 ->
+        # (a runtime that was slow, on a busy machine, has sent replies that are still on their
+        # way here when the flush is answered: they come before its reply, and before its logs)
+        flushed = Runtime.flush(pid)
+        drain(pid) ++ for {:log, t} <- flushed.console, do: t
+    end
+  end
+
+  defp drain(pid) do
+    receive do
+      {:js_async, ^pid, reply} -> for({:log, t} <- reply.console, do: t) ++ drain(pid)
+    after
+      0 -> []
     end
   end
 
