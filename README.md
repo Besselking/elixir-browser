@@ -38,7 +38,7 @@ patches for that, which the script applies).
 Zen mode hides all the browser controls: the title bar, the tab strip, the address bar and
 the status bar. Only the page stays on the screen. Three small controls remain:
 
-- A close button at the top right. It closes the browser.
+- A red close button with a cross at the top right. It closes the browser.
 - A grey square left of the close button. Drag it to move the window.
 - A grey square at the bottom right. Drag it to change the size of the window.
 
