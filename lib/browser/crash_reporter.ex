@@ -18,6 +18,17 @@ defmodule Browser.CrashReporter do
   @dedupe_ms 2_000
   @seen :browser_crash_seen
 
+  # the commit is read when this file is compiled, so the build must see a new commit:
+  # `.git/HEAD` changes on checkout, the branch file on commit, `packed-refs` after `git gc`
+  @git_files (case File.read(".git/HEAD") do
+                {:ok, "ref: " <> ref} ->
+                  [".git/HEAD", Path.join(".git", String.trim(ref)), ".git/packed-refs"]
+
+                _ ->
+                  [".git/HEAD"]
+              end)
+  for file <- @git_files, do: @external_resource(file)
+
   @commit (try do
              case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
                {sha, 0} -> String.trim(sha)
