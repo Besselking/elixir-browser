@@ -568,11 +568,29 @@ defmodule Browser.UI do
 
         # wxWidgets 3.3 invalidates the font when the face is unknown; keep the family's font then
         if face && not :wxFont.setFaceName(f, face), do: :wxFont.setFamily(f, wx_family)
+        f = valid_font(f, style)
         Process.put(key, f)
         f
 
       f ->
         f
+    end
+  end
+
+  # wxSYS_DEFAULT_GUI_FONT
+  @wx_sys_default_gui_font 17
+
+  # A font that wx cannot use (an odd size or face) makes the next text measure or draw fail
+  # with an assert, so such a font is noted for the crash report and replaced.
+  defp valid_font(f, style) do
+    if :wxFont.isOk(f) do
+      f
+    else
+      Browser.CrashReporter.breadcrumb(
+        {:invalid_font, Map.take(style, [:size, :bold, :italic, :mono, :family])}
+      )
+
+      :wxSystemSettings.getFont(@wx_sys_default_gui_font)
     end
   end
 
