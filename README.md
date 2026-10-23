@@ -36,11 +36,14 @@ patches for that, which the script applies).
 ## Zen mode
 
 Zen mode hides all the browser controls: the title bar, the tab strip, the address bar and
-the status bar. Only the page stays on the screen. Three small controls remain:
+the status bar. Only the page stays on the screen, with a thin grey border. Three things
+remain:
 
-- A red close button with a cross at the top right. It closes the browser.
-- A grey square left of the close button. Drag it to move the window.
-- A grey square at the bottom right. Drag it to change the size of the window.
+- A red close button. It is at the top left on macOS and at the top right on other systems.
+  It closes the browser. A cross shows when the pointer is over it.
+- A short handle at the top middle. Drag it to move the window. The pointer is an open hand,
+  and a closed hand while you drag.
+- The edges of the window. Drag an edge or a corner to change the size of the window.
 
 To start zen mode, choose View > Zen Mode, or press Cmd+Shift+Z on macOS (Ctrl+Shift+Z on
 other systems). To go back, choose File > Exit Zen Mode, or press the same keys again. The
