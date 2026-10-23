@@ -40,6 +40,11 @@ shows the start page and has its own tabs, history and address bar. It opens a l
 to the right of the window that you used. All windows share the cookies, the caches, local
 storage and the visited pages that the address bar suggests.
 
+To move a tab to its own window, choose File > Move Tab to New Window. The new window loads the
+page again and keeps the history of the tab. It does not keep the scroll position, the text that
+you typed in forms, or the state of the scripts. This item does nothing when the window has only
+one tab.
+
 Close a window with its close button. When you close the last tab of a window, the window
 closes. When you close the last window, the browser quits.
 
