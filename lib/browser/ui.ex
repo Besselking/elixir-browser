@@ -2061,14 +2061,11 @@ defmodule Browser.UI do
   so the bytes pass through a temporary one.
   """
   def load_image(url, bytes, format) do
-    path =
-      Path.join(System.tmp_dir!(), "browser-pic-#{System.unique_integer([:positive])}.#{format}")
+    case read_image(bytes, format) do
+      nil ->
+        :error
 
-    try do
-      File.write!(path, bytes)
-      image = :wxImage.new(String.to_charlist(path))
-
-      if :wxImage.isOk(image) do
+      image ->
         {w, h} = {:wxImage.getWidth(image), :wxImage.getHeight(image)}
         bitmap = :wxBitmap.new(image)
         :wxImage.destroy(image)
@@ -2077,14 +2074,101 @@ defmodule Browser.UI do
         :ets.insert(@images, {url, bitmap})
         for {_, previous} <- old, do: :wxBitmap.destroy(previous)
         if w > 0 and h > 0, do: {:ok, w, h}, else: :error
+    end
+  end
+
+  # the decoded wxImage of `bytes`, or nil
+  defp read_image(bytes, format) do
+    path =
+      Path.join(System.tmp_dir!(), "browser-pic-#{System.unique_integer([:positive])}.#{format}")
+
+    try do
+      File.write!(path, bytes)
+      image = :wxImage.new(String.to_charlist(path))
+
+      if :wxImage.isOk(image) do
+        image
       else
-        :error
+        :wxImage.destroy(image)
+        nil
       end
     rescue
-      _ -> :error
+      _ -> nil
     after
       File.rm(path)
     end
+  end
+
+  @doc """
+  The bitmap a tab shows for a decoded icon (`Browser.Favicon.decode/2`), scaled to fit
+  `Browser.Favicon.size/0` px, or nil.
+  """
+  def icon_bitmap(icon) do
+    side = Browser.Favicon.size()
+
+    image =
+      case icon do
+        {:image, bytes, format} -> read_image(bytes, format)
+        {:rgba, w, h, rgb, alpha} -> :wxImage.new(w, h, rgb, alpha)
+        {:svg, scene} -> svg_image(scene, side)
+        _ -> nil
+      end
+
+    if image do
+      {w, h} = {:wxImage.getWidth(image), :wxImage.getHeight(image)}
+
+      if w > 0 and h > 0 and (w != side or h != side) do
+        k = side / max(w, h)
+        quality = :wxe_util.get_const(:wxIMAGE_QUALITY_HIGH)
+        :wxImage.rescale(image, max(round(w * k), 1), max(round(h * k), 1), quality: quality)
+      end
+
+      bitmap = :wxBitmap.new(image)
+      :wxImage.destroy(image)
+      bitmap
+    end
+  rescue
+    _ -> nil
+  end
+
+  # A picture drawn on a memory DC has no alpha of its own: it is drawn on white and on black,
+  # and how much the two differ says how much of the background shows through.
+  defp svg_image(scene, side) do
+    ops = Browser.Svg.render(scene, side, side)
+    [white, black] = for bg <- [{255, 255, 255}, {0, 0, 0}], do: svg_pixels(ops, side, bg)
+
+    {rgb, alpha} =
+      for(
+        {<<wr, wg, wb>>, <<br, bg, bb>>} <- Enum.zip(chunks(white), chunks(black)),
+        do: unmix(wr, wg, wb, br, bg, bb)
+      )
+      |> Enum.unzip()
+
+    :wxImage.new(side, side, IO.iodata_to_binary(rgb), :erlang.list_to_binary(alpha))
+  end
+
+  defp chunks(rgb), do: for(<<px::binary-3 <- rgb>>, do: px)
+
+  defp unmix(wr, wg, wb, br, bg, bb) do
+    a = 255 - Enum.max([wr - br, wg - bg, wb - bb, 0])
+    c = fn v -> if a == 0, do: 0, else: min(round(v * 255 / a), 255) end
+    {<<c.(br), c.(bg), c.(bb)>>, a}
+  end
+
+  defp svg_pixels(ops, side, background) do
+    bitmap = :wxBitmap.new(side, side)
+    dc = :wxMemoryDC.new(bitmap)
+    :wxDC.setBackground(dc, :wxBrush.new(background))
+    :wxDC.clear(dc)
+    gc = :wxGraphicsContext.create(dc)
+    draw_svg(gc, ops, 0, 0)
+    :wxGraphicsContext.destroy(gc)
+    :wxMemoryDC.destroy(dc)
+    image = :wxBitmap.convertToImage(bitmap)
+    data = :wxImage.getData(image)
+    :wxImage.destroy(image)
+    :wxBitmap.destroy(bitmap)
+    data
   end
 
   # -- controls --------------------------------------------------------------------
