@@ -3450,15 +3450,26 @@ defmodule Browser.Session do
         state.measure,
         UI.client_height(state.ui),
         scrollers: true,
-        boxes: state.js != nil,
+        boxes: state.js != nil or (state.page != nil and Page.cq?(state.page)),
         metrics: true,
         focus: focus_option(state),
         images: state.images,
         svg_defs: if(state.page, do: state.page.svg_defs, else: %{})
       )
 
-    apply_layout(state, items, height, width, mode)
+    state = apply_layout(state, items, height, width, mode)
+    recheck_containers(state, items)
   end
+
+  # What changed in the page (a panel that opens, a picture that arrives) can resize a query
+  # container: the page is styled again for the new sizes, in a job of its own.
+  defp recheck_containers(%{page: %Page{} = page, layout_job: nil} = state, items) do
+    if Page.cq?(page) and Browser.Container.sizes(page.pruned || [], items) != page.cq_sizes,
+      do: start_layout_job(state),
+      else: state
+  end
+
+  defp recheck_containers(state, _items), do: state
 
   defp start_layout_job(state) do
     state = cancel_layout_job(state)
