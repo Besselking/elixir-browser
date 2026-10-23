@@ -722,6 +722,59 @@ defmodule Browser.JS.WebAPI do
 
     // ── window ───────────────────────────────────────────────
     def("cancelAnimationFrame", function (id) { clearTimeout(id); });
+    // ── popups ──────────────────────────────────────────────
+    // `window.open(url, name, features)` with features opens a window of its own (the session
+    // makes it) and returns a handle. Messages between a popup and its opener travel as JSON
+    // (`__popup("post", ...)`, `__popup("post_opener", ...)`): the session hands them to the
+    // other window's runtime as `__popup_message` events, which turn into `message` events.
+    var popups = {}, popupNames = {};
+    var plainOpen = g.open;
+    function popupEnvelope(data, target) {
+      if (target && typeof target === "object") target = target.targetOrigin;
+      return JSON.stringify({ d: data, o: curLoc().origin, t: target == null ? "*" : String(target) });
+    }
+    function popupDeliver(ev, source) {
+      var env;
+      try { env = JSON.parse(ev.payload); } catch (err) { return; }
+      var here = curLoc().origin;
+      if (env.t !== "*" && env.t !== here && !(env.t === "/" && env.o === here)) return;
+      var e = new Event("message");
+      e.data = env.d; e.origin = env.o; e.source = source;
+      g.dispatchEvent(e);
+    }
+    g.addEventListener("__popup_message", function (ev) {
+      popupDeliver(ev, ev.from === "opener" ? g.opener : (popups[ev.from] || null));
+    });
+    g.addEventListener("__popup_closed", function (ev) {
+      if (popups[ev.id]) popups[ev.id].closed = true;
+    });
+    g.open = function open(url, target, features) {
+      if (features == null || String(features) === "") return plainOpen.apply(g, arguments);
+      var name = target == null ? "" : String(target);
+      var href = url == null || String(url) === "" ? "about:blank" : new URL(String(url), curLoc().href).href;
+      var known = name && name !== "_blank" ? popupNames[name] : null;
+      if (known && !known.closed) { __popup("navigate", known._id, href); return known; }
+      var id = "p" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      var handle = {
+        _id: id, closed: false, name: name,
+        focus: function () {}, blur: function () {},
+        close: function () { if (!this.closed) __popup("close", id); },
+        postMessage: function (data, target) {
+          if (!this.closed) __popup("post", id, popupEnvelope(data, target));
+        }
+      };
+      popups[id] = handle;
+      if (name) popupNames[name] = handle;
+      __popup("open", id, href, String(features), name);
+      return handle;
+    };
+    if (__popup("info")) {
+      g.opener = {
+        closed: false, focus: function () {}, blur: function () {},
+        postMessage: function (data, target) { __popup("post_opener", "", popupEnvelope(data, target)); }
+      };
+      g.close = function close() { __popup("self_close"); };
+    }
     def("postMessage", function (data, origin) { setTimeout(function () { var e = new Event("message"); e.data = data; e.origin = curLoc().origin; e.source = g; g.dispatchEvent(e); }, 0); });
     // noModule reflects the nomodule attribute. A page asks `"noModule" in
     // HTMLScriptElement.prototype` to know that the browser runs modules; a script with it is

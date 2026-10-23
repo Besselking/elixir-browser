@@ -156,6 +156,10 @@ defmodule Browser.Session do
       scripts_pending: false,
       # a script runtime started while the tab was behind others, taken over when it is shown
       adopt_js: nil,
+      # a popup window (`window.open` with features): `%{id, opener: session, opener_js: runtime}`
+      popup: opts[:popup],
+      # the popups that pages of this window opened: id => the popup's session
+      popups: %{},
       # tabs: the parked state of each (the active one's is the state itself, see `@tab_keys`)
       tabs: [%{}],
       active: 0,
@@ -526,6 +530,29 @@ defmodule Browser.Session do
 
   def handle_info(wx(event: {:wxClose, :close_window}), state), do: close_window(state)
   def handle_info(:close_window, state), do: close_window(state)
+
+  # a message between a popup and its opener, for the runtime of the page (`js`, or this
+  # window's own)
+  def handle_info({:popup_message, from, payload, js}, state) do
+    js = js || state.js
+
+    if is_pid(js) and Process.alive?(js),
+      do:
+        Browser.JS.Runtime.window_event_async(js, "__popup_message", %{
+          "from" => from,
+          "payload" => payload
+        })
+
+    {:noreply, state}
+  end
+
+  # a popup that this window's pages opened is closed
+  def handle_info({:popup_closed, id, js}, state) do
+    if is_pid(js) and Process.alive?(js),
+      do: Browser.JS.Runtime.window_event_async(js, "__popup_closed", %{"id" => id})
+
+    {:noreply, %{state | popups: Map.delete(state.popups, id)}}
+  end
 
   # another window recorded a visit: the visited pages are shared
   def handle_info({:visits, visits}, state), do: {:noreply, %{state | visits: visits}}
@@ -2571,6 +2598,7 @@ defmodule Browser.Session do
         width: state.width,
         height: UI.client_height(state.ui),
         history_before: length(state.history.back),
+        popup: state.popup && state.popup.id,
         layout_now: true,
         fetch: &Fetch.load(&1, initiator: initiator),
         request: &Fetch.load(&1, [initiator: initiator] ++ &2),
@@ -3077,6 +3105,41 @@ defmodule Browser.Session do
   end
 
   defp js_effect({:navigate, url, mode}, state), do: load(state, url, mode, initiator: state.url)
+
+  # `window.open(url, name, features)`: a window of its own for the page
+  defp js_effect({:popup, "open", id, url, features, _name}, state) do
+    {:ok, pid} =
+      Windows.open(
+        url: url,
+        popup: %{id: id, opener: self(), opener_js: state.js},
+        geometry: popup_geometry(features, state.ui)
+      )
+
+    %{state | popups: Map.put(state.popups, id, pid)}
+  end
+
+  # `popup.postMessage(...)`, `popup.close()` and loading another address in a named popup
+  defp js_effect({:popup, op, id, a, _, _}, state) when op in ["post", "close", "navigate"] do
+    case state.popups[id] do
+      nil -> :ok
+      pid when op == "post" -> send(pid, {:popup_message, "opener", a, nil})
+      pid when op == "close" -> send(pid, :close_window)
+      pid -> GenServer.cast(pid, {:navigate, a})
+    end
+
+    state
+  end
+
+  # in a popup: `opener.postMessage(...)` and `window.close()`
+  defp js_effect({:popup, "post_opener", _, payload, _, _}, %{popup: %{} = popup} = state) do
+    send(popup.opener, {:popup_message, popup.id, payload, popup.opener_js})
+    state
+  end
+
+  defp js_effect({:popup, "self_close", _, _, _, _}, %{popup: %{}} = state) do
+    send(self(), :close_window)
+    state
+  end
 
   # `location.hash = ...`: an entry in the page's history, and the page scrolls to the fragment
   defp js_effect({:hash, url, mode}, state) do
@@ -4199,12 +4262,37 @@ defmodule Browser.Session do
 
   # -- windows -----------------------------------------------------------------------
 
+  # where a popup goes and how big its page is, from the features of `window.open`
+  # (`width=400,height=300,left=10,top=20`; `innerWidth` and `innerHeight` too)
+  defp popup_geometry(features, ui) do
+    values =
+      for part <- String.split(features, [",", " ", ";"], trim: true),
+          [key, value] <- [String.split(part, "=", parts: 2)],
+          {n, _} <- [Integer.parse(String.trim(value))],
+          into: %{},
+          do: {key |> String.trim() |> String.downcase(), n}
+
+    size = fn keys, default ->
+      keys |> Enum.find_value(&values[&1]) |> then(&((&1 || default) |> max(100) |> min(4000)))
+    end
+
+    {nx, ny} = UI.next_window_position(ui)
+
+    %{
+      size: {size.(["width", "innerwidth"], 500), size.(["height", "innerheight"], 500)},
+      at: {values["left"] || values["screenx"] || nx, values["top"] || values["screeny"] || ny}
+    }
+  end
+
   # The last window quits the app. An orderly shutdown frees the toolkit's objects while its
   # event loop is still running, which crashes the wx driver (a "quit unexpectedly" dialog on
   # macOS); only localStorage may still be waiting to be written, so leave straight away.
   # Another window closes alone: its scripts, players and layout process stop, then the frame
   # (and the console and network windows that belong to it) is destroyed.
   defp close_window(state) do
+    if state.popup,
+      do: send(state.popup.opener, {:popup_closed, state.popup.id, state.popup.opener_js})
+
     case Windows.closing(self()) do
       :last ->
         Browser.LocalStorage.flush()
@@ -4230,6 +4318,8 @@ defmodule Browser.Session do
   # -- tabs ------------------------------------------------------------------------
 
   defp move_tab_to_window(%{tabs: [_]} = state), do: state
+
+  defp move_tab_to_window(%{popup: %{}} = state), do: state
 
   defp move_tab_to_window(%{history: %{current: nil}} = state), do: state
 
@@ -4488,6 +4578,7 @@ defmodule Browser.Session do
         width: state.width,
         height: UI.client_height(state.ui),
         history_before: history_before,
+        popup: state.popup && state.popup.id,
         layout_now: false,
         hidden: true,
         fetch: &Fetch.load(&1, initiator: initiator),
@@ -4503,6 +4594,12 @@ defmodule Browser.Session do
     else
       _ -> tab
     end
+  end
+
+  # a popup has no tab strip: what would open a tab opens a window
+  defp new_tab(%{popup: %{}} = state) do
+    Windows.open()
+    state
   end
 
   defp new_tab(state) do
@@ -4527,6 +4624,11 @@ defmodule Browser.Session do
   end
 
   # a page opened in a new tab that is shown at once (`target=\"_blank\"`, `window.open`)
+  defp open_foreground_tab(%{popup: %{}} = state, url) do
+    Windows.open(url: url)
+    state
+  end
+
   defp open_foreground_tab(state, url) do
     from = state.url
     state = park(state)
@@ -4538,6 +4640,11 @@ defmodule Browser.Session do
   end
 
   # a link opened in a new tab behind this one: it loads in the background
+  defp open_link_tab(%{popup: %{}} = state, href) do
+    Windows.open(url: Fetch.resolve(base(state), href))
+    state
+  end
+
   defp open_link_tab(state, href) do
     url = Fetch.resolve(base(state), href)
     opts = [initiator: state.url]

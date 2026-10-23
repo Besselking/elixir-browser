@@ -118,6 +118,12 @@ defmodule Browser.JS.Runtime do
   """
   def hover_async(pid, old, new), do: send(pid, {:hover_async, old, new})
 
+  @doc """
+  Fires `type` at the window without waiting, with `init` as the event's properties (the popup
+  messages of `Browser.Session`); the reply comes as an async reply.
+  """
+  def window_event_async(pid, type, init), do: send(pid, {:window_event, type, init})
+
   @doc "Runs every pending timer at once (virtual time), for tests; returns the reply."
   def flush(pid), do: call(pid, :flush)
 
@@ -405,6 +411,13 @@ defmodule Browser.JS.Runtime do
         Process.put(:js_now, elapsed(t0))
         Process.put(:js_steps, @steps)
         reply = handle({:hover, old, new})
+        if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
+        loop(t0)
+
+      {:window_event, type, init} ->
+        Process.put(:js_now, elapsed(t0))
+        Process.put(:js_steps, @steps)
+        reply = handle({:dispatch, :window, type, init, %{}})
         if async?(reply), do: send(Process.get(:rt_info).owner, {:js_async, self(), reply})
         loop(t0)
 

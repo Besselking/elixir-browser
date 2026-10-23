@@ -45,6 +45,14 @@ page again and keeps the history of the tab. It does not keep the scroll positio
 you typed in forms, or the state of the scripts. This item does nothing when the window has only
 one tab.
 
+A page can open a popup window with `window.open(url, name, features)`, for example
+`window.open("/login", "login", "width=480,height=640")`. A popup has no tab strip and no
+address bar. The page gets a handle with `close()`, `closed` and `postMessage()`. In the popup,
+`window.opener.postMessage()` sends a message back to the page that opened it, and
+`window.close()` closes the popup. The data of a message goes through JSON, so it can hold
+numbers, strings, arrays and plain objects, but not a `Date`, a `Map` or an `ArrayBuffer`.
+Without a features string, `window.open` opens a new tab.
+
 Close a window with its close button. When you close the last tab of a window, the window
 closes. When you close the last window, the browser quits.
 
