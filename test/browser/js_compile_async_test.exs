@@ -939,12 +939,14 @@ defmodule Browser.JS.CompileAsyncTest do
       for {{n, _, _}, _, on} <- pairs, do: assert(on.compiled == 0, "#{n} compiled at :off")
     end
 
+    @tag :slow
     test "the whole corpus at every level" do
       # Levels 1 to 3 mix rewritten functions and old-path functions in one program.
       for level <- @levels -- [4],
           do: assert_same(both(@corpus, level: level), "at #{inspect(level)}")
     end
 
+    @tag :slow
     test "the whole corpus at :off and 1 with the forced collections" do
       for level <- [:off, 1],
           do: assert_same(both(@corpus, level: level, gc: true), "at #{level}")

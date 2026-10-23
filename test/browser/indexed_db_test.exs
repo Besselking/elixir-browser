@@ -49,6 +49,7 @@ defmodule Browser.IndexedDBTest do
     assert DB.names("http://a.test", s) == []
   end
 
+  @tag :slow
   test "a database that is too big is refused" do
     {s, _} = store()
     big = String.duplicate("x", 257 * 1024 * 1024)

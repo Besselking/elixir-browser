@@ -908,17 +908,19 @@ defmodule Browser.Backgrounds do
   says, as far as it intersects `clip` (`{x, y, w, h}`), at most #{@max_tiles}.
   """
   def tiles({tx, ty, tw, th}, {rx, ry}, {cx, cy, cw, ch}) do
-    xs = starts(tx, tw, cx, cw, rx)
-    ys = starts(ty, th, cy, ch, ry)
+    xs = starts(tx, tw, cx, cw, rx, @max_tiles)
+    # Only as many rows as the cap can use: a 1px tile in a big box would else build every tile
+    # first.
+    ys = starts(ty, th, cy, ch, ry, div(@max_tiles + length(xs) - 1, max(length(xs), 1)))
 
     for(y <- ys, x <- xs, do: {x, y}) |> Enum.take(@max_tiles)
   end
 
-  defp starts(t, _size, _c, _csize, :no_repeat), do: [t]
+  defp starts(t, _size, _c, _csize, :no_repeat, _max), do: [t]
 
-  defp starts(t, size, c, csize, :repeat) do
+  defp starts(t, size, c, csize, :repeat, max) do
     first = t - ceil_div(t - c, size) * size
-    Enum.take_while(Stream.iterate(first, &(&1 + size)), &(&1 < c + csize))
+    Enum.take_while(Stream.iterate(first, &(&1 + size)), &(&1 < c + csize)) |> Enum.take(max)
   end
 
   defp ceil_div(a, b), do: -Integer.floor_div(-a, b)

@@ -108,6 +108,7 @@ defmodule Browser.JS.ClassTokensTest do
   """
 
   for seed <- [3, 11, 500, 7777] do
+    @tag :slow
     test "class selectors and classList follow every change of the classes (seed #{seed})" do
       {logs, errors} = run(String.replace(@oracle, "SEED", to_string(unquote(seed))), @body)
       assert errors == []
