@@ -95,6 +95,7 @@ defmodule Browser.UI do
     :wxMenu.append(file, 5103, ~c"New Window\tCtrl+N")
     :wxMenu.append(file, 5100, ~c"New Tab\tCtrl+T")
     :wxMenu.append(file, 5101, ~c"Close Tab\tCtrl+W")
+    :wxMenu.append(file, 5104, ~c"Move Tab to New Window")
     :wxMenu.append(file, 5102, ~c"Reopen Closed Tab\tCtrl+Shift+T")
     :wxMenu.appendSeparator(file)
     :wxMenu.append(file, 5006, ~c"Quit\tCtrl+Q")

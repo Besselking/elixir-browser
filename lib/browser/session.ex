@@ -77,7 +77,7 @@ defmodule Browser.Session do
       page_edits: %{},
       # the page's JavaScript runtime, when it has scripts
       js: nil,
-      history: History.new(),
+      history: opts[:history] || History.new(),
       # pages visited, kept between runs, and what the address bar is suggesting from them:
       # `%{items: [{url, title}], idx: highlighted or -1, typed: what the user typed}`
       visits: Visits.load(),
@@ -182,11 +182,16 @@ defmodule Browser.Session do
     }
 
     publish_tabs(state)
-    {:ok, state, {:continue, {:go, opts[:url] || Browser.home()}}}
+    # a tab moved here from another window brings its history and shows its current page
+    case opts[:history] do
+      %{current: url} when url != nil -> {:ok, state, {:continue, {:restore, url}}}
+      _ -> {:ok, state, {:continue, {:go, opts[:url] || Browser.home()}}}
+    end
   end
 
   @impl true
   def handle_continue({:go, url}, state), do: {:noreply, load(state, Fetch.normalize(url), :push)}
+  def handle_continue({:restore, url}, state), do: {:noreply, load(state, url, :history)}
 
   @impl true
   def handle_cast({:navigate, url}, state),
@@ -659,6 +664,11 @@ defmodule Browser.Session do
   # File > New Tab and Close Tab
   def handle_info(wx(id: 5100, event: wxCommand(type: :command_menu_selected)), state),
     do: {:noreply, new_tab(state)}
+
+  # File > Move Tab to New Window: the page is loaded again there (its history comes along;
+  # scroll, form edits and the script state do not)
+  def handle_info(wx(id: 5104, event: wxCommand(type: :command_menu_selected)), state),
+    do: {:noreply, move_tab_to_window(state)}
 
   # File > New Window
   def handle_info(wx(id: 5103, event: wxCommand(type: :command_menu_selected)), state) do
@@ -4211,6 +4221,17 @@ defmodule Browser.Session do
   end
 
   # -- tabs ------------------------------------------------------------------------
+
+  defp move_tab_to_window(%{tabs: [_]} = state), do: state
+
+  defp move_tab_to_window(%{history: %{current: nil}} = state), do: state
+
+  defp move_tab_to_window(state) do
+    Windows.open(at: UI.next_window_position(state.ui), history: state.history)
+    closed = state.closed
+    # (the tab is not closed, it moved: Ctrl+Shift+T does not bring it back here)
+    %{close_tab(state, state.active) | closed: closed}
+  end
 
   # What belongs to one tab. Everything else (the window, the jobs and timers, the address
   # bar's suggestions, the visited pages) is shared; a tab that is not shown has none of
