@@ -449,6 +449,10 @@ defmodule Browser.Style do
   # a rule in an `@container` block depends on the size of an ancestor: such a page is styled
   # again when the sizes change, and its elements do not share what they declare
   defp note_container(idx, %{cq: _}), do: Map.put(idx, :cq, true)
+
+  defp note_container(idx, %{cqu: true}),
+    do: idx |> Map.put(:cq, true) |> Map.put(:cq_units, true)
+
   defp note_container(idx, _rule), do: idx
 
   @doc "Convenience: `parse_sheets/1` followed by `index_rules/2`."
@@ -1280,6 +1284,15 @@ defmodule Browser.Style do
   defp table_ancestor(%{parent: %{tag: "table"} = table}), do: table
   defp table_ancestor(%{parent: parent}), do: table_ancestor(parent)
   defp table_ancestor(_), do: nil
+
+  @doc "Tells if the CSS text `css` has a length in container units (`cqw`, `cqh`, ...)."
+  def cq_unit?(css),
+    do:
+      String.contains?(css, "cq") and
+        Regex.match?(re(~r/\d(cqw|cqh|cqi|cqb|cqmin|cqmax)\b/i), css)
+
+  @doc "The index with lengths in container units switched on (for a `style` attribute that has one)."
+  def with_cq_units(idx), do: idx |> Map.put(:cq, true) |> Map.put(:cq_units, true)
 
   @doc "Tells if the CSS text `css` has a length in viewport units."
   def viewport_unit?(css),
@@ -2249,6 +2262,9 @@ defmodule Browser.Style do
 
     decl = declared(idx, ctx, pseudo)
 
+    # (a length in container units: the size of the nearest container, for `viewport_unit/2`)
+    if Map.get(idx, :cq_units), do: Process.put(:style_cq_box, Browser.Container.box(parent))
+
     case Process.get(:style_share) do
       nil ->
         compute_declared(idx, ctx.tag, decl, pc, parent_custom, parent_root)
@@ -2257,7 +2273,9 @@ defmodule Browser.Style do
         # (the parent's custom properties are named by their number: they can be hundreds, and
         # a key is hashed whole)
         custom_key = if parent == nil, do: nil, else: Map.get(parent, :custom_id, parent_custom)
-        key = {decl, ctx.tag == "table", pc, custom_key, parent_root}
+        # (what a container unit is depends on the container, so it is part of the key)
+        key =
+          {decl, ctx.tag == "table", pc, custom_key, parent_root, Process.get(:style_cq_box)}
 
         case shared do
           %{^key => result} ->
@@ -2302,13 +2320,19 @@ defmodule Browser.Style do
     resolved = resolve_vars(normals, custom)
 
     pfs = Map.get(inherited, "font-size", @default_fs)
+    {vw, vh} = Map.get(idx, :viewport, {1024, 768})
+    {cqw, cqh} = container_units(idx, vw, vh)
 
     fs =
       case resolved do
         %{"font-size" => v} ->
-          font_size(v, pfs, parent_root || @default_fs, fn ->
-            font_units(idx, %{}, inherited, pfs)
-          end) || pfs
+          font_size(
+            v,
+            pfs,
+            parent_root || @default_fs,
+            fn -> font_units(idx, %{}, inherited, pfs) end,
+            %{vw: vw / 100, vh: vh / 100, cqw: cqw, cqh: cqh}
+          ) || pfs
 
         _ ->
           pfs
@@ -2320,7 +2344,6 @@ defmodule Browser.Style do
         _ -> inherited["color"]
       end
 
-    {vw, vh} = Map.get(idx, :viewport, {1024, 768})
     {ex, ch} = font_units(idx, resolved, inherited, fs)
 
     env = %{
@@ -2332,6 +2355,8 @@ defmodule Browser.Style do
       ex: ex,
       ch: ch
     }
+
+    env = if cqw, do: Map.merge(env, %{cqw: cqw, cqh: cqh}), else: env
 
     typed =
       for {k, v} <- resolved, k not in ["font-size", "color"], reduce: %{} do
@@ -3103,7 +3128,19 @@ defmodule Browser.Style do
     "xxx-large" => 48.0
   }
 
-  defp font_size(v, pfs, root, units) do
+  # one container unit in px (nil when the page has none): the nearest container's hundredth
+  defp container_units(idx, vw, vh) do
+    if Map.get(idx, :cq_units) do
+      case Process.get(:style_cq_box) do
+        {w, h, type} -> {w / 100, if(type == "size", do: h / 100, else: vh / 100)}
+        nil -> {vw / 100, vh / 100}
+      end
+    else
+      {nil, nil}
+    end
+  end
+
+  defp font_size(v, pfs, root, units, viewport) do
     cond do
       Map.has_key?(@font_keywords, v) ->
         @font_keywords[v]
@@ -3123,10 +3160,10 @@ defmodule Browser.Style do
       # (an `ex` or `ch` in a font size is of the parent's font)
       Regex.match?(re(~r/(ex|ch)\b/i), v) ->
         {ex, ch} = units.()
-        length(v, %{fs: pfs, root: root, ex: ex, ch: ch})
+        length(v, Map.merge(viewport, %{fs: pfs, root: root, ex: ex, ch: ch}))
 
       true ->
-        length(v, %{fs: pfs, root: root})
+        length(v, Map.merge(viewport, %{fs: pfs, root: root}))
     end
   end
 
@@ -3181,6 +3218,21 @@ defmodule Browser.Style do
       unit in ["vh", "dvh", "svh", "lvh"] -> vh
       unit == "vmin" -> min(vw, vh)
       unit == "vmax" -> max(vw, vh)
+      true -> container_unit(unit, env)
+    end
+  end
+
+  # one container unit in px: 1cqw is a hundredth of the width of the nearest container
+  defp container_unit(unit, env) do
+    cqw = Map.get(env, :cqw)
+    cqh = Map.get(env, :cqh)
+
+    cond do
+      cqw == nil -> nil
+      unit in ["cqw", "cqi"] -> cqw
+      unit in ["cqh", "cqb"] -> cqh
+      unit == "cqmin" -> min(cqw, cqh)
+      unit == "cqmax" -> max(cqw, cqh)
       true -> nil
     end
   end

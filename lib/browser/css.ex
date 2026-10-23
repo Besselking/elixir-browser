@@ -42,6 +42,7 @@ defmodule Browser.CSS do
     |> blocks([], [])
     |> Enum.flat_map(fn {prelude, body, conds} ->
       decls = parse_declarations(body)
+      cqu? = Enum.any?(decls, fn {_, v, _} -> cq_unit?(v) end)
 
       for sel <- split_top(prelude, ?,),
           {:ok, %{parts: parts, spec: spec, pseudo: pseudo}} <- [parse_selector(sel)] do
@@ -58,6 +59,8 @@ defmodule Browser.CSS do
           pseudo: pseudo
         }
         |> then(&if(:registered in conds, do: Map.put(&1, :registered, true), else: &1))
+        # (`cqu`: a length in container units, which depends on the size of an ancestor)
+        |> then(&if(cqu?, do: Map.put(&1, :cqu, true), else: &1))
         |> then(fn rule ->
           case for({:container, name, query} <- conds, do: {name, query}) do
             [] -> rule
@@ -67,6 +70,13 @@ defmodule Browser.CSS do
       end
     end)
   end
+
+  defp cq_unit?(value) when is_binary(value) do
+    String.contains?(value, "cq") and
+      Regex.match?(re(~r/\d(cqw|cqh|cqi|cqb|cqmin|cqmax)\b/i), value)
+  end
+
+  defp cq_unit?(_value), do: false
 
   # `String.replace_invalid/1` gives a valid text back as it is, and `String.valid?/1` costs a
   # sixth of it
