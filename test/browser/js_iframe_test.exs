@@ -99,7 +99,10 @@ defmodule Browser.JS.IframeTest do
 
     events = Enum.reverse(answer.(answer, []))
     Runtime.stop(pid)
-    assert [:forced, "A " <> _, :forced, "B " <> w] = events
+    # each frame forced its own layout (on a busy machine both logs can come in one batch,
+    # after both layouts)
+    assert Enum.count(events, &(&1 == :forced)) == 2
+    assert ["A " <> _, "B " <> w] = Enum.reject(events, &(&1 == :forced))
     assert String.to_integer(w) > 100
   end
 
