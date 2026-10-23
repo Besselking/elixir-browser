@@ -10,14 +10,15 @@ defmodule Browser.NetLog do
   received), `:ms` (how long it took), `:source` (`:network`, `:cache` for a fresh cached
   copy, `:revalidated` for a cached copy the server confirmed, `:error`), `:error`,
   `:request_headers`, `:response_headers` (lists of `{name, value}`) and `:initiator` (the
-  address of the page that asked, nil for the address bar). The log keeps the newest #{500}.
-  The log is shared by all tabs.
+  address of the page that asked, nil for the address bar) and `:tab` (the id of the tab that
+  made the request, see `put_tab/1`, nil when unknown). The log keeps the newest #{2000}, of all
+  tabs; the network window shows the entries of one tab.
   """
 
   use Agent
 
   @table :browser_net_log
-  @keep 500
+  @keep 2000
 
   @doc false
   def start_link(_) do
@@ -30,11 +31,43 @@ defmodule Browser.NetLog do
     )
   end
 
+  @doc """
+  Names the tab that the calling process works for: what it requests is logged for that tab.
+  A process started by a `Task` of such a process (a `Task.async_stream` job) works for the
+  same tab; one made with `spawn` takes it on with `tag/2`.
+  """
+  def put_tab(tab), do: Process.put(:net_tab, tab)
+
+  @doc "The tab that the calling process works for (see `put_tab/1`), or nil."
+  def tab do
+    case Process.get(:net_tab) do
+      nil -> Enum.find_value(Process.get(:"$callers", []), &caller_tab/1)
+      tab -> tab
+    end
+  end
+
+  defp caller_tab(pid) do
+    with {:dictionary, dict} <- Process.info(pid, :dictionary),
+         {:net_tab, tab} when tab != nil <- List.keyfind(dict, :net_tab, 0) do
+      tab
+    else
+      _ -> nil
+    end
+  end
+
+  @doc "Wraps `fun` so that the process that runs it works for `tab` (for `spawn` and `Task.start`)."
+  def tag(tab, fun) do
+    fn ->
+      put_tab(tab)
+      fun.()
+    end
+  end
+
   @doc "Adds an entry (a map without `:seq`); returns its number."
   @spec add(map) :: pos_integer | nil
   def add(entry) do
     seq = :ets.update_counter(@table, :n, {2, 1}, {:n, 0})
-    :ets.insert(@table, {seq, Map.put(entry, :seq, seq)})
+    :ets.insert(@table, {seq, entry |> Map.put(:seq, seq) |> Map.put_new(:tab, tab())})
 
     :ets.select_delete(@table, [
       {{:"$1", :_}, [{:is_integer, :"$1"}, {:"=<", :"$1", seq - @keep}], [true]}
@@ -46,11 +79,17 @@ defmodule Browser.NetLog do
     ArgumentError -> nil
   end
 
-  @doc "The entries after `seq`, oldest first."
-  @spec since(non_neg_integer) :: [map]
-  def since(seq) do
-    spec = [{{:"$1", :"$2"}, [{:is_integer, :"$1"}, {:>, :"$1", seq}], [:"$2"]}]
-    :ets.select(@table, spec)
+  @doc "The entries after `seq`, oldest first; of the tab `tab` only, unless it is `:all`."
+  @spec since(non_neg_integer, term) :: [map]
+  def since(seq, tab \\ :all) do
+    guards = [{:is_integer, :"$1"}, {:>, :"$1", seq}]
+
+    guards =
+      if tab == :all,
+        do: guards,
+        else: guards ++ [{:"=:=", {:map_get, :tab, :"$2"}, {:const, tab}}]
+
+    :ets.select(@table, [{{:"$1", :"$2"}, guards, [:"$2"]}])
   rescue
     ArgumentError -> []
   end
@@ -77,9 +116,16 @@ defmodule Browser.NetLog do
     ArgumentError -> nil
   end
 
-  @doc "Forgets the entries; the numbering goes on."
-  def clear do
-    :ets.select_delete(@table, [{{:"$1", :_}, [{:is_integer, :"$1"}], [true]}])
+  @doc "Forgets the entries (of the tab `tab` only, unless it is `:all`); the numbering goes on."
+  def clear(tab \\ :all) do
+    guards = [{:is_integer, :"$1"}]
+
+    guards =
+      if tab == :all,
+        do: guards,
+        else: guards ++ [{:"=:=", {:map_get, :tab, :"$2"}, {:const, tab}}]
+
+    :ets.select_delete(@table, [{{:"$1", :"$2"}, guards, [true]}])
     :ok
   rescue
     ArgumentError -> :ok

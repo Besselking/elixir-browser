@@ -126,7 +126,13 @@ defmodule Browser.Prefetch do
       started
     else
       me = self()
-      spawn(fn -> send(me, {__MODULE__, url, Fetch.load(url, initiator: base)}) end)
+
+      spawn(
+        Browser.NetLog.tag(Browser.NetLog.tab(), fn ->
+          send(me, {__MODULE__, url, Fetch.load(url, initiator: base)})
+        end)
+      )
+
       MapSet.put(started, url)
     end
   end

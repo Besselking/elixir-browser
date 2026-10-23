@@ -52,6 +52,8 @@ defmodule Browser.Media.Player do
   # opts: :url (of the video), :base (the page's address), :owner
   @impl true
   def init(opts) do
+    Browser.NetLog.put_tab(opts[:tab])
+
     state = %{
       url: opts[:url],
       base: opts[:base],

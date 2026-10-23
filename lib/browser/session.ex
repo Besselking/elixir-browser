@@ -248,7 +248,13 @@ defmodule Browser.Session do
     UI.set_status(state.ui, "Loading #{url}…")
     state = %{state | loading: {url, mode, fetch_opts}}
     env = env(state)
-    Task.start(fn -> send(me, {:loaded, nonce, url, mode, Page.load(url, env, fetch_opts)}) end)
+
+    Task.start(
+      Browser.NetLog.tag(state.tid, fn ->
+        send(me, {:loaded, nonce, url, mode, Page.load(url, env, fetch_opts)})
+      end)
+    )
+
     publish_tabs(%{state | nonce: nonce})
   end
 
@@ -2621,6 +2627,7 @@ defmodule Browser.Session do
         height: UI.client_height(state.ui),
         history_before: length(state.history.back),
         popup: state.popup && state.popup.id,
+        tab: state.tid,
         layout_now: true,
         fetch: &Fetch.load(&1, initiator: initiator),
         request: &Fetch.load(&1, [initiator: initiator] ++ &2),
@@ -3209,12 +3216,14 @@ defmodule Browser.Session do
     me = self()
     initiator = state.url
 
-    Task.start(fn ->
-      send(
-        me,
-        {:downloaded, Download.save(url, name, data, &Fetch.load(&1, initiator: initiator))}
-      )
-    end)
+    Task.start(
+      Browser.NetLog.tag(state.tid, fn ->
+        send(
+          me,
+          {:downloaded, Download.save(url, name, data, &Fetch.load(&1, initiator: initiator))}
+        )
+      end)
+    )
 
     state
   end
@@ -3267,6 +3276,7 @@ defmodule Browser.Session do
                  url: url,
                  base: page.base || state.url,
                  owner: self(),
+                 tab: state.tid,
                  preload: opts[:preload] || false,
                  loop: List.keymember?(Page.media_attrs(page, nid) || [], "loop", 0)
                ) do
@@ -3451,18 +3461,20 @@ defmodule Browser.Session do
       nonce = state.nonce
       base = page.base || page.url
 
-      Task.start(fn ->
-        urls
-        |> Task.async_stream(
-          fn url -> send(me, {:image, nonce, url, Images.fetch(url, base)}) end,
-          max_concurrency: 6,
-          timeout: 20_000,
-          on_timeout: :kill_task
-        )
-        |> Stream.run()
+      Task.start(
+        Browser.NetLog.tag(state.tid, fn ->
+          urls
+          |> Task.async_stream(
+            fn url -> send(me, {:image, nonce, url, Images.fetch(url, base)}) end,
+            max_concurrency: 6,
+            timeout: 20_000,
+            on_timeout: :kill_task
+          )
+          |> Stream.run()
 
-        send(me, {:images_done, nonce, urls})
-      end)
+          send(me, {:images_done, nonce, urls})
+        end)
+      )
     end
 
     state
@@ -4218,12 +4230,16 @@ defmodule Browser.Session do
 
   defp open_net(%{net: nil} = state) do
     win = Browser.NetworkWindow.new(state.ui.frame)
-    open_net(%{state | net: %{win: win, seq: 0, filter: "", rows: [], ticking: false}})
+
+    open_net(%{
+      state
+      | net: %{win: win, tid: state.tid, seq: 0, filter: "", rows: [], ticking: false}
+    })
   end
 
   defp open_net(%{net: n} = state) do
     Browser.NetworkWindow.show(n.win)
-    net_schedule(%{state | net: net_refresh(n)})
+    net_schedule(%{state | net: net_refresh(n, state.tid)})
   end
 
   # (`ticking`: a tick is on its way, so there is no need for another)
@@ -4241,12 +4257,20 @@ defmodule Browser.Session do
     state = %{state | net: %{n | ticking: false}}
 
     if Browser.NetworkWindow.shown?(n.win),
-      do: net_schedule(%{state | net: net_refresh(state.net)}),
+      do: net_schedule(%{state | net: net_refresh(state.net, state.tid)}),
       else: state
   end
 
-  defp net_refresh(n) do
-    case Browser.NetLog.since(n.seq) do
+  # (the window shows the requests of the tab that is shown: another tab starts the list again)
+  defp net_refresh(%{tid: tid} = n, tid), do: net_refresh_tab(n, tid)
+
+  defp net_refresh(n, tid) do
+    Browser.NetworkWindow.clear(n.win)
+    net_refresh_tab(%{n | tid: tid, seq: 0, rows: []}, tid)
+  end
+
+  defp net_refresh_tab(n, tid) do
+    case Browser.NetLog.since(n.seq, tid) do
       [] ->
         n
 
@@ -4260,9 +4284,9 @@ defmodule Browser.Session do
   defp clear_net(%{net: nil} = state), do: state
 
   defp clear_net(%{net: n} = state) do
-    Browser.NetLog.clear()
+    Browser.NetLog.clear(state.tid)
     Browser.NetworkWindow.clear(n.win)
-    %{state | net: %{n | seq: Browser.NetLog.last_seq(), rows: []}}
+    %{state | net: %{n | tid: state.tid, seq: Browser.NetLog.last_seq(), rows: []}}
   end
 
   # the list is made again from the whole log when the filter changes
@@ -4271,7 +4295,7 @@ defmodule Browser.Session do
   defp refilter_net(%{net: n} = state) do
     Browser.NetworkWindow.clear(n.win)
     filter = Browser.NetworkWindow.filter_text(n.win)
-    %{state | net: net_refresh(%{n | seq: 0, rows: [], filter: filter})}
+    %{state | net: net_refresh(%{n | seq: 0, rows: [], filter: filter}, state.tid)}
   end
 
   defp select_net(%{net: nil} = state, _), do: state
@@ -4499,7 +4523,7 @@ defmodule Browser.Session do
     for tab <- [state | state.tabs],
         url = tab_icon(tab),
         url != nil and TabStrip.want_icon(url),
-        do: fetch_icon(url, tab.page.url)
+        do: fetch_icon(url, tab.page.url, tab.tid)
 
     UI.set_tabs(state.ui, titles, state.active)
     state
@@ -4509,9 +4533,14 @@ defmodule Browser.Session do
   defp tab_icon(_), do: nil
 
   # icons are fetched once per address, for every tab that shows them
-  defp fetch_icon(url, page_url) do
+  defp fetch_icon(url, page_url, tid) do
     me = self()
-    Task.start(fn -> send(me, {:favicon, url, Browser.Favicon.fetch(url, page_url)}) end)
+
+    Task.start(
+      Browser.NetLog.tag(tid, fn ->
+        send(me, {:favicon, url, Browser.Favicon.fetch(url, page_url)})
+      end)
+    )
   end
 
   # the tab is left: what was running for it stops, and the rest is put away
@@ -4667,6 +4696,7 @@ defmodule Browser.Session do
         height: UI.client_height(state.ui),
         history_before: history_before,
         popup: state.popup && state.popup.id,
+        tab: tab.tid,
         layout_now: false,
         hidden: true,
         fetch: &Fetch.load(&1, initiator: initiator),
@@ -4740,7 +4770,13 @@ defmodule Browser.Session do
     me = self()
     ref = make_ref()
     env = env(state)
-    Task.start(fn -> send(me, {:loaded, ref, url, :push, Page.load(url, env, opts)}) end)
+
+    Task.start(
+      Browser.NetLog.tag(tab.tid, fn ->
+        send(me, {:loaded, ref, url, :push, Page.load(url, env, opts)})
+      end)
+    )
+
     publish_tabs(%{state | tabs: state.tabs ++ [tab], jobs: Map.put(state.jobs, ref, tab.tid)})
   end
 
