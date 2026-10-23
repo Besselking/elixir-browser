@@ -96,6 +96,32 @@ defmodule Browser.NetLogTest do
     refute Enum.map(NetLog.since(a), & &1.seq) |> Enum.member?(a)
   end
 
+  test "entries carry the tab of the process that made them" do
+    t1 = make_ref()
+    t2 = make_ref()
+    seq = NetLog.last_seq()
+
+    NetLog.tag(t1, fn -> NetLog.add(%{url: "http://tabs.test/1"}) end).()
+    NetLog.tag(t2, fn -> NetLog.add(%{url: "http://tabs.test/2"}) end).()
+
+    inherited =
+      NetLog.tag(t1, fn ->
+        ["x"]
+        |> Task.async_stream(fn _ -> NetLog.add(%{url: "http://tabs.test/3"}) end)
+        |> Enum.to_list()
+      end).()
+
+    assert [{:ok, _}] = inherited
+    urls = fn tab -> NetLog.since(seq, tab) |> Enum.map(& &1.url) end
+    assert urls.(t1) == ["http://tabs.test/1", "http://tabs.test/3"]
+    assert urls.(t2) == ["http://tabs.test/2"]
+    assert length(urls.(:all)) >= 3
+
+    NetLog.clear(t1)
+    assert urls.(t1) == []
+    assert urls.(t2) == ["http://tabs.test/2"]
+  end
+
   test "request types come from the content type or the file name" do
     assert NetLog.type(:document, [], "http://t.test/") == "document"
     assert NetLog.type(:fetch, [{"content-type", "text/html"}], "http://t.test/") == "fetch"
