@@ -646,32 +646,22 @@ defmodule Browser.UI do
     end
   end
 
-  # wx accepts any face name and quietly shows its default font for one that is not installed,
-  # so a font exists when text in it is not as wide as in a face that cannot exist
-  @probe "The quick brown fox jumps over the lazy dog 0123456789 WMiIl"
-
+  # wx 3.3 makes a font with an unknown face name invalid, and measuring text with an invalid
+  # font asserts (and later corrupts memory on macOS), so ask the font only, never measure
   defp installed?(name) do
     key = {__MODULE__, :installed, String.downcase(name)}
 
     case :persistent_term.get(key, nil) do
       nil ->
-        result = probe_width(name) != probe_width("no such font \u2603")
+        f = :wxFont.new(40, @wx_default, @wx_normal, :wxe_util.get_const(:wxFONTWEIGHT_NORMAL))
+        result = :wxFont.setFaceName(f, String.to_charlist(name)) and :wxFont.isOk(f)
+        :wxFont.destroy(f)
         :persistent_term.put(key, result)
         result
 
       result ->
         result
     end
-  end
-
-  defp probe_width(face) do
-    dc = :wxScreenDC.new()
-    f = :wxFont.new(40, @wx_default, @wx_normal, :wxe_util.get_const(:wxFONTWEIGHT_NORMAL))
-    :wxFont.setFaceName(f, String.to_charlist(face))
-    :wxDC.setFont(dc, f)
-    {w, _} = :wxDC.getTextExtent(dc, String.to_charlist(@probe))
-    :wxScreenDC.destroy(dc)
-    w
   end
 
   # wx's "teletype" family alone can mean Courier; the system's own fixed-width font is what
