@@ -769,6 +769,7 @@ defmodule Browser.UI do
   defp paint(panel) do
     dc = :wxPaintDC.new(panel)
     paint_dc(dc)
+    zen_paint(dc, panel)
     :wxPaintDC.destroy(dc)
     :ok
   end
@@ -1876,12 +1877,13 @@ defmodule Browser.UI do
   @zen_edge_color {140, 140, 140}
   @zen_grab 5
   @zen_min {240, 160}
+  @zen_handle {64, 14}
 
   @doc """
   Zen mode: the page moves into a second window with no title bar, tab strip, address bar or
-  status bar. A thin border surrounds the page. Three things remain: a red close button (top
-  left on macOS, top right elsewhere), a handle at the top middle to move the window (open
-  hand, closed while dragging), and the edges of the window, which resize it. The same
+  status bar. A thin border surrounds the page. Three things remain, all drawn over the page
+  (see `zen_paint/2`): a red close button (top left on macOS, top right elsewhere), a handle at
+  the top middle to move the window, and the edges of the window, which resize it. The same
   shortcut (and View > Exit Zen Mode) brings the normal window back. Returns the new UI.
   """
   def toggle_zen(%{zen: nil} = ui), do: enter_zen(ui)
@@ -1902,12 +1904,9 @@ defmodule Browser.UI do
 
     :wxWindow.setBackgroundColour(zen, @zen_edge_color)
 
-    # the panel leaves the normal window's sizer for the zen window's
+    # the panel leaves the normal window's sizer; the zen window places it itself
     :wxSizer.detach(:wxWindow.getSizer(home), panel)
     true = :wxWindow.reparent(panel, zen)
-    col = :wxBoxSizer.new(@vertical)
-    :wxSizer.add(col, panel, proportion: 1, flag: @expand + @all, border: @zen_border)
-    :wxWindow.setSizer(zen, col)
 
     :wxFrame.setMenuBar(zen, zen_menubar())
     :wxFrame.connect(zen, :close_window)
@@ -1915,27 +1914,28 @@ defmodule Browser.UI do
 
     if :ets.whereis(@zen_drag) == :undefined, do: :ets.new(@zen_drag, [:named_table, :public])
     :ets.delete_all_objects(@zen_drag)
+    :ets.insert(@zen_drag, {:active})
+    zen_edges(zen, panel, self())
 
-    close = zen_close_button(zen)
-    handle = zen_handle(zen)
-    zen_edges(zen, [zen, panel])
+    place = fn ->
+      {cw, ch} = :wxWindow.getClientSize(zen)
+      :wxWindow.move(panel, {@zen_border, @zen_border})
+      :wxWindow.setSize(panel, {max(cw - 2 * @zen_border, 1), max(ch - 2 * @zen_border, 1)})
+    end
 
-    place = fn -> zen_place(zen, close, handle) end
     :wxFrame.connect(zen, :size, callback: fn _ev, _obj -> place.() end)
-
     :wxFrame.show(zen)
     :wxFrame.hide(home)
     place.()
-    :wxWindow.layout(zen)
     :wxWindow.setFocus(panel)
     :wxWindow.refresh(panel)
     %{ui | zen: zen}
   end
 
   defp exit_zen(%{frame: home, panel: panel, zen: zen} = ui) do
+    :ets.delete_all_objects(@zen_drag)
     {x, y} = :wxWindow.getPosition(zen)
     {w, h} = :wxWindow.getSize(zen)
-    :wxSizer.detach(:wxWindow.getSizer(zen), panel)
     true = :wxWindow.reparent(panel, home)
     # the panel was the third item of the normal window's column (tab strip, address bar, page)
     :wxSizer.insert(:wxWindow.getSizer(home), 2, panel, proportion: 1, flag: @expand)
@@ -1943,6 +1943,7 @@ defmodule Browser.UI do
     :wxWindow.setSize(home, {w, h})
     :wxFrame.show(home)
     :wxWindow.layout(home)
+    :wxWindow.setCursor(panel, :wxCursor.new(1))
     :wxWindow.setFocus(panel)
     :wxWindow.refresh(panel)
     :wxFrame.destroy(zen)
@@ -1966,221 +1967,166 @@ defmodule Browser.UI do
 
   defp mac?, do: match?({:unix, :darwin}, :os.type())
 
-  # the controls float over the page
-  defp zen_place(zen, close, handle) do
-    {w, _h} = :wxWindow.getClientSize(zen)
-    :wxWindow.move(close, if(mac?(), do: {8, 8}, else: {w - 24, 8}))
-    :wxWindow.move(handle, {div(w - 64, 2), 0})
-    for c <- [close, handle], do: :wxWindow.raise(c)
-    :ok
-  end
+  # the middle of the close button, in panel coordinates
+  defp zen_close_at(pw), do: {if(mac?(), do: 14, else: pw - 14), 14}
 
-  # The red button of macOS (a cross shows while the pointer is over it), drawn here because
-  # the glyph of a native button does not show on every toolkit.
-  defp zen_close_button(zen) do
-    close = :wxPanel.new(zen, size: {16, 16})
-    :wxWindow.setBackgroundStyle(close, :wxe_util.get_const(:wxBG_STYLE_PAINT))
-    :wxWindow.setToolTip(close, ~c"Close")
-    me = self()
+  # The close button (the red circle of macOS; a cross shows while the pointer is over it) and
+  # the handle (a bar hanging from the top edge, rounded at the bottom) are drawn over the
+  # page, so their corners show the page.
+  defp zen_paint(dc, panel) do
+    if :ets.whereis(@zen_drag) != :undefined and :ets.lookup(@zen_drag, :active) != [] do
+      :wxDC.setDeviceOrigin(dc, 0, 0)
+      {pw, _} = :wxWindow.getClientSize(panel)
+      {hw, hh} = @zen_handle
+      hx = div(pw - hw, 2)
 
-    :wxPanel.connect(close, :paint,
-      callback: fn _ev, _obj ->
-        dc = :wxPaintDC.new(close)
-        :wxDC.setBackground(dc, :wxBrush.new({255, 255, 255}))
-        :wxDC.clear(dc)
-        :wxDC.setBrush(dc, :wxBrush.new({255, 95, 87}))
-        :wxDC.setPen(dc, :wxPen.new({224, 68, 62}, width: 1))
-        :wxDC.drawCircle(dc, {8, 8}, 6)
+      :wxDC.setBrush(dc, :wxBrush.new({232, 232, 232}))
+      :wxDC.setPen(dc, :wxPen.new({200, 200, 200}, width: 1))
+      :wxDC.drawRoundedRectangle(dc, {hx, -10}, {hw, hh + 10}, 8.0)
+      :wxDC.setBrush(dc, :wxBrush.new({150, 150, 150}))
+      :wxDC.setPen(dc, :wxPen.new({150, 150, 150}, width: 1))
+      :wxDC.drawRoundedRectangle(dc, {hx + 16, 5}, {32, 4}, 2.0)
 
-        if :ets.lookup(@zen_drag, :over_close) != [] do
-          :wxDC.setPen(dc, :wxPen.new({100, 10, 6}, width: 1))
-          :wxDC.drawLine(dc, {5, 5}, {11, 11})
-          :wxDC.drawLine(dc, {11, 5}, {5, 11})
-        end
+      {cx, cy} = zen_close_at(pw)
+      :wxDC.setBrush(dc, :wxBrush.new({255, 95, 87}))
+      :wxDC.setPen(dc, :wxPen.new({224, 68, 62}, width: 1))
+      :wxDC.drawCircle(dc, {cx, cy}, 6)
 
-        :wxPaintDC.destroy(dc)
+      if :ets.lookup(@zen_drag, :over_close) != [] do
+        :wxDC.setPen(dc, :wxPen.new({100, 10, 6}, width: 1))
+        :wxDC.drawLine(dc, {cx - 3, cy - 3}, {cx + 3, cy + 3})
+        :wxDC.drawLine(dc, {cx + 3, cy - 3}, {cx - 3, cy + 3})
       end
-    )
-
-    :wxPanel.connect(close, :enter_window,
-      callback: fn _ev, _obj ->
-        :ets.insert(@zen_drag, {:over_close})
-        :wxWindow.refresh(close)
-      end
-    )
-
-    :wxPanel.connect(close, :leave_window,
-      callback: fn _ev, _obj ->
-        :ets.delete(@zen_drag, :over_close)
-        :wxWindow.refresh(close)
-      end
-    )
-
-    :wxPanel.connect(close, :left_up, callback: fn _ev, _obj -> send(me, :zen_close) end)
-    close
-  end
-
-  # a short bar at the top middle: drag it to move the window
-  defp zen_handle(zen) do
-    handle = :wxPanel.new(zen, size: {64, 12})
-    :wxWindow.setBackgroundStyle(handle, :wxe_util.get_const(:wxBG_STYLE_PAINT))
-    :wxWindow.setToolTip(handle, ~c"Drag to move the window")
-    {open, closed} = {hand_cursor(false), hand_cursor(true)}
-    :wxWindow.setCursor(handle, open)
-
-    :wxPanel.connect(handle, :paint,
-      callback: fn _ev, _obj ->
-        dc = :wxPaintDC.new(handle)
-        :wxDC.setBackground(dc, :wxBrush.new({232, 232, 232}))
-        :wxDC.clear(dc)
-        :wxDC.setBrush(dc, :wxBrush.new({150, 150, 150}))
-        :wxDC.setPen(dc, :wxPen.new({150, 150, 150}, width: 1))
-        :wxDC.drawRoundedRectangle(dc, {16, 4}, {32, 4}, 2)
-        :wxPaintDC.destroy(dc)
-      end
-    )
-
-    :wxPanel.connect(handle, :left_down,
-      callback: fn _ev, _obj ->
-        :ets.insert(
-          @zen_drag,
-          {:move, :wx_misc.getMousePosition(), :wxWindow.getPosition(zen)}
-        )
-
-        :wxWindow.setCursor(handle, closed)
-        :wxWindow.captureMouse(handle)
-      end
-    )
-
-    :wxPanel.connect(handle, :left_up,
-      callback: fn _ev, _obj ->
-        if :wxWindow.hasCapture(handle), do: :wxWindow.releaseMouse(handle)
-        :ets.delete(@zen_drag, :move)
-        :wxWindow.setCursor(handle, open)
-      end
-    )
-
-    :wxPanel.connect(handle, :motion,
-      callback: fn _ev, _obj ->
-        case :ets.lookup(@zen_drag, :move) do
-          [{_, {mx0, my0}, {x0, y0}}] ->
-            {mx, my} = :wx_misc.getMousePosition()
-            :wxWindow.move(zen, {x0 + mx - mx0, y0 + my - my0})
-
-          [] ->
-            :ok
-        end
-      end
-    )
-
-    handle
-  end
-
-  # An open and a closed hand, drawn as black shapes with white ones on top (so the shapes
-  # merge into one outline). The pink background is the mask.
-  defp hand_cursor(closed?), do: :wxCursor.new(hand_image(closed?))
-
-  @doc false
-  def hand_image(closed?) do
-    {fingers, palm, thumb} =
-      if closed? do
-        {[{9, 10, 3, 6, 1}, {13, 9, 3, 7, 1}, {17, 9, 3, 7, 1}, {21, 10, 3, 6, 1}],
-         [{8, 13, 17, 12, 5}], [{5, 15, 6, 5, 2}]}
-      else
-        {[{9, 6, 3, 14, 1}, {13, 3, 3, 17, 1}, {17, 3, 3, 17, 1}, {21, 6, 3, 14, 1}],
-         [{9, 15, 15, 12, 4}], [{4, 16, 7, 5, 2}]}
-      end
-
-    shapes = fingers ++ palm ++ thumb
-    bmp = :wxBitmap.new(32, 32)
-    dc = :wxMemoryDC.new(bmp)
-    :wxDC.setBackground(dc, :wxBrush.new({255, 0, 255}))
-    :wxDC.clear(dc)
-
-    for {colour, grow} <- [{{0, 0, 0}, 1}, {{255, 255, 255}, 0}] do
-      :wxDC.setPen(dc, :wxPen.new(colour, width: 1))
-      :wxDC.setBrush(dc, :wxBrush.new(colour))
-
-      for {x, y, w, h, r} <- shapes,
-          do:
-            :wxDC.drawRoundedRectangle(
-              dc,
-              {x - grow, y - grow},
-              {w + 2 * grow, h + 2 * grow},
-              r + grow * 1.0
-            )
     end
-
-    :wxMemoryDC.destroy(dc)
-    img = :wxBitmap.convertToImage(bmp)
-
-    # (the smoothed edges of the shapes blend with the pink: make those pixels pink too)
-    data =
-      for <<r, g, b <- :wxImage.getData(img)>>, into: <<>> do
-        if min(r, b) - g > 40, do: <<255, 0, 255>>, else: <<r, g, b>>
-      end
-
-    :wxImage.setData(img, data)
-    :wxImage.setMaskColour(img, 255, 0, 255)
-    :wxImage.setOption(img, ~c"wxIMAGE_OPTION_CUR_HOTSPOT_X", 16)
-    :wxImage.setOption(img, ~c"wxIMAGE_OPTION_CUR_HOTSPOT_Y", 14)
-    img
   end
 
-  # Resizing: a border of the zen window, and a few pixels of the page next to it, resize the
-  # window when dragged (a borderless window has no native edges). `windows` are the zen frame
-  # and its page panel.
-  defp zen_edges(zen, windows) do
-    for win <- windows, kind <- [:down, :up, :motion] do
-      event = %{down: :left_down, up: :left_up, motion: :motion}[kind]
+  # What the pointer is over: :close, :handle, `{:edge, edges}` (a border of the zen window, or
+  # a few pixels of the page next to it, resize it) or nil. `{px, py}` is in panel coordinates,
+  # `{fx, fy}` in zen window coordinates.
+  defp zen_zone({px, py}, pw, {fx, fy}, {w, h}) do
+    {cx, cy} = zen_close_at(pw)
+    {hw, hh} = @zen_handle
+    hx = div(pw - hw, 2)
 
+    cond do
+      (px - cx) * (px - cx) + (py - cy) * (py - cy) <= 64 -> :close
+      px >= hx and px < hx + hw and py >= 0 and py < hh -> :handle
+      true -> if (e = zen_edge_at({fx, fy}, w, h)) != [], do: {:edge, e}
+    end
+  end
+
+  # The mouse events of the zen window and its page. Events on the close button, the handle
+  # and the edges are handled here and go no further; anything else goes on to the page.
+  # (The callbacks run in the wx thread, so what a drag needs is kept in an ETS table.)
+  defp zen_edges(zen, panel, me) do
+    for win <- [zen, panel],
+        {kind, event} <- [down: :left_down, up: :left_up, motion: :motion, leave: :leave_window] do
       :wxEvtHandler.connect(win, event,
-        callback: fn _ev, obj -> zen_edge_event(kind, zen, win, obj) end
+        callback: fn _ev, obj -> zen_event(kind, zen, panel, win, me, obj) end
       )
     end
 
     :ok
   end
 
-  defp zen_edge_event(kind, zen, win, obj) do
+  defp zen_event(:leave, zen, panel, _win, _me, obj) do
+    # (while a drag holds the mouse, the pointer is outside by design)
+    if :ets.lookup(@zen_drag, :move) == [] and :ets.lookup(@zen_drag, :edge) == [],
+      do: zen_hover(zen, panel, nil)
+
+    :wxEvent.skip(obj)
+  end
+
+  defp zen_event(kind, zen, panel, win, me, obj) do
     {mx, my} = :wx_misc.getMousePosition()
     {fx, fy} = :wxWindow.getPosition(zen)
     {w, h} = :wxWindow.getSize(zen)
-    over = zen_edge_at({mx - fx, my - fy}, w, h)
-    drag = :ets.lookup(@zen_drag, :edge)
+    {pw, _} = :wxWindow.getClientSize(panel)
+    zone = zen_zone(:wxWindow.screenToClient(panel, {mx, my}), pw, {mx - fx, my - fy}, {w, h})
+    move = :ets.lookup(@zen_drag, :move)
+    edge = :ets.lookup(@zen_drag, :edge)
 
-    case {kind, drag, over} do
-      {:down, _, [_ | _]} ->
-        :ets.insert(@zen_drag, {:edge, over, {mx, my}, {fx, fy}, {w, h}})
+    case {kind, move, edge, zone} do
+      {:down, _, _, :handle} ->
+        :ets.insert(@zen_drag, {:move, {mx, my}, {fx, fy}})
         :wxWindow.captureMouse(win)
 
-      {:motion, [{_, edges, {mx0, my0}, {x0, y0}, {w0, h0}}], _} ->
-        {min_w, min_h} = @zen_min
-        {dx, dy} = {mx - mx0, my - my0}
-        {x, w} = zen_axis(:l in edges, :r in edges, x0, w0, dx, min_w)
-        {y, h} = zen_axis(:t in edges, :b in edges, y0, h0, dy, min_h)
-        :wxWindow.setSize(zen, x, y, w, h)
+      {:down, _, _, {:edge, edges}} ->
+        :ets.insert(@zen_drag, {:edge, edges, {mx, my}, {fx, fy}, {w, h}})
+        :wxWindow.captureMouse(win)
 
-      {:up, [_], _} ->
+      {:down, _, _, :close} ->
+        :ok
+
+      {:up, [_], _, _} ->
+        if :wxWindow.hasCapture(win), do: :wxWindow.releaseMouse(win)
+        :ets.delete(@zen_drag, :move)
+
+      {:up, _, [_], _} ->
         if :wxWindow.hasCapture(win), do: :wxWindow.releaseMouse(win)
         :ets.delete(@zen_drag, :edge)
 
-      {:motion, [], [_ | _]} ->
-        :ets.insert(@zen_drag, {{:cursor_on, win}})
-        :wxWindow.setCursor(win, edge_cursor(over))
-        :wxEvent.skip(obj)
+      {:up, _, _, :close} ->
+        send(me, :zen_close)
 
-      {:motion, [], []} ->
-        # (the page sets its own cursor again when the pointer moves over a link or text)
-        if :ets.take(@zen_drag, {:cursor_on, win}) != [],
-          do: :wxWindow.setCursor(win, :wxCursor.new(1))
+      {:motion, [{_, {mx0, my0}, {x0, y0}}], _, _} ->
+        :wxWindow.move(zen, {x0 + mx - mx0, y0 + my - my0})
 
-        :wxEvent.skip(obj)
+      {:motion, _, [{_, edges, {mx0, my0}, {x0, y0}, {w0, h0}}], _} ->
+        {min_w, min_h} = @zen_min
+        {x, w} = zen_axis(:l in edges, :r in edges, x0, w0, mx - mx0, min_w)
+        {y, h} = zen_axis(:t in edges, :b in edges, y0, h0, my - my0, min_h)
+        :wxWindow.setSize(zen, x, y, w, h)
+
+      {:motion, [], [], zone} ->
+        zen_hover(zen, panel, zone)
+        if zone == nil, do: :wxEvent.skip(obj)
 
       _ ->
         :wxEvent.skip(obj)
     end
   end
+
+  # the cursor and the close button's cross for what the pointer is over; nil puts both back
+  defp zen_hover(zen, panel, zone) do
+    over_close? = :ets.lookup(@zen_drag, :over_close) != []
+
+    cond do
+      zone == :close and not over_close? ->
+        :ets.insert(@zen_drag, {:over_close})
+        :wxWindow.refresh(panel)
+
+      zone != :close and over_close? ->
+        :ets.delete(@zen_drag, :over_close)
+        :wxWindow.refresh(panel)
+
+      true ->
+        :ok
+    end
+
+    case zone do
+      nil ->
+        # (the page sets its own cursor again when the pointer moves over a link or text)
+        if :ets.take(@zen_drag, :cursor_on) != [] do
+          :wxWindow.setCursor(zen, :wxCursor.new(1))
+          :wxWindow.setCursor(panel, :wxCursor.new(1))
+        end
+
+      zone ->
+        :ets.insert(@zen_drag, {:cursor_on})
+        cursor = zen_cursor(zone)
+        :wxWindow.setCursor(zen, cursor)
+        :wxWindow.setCursor(panel, cursor)
+    end
+  end
+
+  defp zen_axis(true, _, start, len, d, min) do
+    len2 = max(len - d, min)
+    {start + len - len2, len2}
+  end
+
+  defp zen_axis(_, true, start, len, d, min), do: {start, max(len + d, min)}
+  defp zen_axis(_, _, start, len, _, _), do: {start, len}
 
   defp zen_edge_at({x, y}, w, h) do
     [
@@ -2192,18 +2138,13 @@ defmodule Browser.UI do
     |> Enum.reject(&is_nil/1)
   end
 
-  # the new start and length on one axis, when its low or high edge is dragged by `d`
-  defp zen_axis(true, _, start, len, d, min) do
-    len2 = max(len - d, min)
-    {start + len - len2, len2}
-  end
+  # The stock cursors of the system: the hand for the handle (wx has no open or closed hand),
+  # arrow for the close button, sizing arrows west-east 21, north-south 19,
+  # northwest-southeast 20, northeast-southwest 18.
+  defp zen_cursor(:handle), do: :wxCursor.new(6)
+  defp zen_cursor(:close), do: :wxCursor.new(1)
 
-  defp zen_axis(_, true, start, len, d, min), do: {start, max(len + d, min)}
-  defp zen_axis(_, _, start, len, _, _), do: {start, len}
-
-  # the stock cursors: size west-east 21, north-south 19, northwest-southeast 20,
-  # northeast-southwest 18
-  defp edge_cursor(edges) do
+  defp zen_cursor({:edge, edges}) do
     id =
       case Enum.sort(edges) do
         e when e in [[:l], [:r]] -> 21

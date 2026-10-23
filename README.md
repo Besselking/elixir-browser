@@ -41,8 +41,8 @@ remain:
 
 - A red close button. It is at the top left on macOS and at the top right on other systems.
   It closes the browser. A cross shows when the pointer is over it.
-- A short handle at the top middle. Drag it to move the window. The pointer is an open hand,
-  and a closed hand while you drag.
+- A short handle at the top middle. Drag it to move the window. The pointer is a hand over
+  the handle.
 - The edges of the window. Drag an edge or a corner to change the size of the window.
 
 To start zen mode, choose View > Zen Mode, or press Cmd+Shift+Z on macOS (Ctrl+Shift+Z on
