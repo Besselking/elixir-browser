@@ -27,6 +27,7 @@ defmodule Browser.Session do
     Scrollers,
     Selection,
     StyleGate,
+    TabStrip,
     TextEdit,
     UI,
     Visits,
@@ -397,6 +398,12 @@ defmodule Browser.Session do
   end
 
   # -- images arriving -------------------------------------------------------
+
+  def handle_info({:favicon, url, result}, state) do
+    bitmap = with {:ok, icon} <- result, do: UI.icon_bitmap(icon), else: (_ -> nil)
+    TabStrip.put_icon(url, bitmap)
+    {:noreply, publish_tabs(state)}
+  end
 
   def handle_info({:image, nonce, url, result}, %{nonce: nonce} = state) do
     info =
@@ -4287,11 +4294,25 @@ defmodule Browser.Session do
       |> Enum.with_index()
       |> Enum.map(fn {tab, i} ->
         tab = if i == state.active, do: state, else: tab
-        {tab_title(tab), tab.loading != nil}
+        {tab_title(tab), tab.loading != nil, tab_icon(tab)}
       end)
+
+    for tab <- [state | state.tabs],
+        url = tab_icon(tab),
+        url != nil and TabStrip.want_icon(url),
+        do: fetch_icon(url, tab.page.url)
 
     UI.set_tabs(state.ui, titles, state.active)
     state
+  end
+
+  defp tab_icon(%{page: %Page{favicon: url}}), do: url
+  defp tab_icon(_), do: nil
+
+  # icons are fetched once per address, for every tab that shows them
+  defp fetch_icon(url, page_url) do
+    me = self()
+    Task.start(fn -> send(me, {:favicon, url, Browser.Favicon.fetch(url, page_url)}) end)
   end
 
   # the tab is left: what was running for it stops, and the rest is put away
