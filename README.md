@@ -105,7 +105,7 @@ A request that came from the cache shows `(cache)`. A request that the server an
 304 shows `304 (cached)`. A failed request shows `(failed)` and the error.
 
 Type text in the Filter box to show only the requests whose address has that text. The Clear
-button empties the list. The list keeps the last 500 requests. It shows the requests of all tabs.
+button empties the list. The list keeps the last 2000 requests. It shows the requests of the current tab only. When you change tab, the list changes to the requests of that tab.
 
 ## Crash reports
 

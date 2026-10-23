@@ -198,6 +198,7 @@ defmodule Browser.JS.Runtime do
   # (the process of a worker boots the same way, with an empty document)
   @doc false
   def boot(raw, info) do
+    Browser.NetLog.put_tab(info[:tab])
     Interp.init(@steps)
     Browser.JS.GC.enable()
 
@@ -1096,9 +1097,12 @@ defmodule Browser.JS.Runtime do
     job = http_job(req)
     id = make_ref()
     rt = self()
+    tab = Browser.NetLog.tab()
     Process.put(:js_http, Map.put(pending_http(), id, {callback, DOM.timer_realm()}))
 
     spawn(fn ->
+      Browser.NetLog.put_tab(tab)
+
       result =
         try do
           job.()
