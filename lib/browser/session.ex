@@ -4383,9 +4383,8 @@ defmodule Browser.Session do
 
   defp finish_tab_drag(state), do: %{back_in_strip(state) | tab_drag: nil}
 
-  # (the cursor and the status text of a drag that left the strip are put back)
+  # (the outline and the status text of a drag that left the strip are taken away)
   defp back_in_strip(%{tab_out: true} = state) do
-    UI.set_tabs_cursor(state.ui, :arrow)
     UI.set_status(state.ui, "")
     UI.set_tab_drag_out(state.ui, nil)
     %{state | tab_out: false}
@@ -4867,7 +4866,6 @@ defmodule Browser.Session do
 
   defp drag_tab(state, _x, y) when y < -@pull_out or y > 30 + @pull_out do
     if not state.tab_out and match?(%{tabs: [_, _ | _], popup: nil}, state) do
-      UI.set_tabs_cursor(state.ui, :hand)
       UI.set_tab_drag_out(state.ui, state.tab_drag)
 
       UI.set_status(

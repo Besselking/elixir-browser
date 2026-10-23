@@ -1939,10 +1939,6 @@ defmodule Browser.UI do
     :wxWindow.setCursor(p, Map.fetch!(cursors, kind))
   end
 
-  @doc "Sets the mouse cursor over the tab strip: `:arrow`, or `:hand` while a tab is dragged out."
-  def set_tabs_cursor(%{tabs: tabs, cursors: cursors}, kind),
-    do: :wxWindow.setCursor(tabs, Map.fetch!(cursors, kind))
-
   @doc "Focuses the address bar with its text selected, so typing replaces it."
   def focus_url(%{url: url}) do
     :wxWindow.setFocus(url)
