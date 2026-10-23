@@ -1890,7 +1890,7 @@ defmodule Browser.Style do
   # `::first-line`: the properties the rule sets that the layout can apply to the text of the
   # first line (as "first-line" in the computed style of a block)
   @first_letter_displays [nil, "block", "list-item", "inline-block", "table-cell", "flow-root"]
-  @first_line_props ~w(color font-weight font-style text-decoration-line)
+  @first_line_props ~w(color font-weight font-style text-decoration-line text-transform letter-spacing)
 
   defp first_line(idx, ctx, computed) do
     with true <- MapSet.member?(Map.get(idx, :pseudo, MapSet.new()), :first_line),

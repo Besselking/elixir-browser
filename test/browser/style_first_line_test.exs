@@ -53,4 +53,18 @@ defmodule Browser.StyleFirstLineTest do
     assert colours["two"] == {0, 170, 0}
     assert colours["three"] == {255, 0, 0}
   end
+
+  test "text-transform and letter-spacing apply to the first line" do
+    text =
+      run("""
+      <style>p::first-line { text-transform: uppercase; letter-spacing: 2px }</style>
+      <p>one two three four five six seven eight</p>
+      """)
+
+    first = Enum.min_by(text, & &1.y).y
+    {on, off} = Enum.split_with(text, &(&1.y == first))
+    assert Enum.all?(on, &(&1.text == String.upcase(&1.text) and &1.ls == 2.0))
+    assert Enum.any?(off, &(&1.text == String.downcase(&1.text)))
+    assert Enum.all?(off, &(&1.ls == 0.0))
+  end
 end
