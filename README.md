@@ -33,6 +33,15 @@ text, except on macOS, where it converts WebP with `sips`. Homebrew's `erlang` i
 wxWidgets 3.2. On macOS (into `~/.local`) and Debian/Ubuntu, `scripts/install-toolchain.sh` builds wxWidgets 3.3 and OTP's `wx` against it (OTP 29.1.1 needs a few
 patches for that, which the script applies).
 
+## Tab icons
+
+Each tab shows the icon of its page at the left of the title. The browser uses the
+`<link rel="icon">` elements of the page. When there are many, it uses the icon with a size
+that is nearest to 32 px. If there is no size, it uses a scalable (SVG) icon, then the last
+icon. If the page has no icon link, the browser gets `/favicon.ico` from the site of the page.
+The browser reads ICO, PNG, GIF, JPEG, BMP, WebP and SVG icons. It gets each icon one time and
+keeps it in the HTTP cache. While a page loads, a blue dot shows in place of the icon.
+
 ## Developer console
 
 Press Cmd+Option+J on macOS, or Ctrl+Shift+J on other systems. You can also choose
